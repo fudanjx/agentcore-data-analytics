@@ -1,51 +1,37 @@
 """Deploy AgentCore POC.
 
-Two resources are created:
-  1. AgentCore Runtime  — hosts the agent container (ECR image).
-  2. AgentCore Endpoint — exposes the runtime for invocation.
-  3. OpenAI wrapper Lambda + API Gateway resource — translates
-     POST /v1/chat/completions → invoke_agent_runtime → OpenAI response.
+Creates/updates:
+  1. IAM role for AgentCore Runtime
+  2. AgentCore Runtime  — hosts the agent container (ECR image) in VPC mode
+  3. AgentCore Endpoint — named endpoint for the runtime
+
+Access is via the EKS proxy (agentcore-proxy pod) — no Lambda or API Gateway involved.
 
 Usage:
-    export ECR_IMAGE_URI=<account>.dkr.ecr.us-east-1.amazonaws.com/agentcore-poc:latest
+    export ECR_IMAGE_URI=<account>.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
+    export RDS_SECRET_ARN=arn:aws:secretsmanager:ap-southeast-1:...
+    export RDS_DB_NAME=nuh-analytics
     python infra/deploy.py
-
-Optional env vars:
-    RDS_SECRET_ARN      Secrets Manager ARN for DB credentials.
-    RDS_DB_NAME         Database name.
-    AWS_DEFAULT_REGION  Region (default: us-east-1).
 """
 
 import json
 import os
 import sys
-import textwrap
 import time
-import zipfile
-from io import BytesIO
 
 import boto3
 
-REGION = os.environ.get("AWS_DEFAULT_REGION", "us-east-1")
+REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 RUNTIME_NAME = "agentcore_poc"
 ENDPOINT_NAME = "agentcore_poc_endpoint"
-WRAPPER_FUNCTION_NAME = "agentcore-poc-openai-wrapper"
-WRAPPER_ROLE_NAME = "agentcore-poc-wrapper-role"
 RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
-API_GW_ID = "eoqmjqt5p1"
-API_GW_STAGE = "prod"
-API_GW_REGION = "us-east-1"  # existing API Gateway lives in us-east-1
-BEDROCK_URL = f"https://bedrock-runtime.{REGION}.amazonaws.com"
 
-# VPC config — private subnets in the same VPC as RDS
-# NAT Gateway in this VPC handles outbound to Bedrock/Secrets Manager (no VPC endpoints needed)
-VPC_SUBNETS = ["subnet-061205c705e0f41d4", "subnet-0466b6e1fbb8a49f3"]  # private subnets 1a + 1b
+# VPC config — private subnets in bot-nuhs-vpc, same VPC as RDS
+VPC_SUBNETS = ["subnet-061205c705e0f41d4", "subnet-0466b6e1fbb8a49f3"]
 VPC_SECURITY_GROUPS = ["sg-07258677b7e691e48"]  # agentcore-poc-runtime-sg
 
-iam = boto3.client("iam", region_name=REGION)
-lambda_client = boto3.client("lambda", region_name=API_GW_REGION)  # wrapper Lambda must be in same region as API GW
+iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
-apigw = boto3.client("apigateway", region_name=API_GW_REGION)
 sts = boto3.client("sts", region_name=REGION)
 
 
@@ -54,11 +40,11 @@ def get_account_id() -> str:
 
 
 # ---------------------------------------------------------------------------
-# IAM helpers
+# IAM
 # ---------------------------------------------------------------------------
 
 def ensure_runtime_role() -> str:
-    """IAM role for the AgentCore Runtime container. Returns ARN."""
+    """Create or update the AgentCore Runtime IAM role. Returns ARN."""
     trust = {
         "Version": "2012-10-17",
         "Statement": [{
@@ -74,9 +60,8 @@ def ensure_runtime_role() -> str:
                 "Effect": "Allow",
                 "Action": ["bedrock:InvokeModel", "bedrock:InvokeModelWithResponseStream"],
                 "Resource": [
-                    # AgentCore runtime region
                     f"arn:aws:bedrock:{REGION}::foundation-model/*",
-                    # Application inference profile (us-east-1) + all 3 regions it routes to
+                    # Application inference profile in us-east-1 + cross-region routing targets
                     "arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/*",
                     "arn:aws:bedrock:us-east-1::foundation-model/*",
                     "arn:aws:bedrock:us-east-2::foundation-model/*",
@@ -104,6 +89,7 @@ def ensure_runtime_role() -> str:
                 "Resource": "*",
             },
             {
+                # Required for VPC mode — AgentCore creates ENIs in the specified subnets
                 "Effect": "Allow",
                 "Action": [
                     "ec2:CreateNetworkInterface",
@@ -119,58 +105,24 @@ def ensure_runtime_role() -> str:
             },
         ],
     }
-    return _upsert_role(RUNTIME_ROLE_NAME, trust, inline, "AgentCore Runtime execution role")
 
-
-def ensure_wrapper_role() -> str:
-    """IAM role for the OpenAI wrapper Lambda. Returns ARN."""
-    trust = {
-        "Version": "2012-10-17",
-        "Statement": [{
-            "Effect": "Allow",
-            "Principal": {"Service": "lambda.amazonaws.com"},
-            "Action": "sts:AssumeRole",
-        }],
-    }
-    inline = {
-        "Version": "2012-10-17",
-        "Statement": [
-            {
-                "Effect": "Allow",
-                "Action": ["bedrock-agentcore:InvokeAgentRuntime"],
-                "Resource": "*",
-            },
-            {
-                "Effect": "Allow",
-                "Action": ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-                "Resource": "arn:aws:logs:*:*:*",
-            },
-        ],
-    }
-    return _upsert_role(WRAPPER_ROLE_NAME, trust, inline, "AgentCore OpenAI wrapper Lambda role", propagate_wait=True)
-
-
-def _upsert_role(name, trust, inline, description, propagate_wait=False) -> str:
     try:
-        arn = iam.get_role(RoleName=name)["Role"]["Arn"]
+        arn = iam.get_role(RoleName=RUNTIME_ROLE_NAME)["Role"]["Arn"]
         print(f"  Role exists: {arn}")
     except iam.exceptions.NoSuchEntityException:
-        print(f"  Creating role {name}...")
+        print(f"  Creating role {RUNTIME_ROLE_NAME}...")
         arn = iam.create_role(
-            RoleName=name,
+            RoleName=RUNTIME_ROLE_NAME,
             AssumeRolePolicyDocument=json.dumps(trust),
-            Description=description,
+            Description="AgentCore Runtime execution role",
         )["Role"]["Arn"]
-        iam.attach_role_policy(
-            RoleName=name,
-            PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole",
-        )
-        if propagate_wait:
-            print("  Waiting for role to propagate...")
-            time.sleep(10)
-    iam.put_role_policy(RoleName=name, PolicyName=f"{name}-inline", PolicyDocument=json.dumps(inline))
-    # Always wait after any policy change — AgentCore validates the role immediately
-    # and fails if IAM hasn't propagated yet.
+
+    iam.put_role_policy(
+        RoleName=RUNTIME_ROLE_NAME,
+        PolicyName=f"{RUNTIME_ROLE_NAME}-inline",
+        PolicyDocument=json.dumps(inline),
+    )
+    # AgentCore validates the role immediately on create/update — wait for IAM propagation
     print("  Waiting for IAM policy to propagate...")
     time.sleep(15)
     return arn
@@ -184,14 +136,12 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
     """Create or update the AgentCore Runtime. Returns runtime ID."""
     env_vars = {
         "AWS_DEFAULT_REGION": REGION,
-        # CLAUDE_CODE_USE_BEDROCK tells the claude subprocess to use Bedrock IAM auth.
-        # The subprocess picks up AWS credentials automatically from the runtime IAM role.
+        # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
         "RDS_SECRET_ARN": os.environ.get("RDS_SECRET_ARN", ""),
         "RDS_DB_NAME": os.environ.get("RDS_DB_NAME", ""),
     }
 
-    # Check if runtime already exists
     existing_id = _find_existing_runtime()
 
     if existing_id:
@@ -248,7 +198,7 @@ def wait_for_runtime(runtime_id: str):
         rt = agentcore_control.get_agent_runtime(agentRuntimeId=runtime_id)
         status = rt["status"]
         if status == "READY":
-            print(f"  Runtime is READY.")
+            print("  Runtime is READY.")
             return
         if "FAILED" in status:
             raise RuntimeError(f"AgentCore Runtime failed: {status}")
@@ -257,8 +207,7 @@ def wait_for_runtime(runtime_id: str):
 
 
 def deploy_runtime_endpoint(runtime_id: str) -> str:
-    """Create or reuse a runtime endpoint. Returns endpoint ARN."""
-    # Check if endpoint already exists
+    """Create or reuse the named runtime endpoint. Returns endpoint ARN."""
     paginator = agentcore_control.get_paginator("list_agent_runtime_endpoints")
     for page in paginator.paginate(agentRuntimeId=runtime_id):
         for ep in page.get("runtimeEndpoints", []):
@@ -279,195 +228,8 @@ def deploy_runtime_endpoint(runtime_id: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# OpenAI wrapper Lambda
-# ---------------------------------------------------------------------------
-
-def _build_wrapper_zip(runtime_arn: str) -> bytes:
-    """Build an in-memory zip containing the wrapper Lambda handler."""
-    source = textwrap.dedent(f"""
-        import json
-        import uuid
-        import boto3
-
-        RUNTIME_ARN = "{runtime_arn}"
-        REGION = "{REGION}"
-
-        client = boto3.client("bedrock-agentcore", region_name=REGION)
-
-
-        def handler(event, context):
-            body = json.loads(event.get("body") or "{{}}")
-            messages = body.get("messages", [])
-            model = body.get("model", "agentcore")
-
-            if not messages:
-                return {{
-                    "statusCode": 400,
-                    "body": json.dumps({{"error": "messages must not be empty"}}),
-                }}
-
-            # Send messages JSON directly — AgentCore passes body straight to container
-            payload = json.dumps({{"messages": messages}}).encode()
-
-            response = client.invoke_agent_runtime(
-                agentRuntimeArn=RUNTIME_ARN,
-                contentType="application/json",
-                accept="application/json",
-                payload=payload,
-            )
-
-            # invoke_agent_runtime returns the response under the "response" key
-            raw = response["response"].read()
-            result_body = json.loads(raw)
-            result_text = result_body.get("result", str(result_body))
-
-            openai_response = {{
-                "id": f"chatcmpl-{{uuid.uuid4().hex[:12]}}",
-                "object": "chat.completion",
-                "model": model,
-                "choices": [{{
-                    "index": 0,
-                    "message": {{"role": "assistant", "content": result_text}},
-                    "finish_reason": "stop",
-                }}],
-                "usage": {{"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
-            }}
-
-            return {{
-                "statusCode": 200,
-                "headers": {{"Content-Type": "application/json"}},
-                "body": json.dumps(openai_response),
-            }}
-    """).lstrip()
-
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        zf.writestr("handler.py", source)
-    return buf.getvalue()
-
-
-def deploy_wrapper_lambda(runtime_arn: str, role_arn: str) -> str:
-    """Deploy the OpenAI wrapper Lambda. Returns function ARN."""
-    zip_bytes = _build_wrapper_zip(runtime_arn)
-
-    try:
-        fn = lambda_client.get_function(FunctionName=WRAPPER_FUNCTION_NAME)
-        fn_arn = fn["Configuration"]["FunctionArn"]
-        print(f"  Updating wrapper Lambda {WRAPPER_FUNCTION_NAME}...")
-        lambda_client.update_function_code(FunctionName=WRAPPER_FUNCTION_NAME, ZipFile=zip_bytes)
-        waiter = lambda_client.get_waiter("function_updated_v2")
-        waiter.wait(FunctionName=WRAPPER_FUNCTION_NAME)
-        lambda_client.update_function_configuration(
-            FunctionName=WRAPPER_FUNCTION_NAME,
-            Timeout=300,
-            MemorySize=256,
-        )
-    except lambda_client.exceptions.ResourceNotFoundException:
-        print(f"  Creating wrapper Lambda {WRAPPER_FUNCTION_NAME}...")
-        response = lambda_client.create_function(
-            FunctionName=WRAPPER_FUNCTION_NAME,
-            Runtime="python3.12",
-            Role=role_arn,
-            Handler="handler.handler",
-            Code={"ZipFile": zip_bytes},
-            Timeout=300,
-            MemorySize=256,
-        )
-        fn_arn = response["FunctionArn"]
-
-    waiter = lambda_client.get_waiter("function_active_v2")
-    waiter.wait(FunctionName=WRAPPER_FUNCTION_NAME)
-    print(f"  Wrapper Lambda ready: {fn_arn}")
-    return fn_arn
-
-
-# ---------------------------------------------------------------------------
-# API Gateway wiring
-# ---------------------------------------------------------------------------
-
-def wire_api_gateway(fn_arn: str, account_id: str) -> str:
-    """Add POST /v1/chat/completions → wrapper Lambda to existing API GW."""
-    resources = apigw.get_resources(restApiId=API_GW_ID)["items"]
-    resource_map = {r["path"]: r["id"] for r in resources}
-    root_id = resource_map["/"]
-
-    def get_or_create(parent_id: str, part: str, path: str) -> str:
-        if path in resource_map:
-            return resource_map[path]
-        r = apigw.create_resource(restApiId=API_GW_ID, parentId=parent_id, pathPart=part)
-        resource_map[path] = r["id"]
-        return r["id"]
-
-    v1_id = get_or_create(root_id, "v1", "/v1")
-    chat_id = get_or_create(v1_id, "chat", "/v1/chat")
-    completions_id = get_or_create(chat_id, "completions", "/v1/chat/completions")
-
-    try:
-        apigw.get_method(restApiId=API_GW_ID, resourceId=completions_id, httpMethod="POST")
-        print("  POST /v1/chat/completions method already exists")
-    except apigw.exceptions.NotFoundException:
-        print("  Creating POST /v1/chat/completions...")
-        apigw.put_method(restApiId=API_GW_ID, resourceId=completions_id, httpMethod="POST", authorizationType="NONE")
-        uri = (
-            f"arn:aws:apigateway:{API_GW_REGION}:lambda:path/2015-03-31/functions/{fn_arn}/invocations"
-        )
-        apigw.put_integration(
-            restApiId=API_GW_ID, resourceId=completions_id,
-            httpMethod="POST", type="AWS_PROXY", integrationHttpMethod="POST", uri=uri,
-        )
-
-    try:
-        lambda_client.add_permission(
-            FunctionName=WRAPPER_FUNCTION_NAME,
-            StatementId="apigw-invoke-agentcore-wrapper",
-            Action="lambda:InvokeFunction",
-            Principal="apigateway.amazonaws.com",
-            SourceArn=f"arn:aws:execute-api:{API_GW_REGION}:{account_id}:{API_GW_ID}/*/*",
-        )
-    except lambda_client.exceptions.ResourceConflictException:
-        pass
-
-    apigw.create_deployment(restApiId=API_GW_ID, stageName=API_GW_STAGE, description="AgentCore wrapper deployment")
-    endpoint = f"https://{API_GW_ID}.execute-api.{API_GW_REGION}.amazonaws.com/{API_GW_STAGE}"
-    print(f"  API endpoint: {endpoint}/v1/chat/completions")
-    return endpoint
-
-
-# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
-
-def deploy_function_url(fn_arn: str) -> str:
-    """Create or retrieve a Lambda Function URL for the wrapper. Returns the URL."""
-    try:
-        resp = lambda_client.get_function_url_config(FunctionName=WRAPPER_FUNCTION_NAME)
-        url = resp["FunctionUrl"]
-        print(f"  Function URL exists: {url}")
-        return url
-    except lambda_client.exceptions.ResourceNotFoundException:
-        pass
-
-    resp = lambda_client.create_function_url_config(
-        FunctionName=WRAPPER_FUNCTION_NAME,
-        AuthType="AWS_IAM",
-    )
-    url = resp["FunctionUrl"]
-
-    # Allow public invocation via the Function URL
-    try:
-        lambda_client.add_permission(
-            FunctionName=WRAPPER_FUNCTION_NAME,
-            StatementId="allow-function-url-public",
-            Action="lambda:InvokeFunctionUrl",
-            Principal="*",
-            FunctionUrlAuthType="NONE",
-        )
-    except lambda_client.exceptions.ResourceConflictException:
-        pass
-
-    print(f"  Function URL: {url}")
-    return url
-
 
 def main():
     image_uri = os.environ.get("ECR_IMAGE_URI")
@@ -491,10 +253,10 @@ def main():
     print("\nDone.")
     print(f"\nAgentCore Runtime ID : {runtime_id}")
     print(f"AgentCore Endpoint   : {endpoint_arn}")
-    print(f"\nAccess via EKS proxy (VPC-internal, no auth):")
-    print(f"  DIFY (in-cluster):     http://agentcore-proxy.agentcore.svc.cluster.local")
+    print(f"\nAccess via EKS proxy (VPC-internal, no auth required):")
+    print(f"  DIFY (in-cluster) :    http://agentcore-proxy.agentcore.svc.cluster.local")
     print(f"  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com")
-    print(f"\nDirect boto3 access:")
+    print(f"\nDirect Python access:")
     print(f"  python3 py_sdk.py \"your question\"")
 
 
