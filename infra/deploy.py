@@ -481,37 +481,21 @@ def main():
     print("1. Ensuring AgentCore Runtime IAM role...")
     runtime_role_arn = ensure_runtime_role()
 
-    print("2. Ensuring OpenAI wrapper IAM role...")
-    wrapper_role_arn = ensure_wrapper_role()
-
-    print("3. Deploying AgentCore Runtime...")
+    print("2. Deploying AgentCore Runtime...")
     runtime_id = deploy_agent_runtime(image_uri, runtime_role_arn)
     wait_for_runtime(runtime_id)
 
-    print("4. Deploying AgentCore endpoint...")
+    print("3. Deploying AgentCore endpoint...")
     endpoint_arn = deploy_runtime_endpoint(runtime_id)
-
-    # invoke_agent_runtime uses the runtime ARN, not the endpoint ARN
-    runtime_arn = f"arn:aws:bedrock-agentcore:{REGION}:{account_id}:runtime/{runtime_id}"
-
-    print("5. Deploying OpenAI wrapper Lambda...")
-    fn_arn = deploy_wrapper_lambda(runtime_arn, wrapper_role_arn)
-
-    print("6. Wiring API Gateway...")
-    api_url = wire_api_gateway(fn_arn, account_id)
-
-    print("7. Creating Lambda Function URL (no 29s API GW timeout limit)...")
-    fn_url = deploy_function_url(fn_arn)
 
     print("\nDone.")
     print(f"\nAgentCore Runtime ID : {runtime_id}")
     print(f"AgentCore Endpoint   : {endpoint_arn}")
-    print(f"OpenAI API endpoint  : {api_url}/v1/chat/completions  (29s max — may timeout)")
-    print(f"Lambda URL endpoint  : {fn_url}  (no timeout limit — use this for long queries)")
-    print(f"\nTest (use Lambda URL for long-running queries):")
-    print(f"""  curl -X POST {fn_url} \\
-    -H 'Content-Type: application/json' \\
-    -d '{{"model":"agentcore","messages":[{{"role":"user","content":"list all tables"}}]}}'""")
+    print(f"\nAccess via EKS proxy (VPC-internal, no auth):")
+    print(f"  DIFY (in-cluster):     http://agentcore-proxy.agentcore.svc.cluster.local")
+    print(f"  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com")
+    print(f"\nDirect boto3 access:")
+    print(f"  python3 py_sdk.py \"your question\"")
 
 
 if __name__ == "__main__":
