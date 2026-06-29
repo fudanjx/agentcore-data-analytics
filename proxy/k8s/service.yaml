@@ -1,0 +1,33 @@
+---
+# ClusterIP — for DIFY pods within the same EKS cluster
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentcore-proxy
+  namespace: agentcore
+spec:
+  selector:
+    app: agentcore-proxy
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Internal NLB — for Open WebUI (default VPC, reachable via VPC peering)
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentcore-proxy-internal
+  namespace: agentcore
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+spec:
+  selector:
+    app: agentcore-proxy
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: LoadBalancer

@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Environment — contains secrets
+.env
+
+# Docker build artifacts
+package/
+lambda.zip
+
+# AWS CDK
+cdk.out/
+
+# macOS
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Temp files
+/tmp/
+*.tmp

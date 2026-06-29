@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentcore-proxy
+  namespace: agentcore
+  labels:
+    app: agentcore-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentcore-proxy
+  template:
+    metadata:
+      labels:
+        app: agentcore-proxy
+    spec:
+      serviceAccountName: agentcore-proxy
+      containers:
+        - name: proxy
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:latest
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: ap-southeast-1
+          resources:
+            requests:
+              cpu: 256m
+              memory: 512Mi
+            limits:
+              cpu: 512m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
