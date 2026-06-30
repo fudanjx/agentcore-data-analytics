@@ -144,6 +144,21 @@ def describe_table(arguments: dict) -> dict:
 # Dispatcher
 # ---------------------------------------------------------------------------
 
+def _infer_tool(event: dict) -> str:
+    """
+    AgentCore Gateway sends only the tool arguments as the top-level event.
+    Infer which tool was called from the argument shape:
+      - has "query"       → execute_sql
+      - has "table_name"  → describe_table
+      - empty / no keys   → list_tables
+    """
+    if "query" in event:
+        return "execute_sql"
+    if "table_name" in event:
+        return "describe_table"
+    return "list_tables"
+
+
 TOOLS = {
     "execute_sql": execute_sql,
     "list_tables": list_tables,
@@ -154,18 +169,13 @@ TOOLS = {
 def lambda_handler(event, context):
     logger.info("Event: %s", json.dumps(event, default=str)[:500])
 
-    tool_name = event.get("tool")
-    arguments = event.get("arguments", {})
-
-    if not tool_name:
-        return {"error": "Missing 'tool' field in request"}
-
-    fn = TOOLS.get(tool_name)
-    if fn is None:
-        return {"error": f"Unknown tool '{tool_name}'. Available: {list(TOOLS.keys())}"}
+    # AgentCore Gateway sends tool arguments directly as the event body.
+    # Infer the tool from the argument shape.
+    tool_name = _infer_tool(event)
+    logger.info("Inferred tool: %s", tool_name)
 
     try:
-        result = fn(arguments)
+        result = TOOLS[tool_name](event)
         return {"result": result}
     except ValueError as e:
         logger.warning("Tool error: %s", e)
