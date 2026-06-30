@@ -12,6 +12,7 @@ from typing import Any, Annotated, Literal
 import uuid
 
 import boto3
+from botocore.config import Config
 from fastapi import FastAPI
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
@@ -30,7 +31,12 @@ _client = None
 def get_client():
     global _client
     if _client is None:
-        _client = boto3.client("bedrock-agentcore", region_name=REGION)
+        agentcore_config = Config(
+            read_timeout=15*60,
+            connect_timeout=10,
+            retries={"max_attempts": 0}
+        )
+        _client = boto3.client("bedrock-agentcore", region_name=REGION, config=agentcore_config)
     return _client
 
 
