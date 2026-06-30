@@ -1,11 +1,13 @@
 """
-Deploy nuh-analytics MCP Lambda.
+Deploy nuh-analytics MCP Lambda + AgentCore Gateway.
 
 Creates:
   1. IAM role for Lambda (nuh-analytics-mcp-role)
   2. Lambda function in VPC (nuh-analytics-mcp) — zip packaged
-
-AgentCore Gateway wiring is done manually in the AWS console.
+  3. Grant AgentCore Gateway service lambda:InvokeFunction on Lambda
+  4. IAM role for Gateway (nuh-analytics-gateway-role)
+  5. AgentCore Gateway (nuh-analytics-db, MCP protocol, AWS_IAM auth)
+  6. Gateway Target (rds-tools) — Lambda type with inline tool schema
 
 Usage:
     python mcp_lambda/deploy.py
@@ -25,6 +27,9 @@ import boto3
 REGION = "ap-southeast-1"
 LAMBDA_NAME = "nuh-analytics-mcp"
 LAMBDA_ROLE_NAME = "nuh-analytics-mcp-role"
+GATEWAY_ROLE_NAME = "nuh-analytics-gateway-role"
+GATEWAY_NAME = "nuh-analytics-db"
+TARGET_NAME = "rds-tools"
 
 SECRET_ARN = "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J"
 DB_NAME = "nuh-analytics"
@@ -33,7 +38,34 @@ VPC_SG = "sg-07258677b7e691e48"
 
 iam = boto3.client("iam")
 lambda_client = boto3.client("lambda", region_name=REGION)
+agentcore = boto3.client("bedrock-agentcore-control", region_name=REGION)
 sts = boto3.client("sts", region_name=REGION)
+
+TOOL_SCHEMA = [
+    {
+        "name": "execute_sql",
+        "description": "Run a read-only SELECT query against the nuh-analytics database and return rows as a JSON array",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"query": {"type": "string", "description": "A valid SQL SELECT statement"}},
+            "required": ["query"],
+        },
+    },
+    {
+        "name": "list_tables",
+        "description": "List all tables in the nuh-analytics database with their column names and data types",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "describe_table",
+        "description": "Get column details and sample rows for a specific table in nuh-analytics",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"table_name": {"type": "string", "description": "Name of the table to describe"}},
+            "required": ["table_name"],
+        },
+    },
+]
 
 
 def get_account_id() -> str:
@@ -61,22 +93,39 @@ def ensure_lambda_role() -> str:
             ], "Resource": "*"},
         ],
     }
+    return _upsert_role(LAMBDA_ROLE_NAME, trust, inline, "nuh-analytics MCP Lambda role")
 
+
+def ensure_gateway_role(lambda_arn: str) -> str:
+    trust = {
+        "Version": "2012-10-17",
+        "Statement": [{"Effect": "Allow", "Principal": {"Service": "bedrock-agentcore.amazonaws.com"}, "Action": "sts:AssumeRole"}],
+    }
+    inline = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {"Effect": "Allow", "Action": ["lambda:InvokeFunction"], "Resource": lambda_arn},
+        ],
+    }
+    return _upsert_role(GATEWAY_ROLE_NAME, trust, inline, "nuh-analytics AgentCore Gateway role")
+
+
+def _upsert_role(name: str, trust: dict, inline: dict, description: str) -> str:
     try:
-        arn = iam.get_role(RoleName=LAMBDA_ROLE_NAME)["Role"]["Arn"]
+        arn = iam.get_role(RoleName=name)["Role"]["Arn"]
         print(f"  Role exists: {arn}")
     except iam.exceptions.NoSuchEntityException:
-        print(f"  Creating role {LAMBDA_ROLE_NAME}...")
+        print(f"  Creating role {name}...")
         arn = iam.create_role(
-            RoleName=LAMBDA_ROLE_NAME,
+            RoleName=name,
             AssumeRolePolicyDocument=json.dumps(trust),
-            Description="nuh-analytics MCP Lambda role",
+            Description=description,
         )["Role"]["Arn"]
-        iam.attach_role_policy(RoleName=LAMBDA_ROLE_NAME, PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")
+        iam.attach_role_policy(RoleName=name, PolicyArn="arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole")
         print("  Waiting for role propagation...")
         time.sleep(15)
 
-    iam.put_role_policy(RoleName=LAMBDA_ROLE_NAME, PolicyName=f"{LAMBDA_ROLE_NAME}-inline", PolicyDocument=json.dumps(inline))
+    iam.put_role_policy(RoleName=name, PolicyName=f"{name}-inline", PolicyDocument=json.dumps(inline))
     return arn
 
 
@@ -93,7 +142,7 @@ def build_zip() -> bytes:
             [sys.executable, "-m", "pip", "install",
              "-r", os.path.join(script_dir, "requirements.txt"),
              "--target", tmp, "--quiet",
-             "--platform", "manylinux2014_x86_64",  # Lambda is x86_64
+             "--platform", "manylinux2014_x86_64",
              "--only-binary=:all:", "--implementation", "cp", "--python-version", "3.12"],
         )
 
@@ -118,16 +167,8 @@ def deploy_lambda(role_arn: str) -> str:
     zip_bytes = build_zip()
     print(f"  Zip size: {len(zip_bytes) / 1024 / 1024:.1f} MB")
 
-    env = {
-        "Variables": {
-            "SECRET_ARN": SECRET_ARN,
-            "DB_NAME": DB_NAME,
-        }
-    }
-    vpc = {
-        "SubnetIds": VPC_SUBNETS,
-        "SecurityGroupIds": [VPC_SG],
-    }
+    env = {"Variables": {"SECRET_ARN": SECRET_ARN, "DB_NAME": DB_NAME}}
+    vpc = {"SubnetIds": VPC_SUBNETS, "SecurityGroupIds": [VPC_SG]}
 
     try:
         fn = lambda_client.get_function(FunctionName=LAMBDA_NAME)
@@ -136,8 +177,7 @@ def deploy_lambda(role_arn: str) -> str:
         lambda_client.update_function_code(FunctionName=LAMBDA_NAME, ZipFile=zip_bytes)
         lambda_client.get_waiter("function_updated_v2").wait(FunctionName=LAMBDA_NAME)
         lambda_client.update_function_configuration(
-            FunctionName=LAMBDA_NAME, Environment=env, VpcConfig=vpc,
-            Timeout=30, MemorySize=256,
+            FunctionName=LAMBDA_NAME, Environment=env, VpcConfig=vpc, Timeout=30, MemorySize=256,
         )
     except lambda_client.exceptions.ResourceNotFoundException:
         print(f"  Creating Lambda {LAMBDA_NAME}...")
@@ -160,6 +200,88 @@ def deploy_lambda(role_arn: str) -> str:
     return fn_arn
 
 
+def grant_gateway_invoke():
+    """Allow AgentCore Gateway service to invoke the Lambda."""
+    try:
+        lambda_client.add_permission(
+            FunctionName=LAMBDA_NAME,
+            StatementId="agentcore-gateway-invoke",
+            Action="lambda:InvokeFunction",
+            Principal="bedrock-agentcore.amazonaws.com",
+        )
+        print("  Invoke permission granted to bedrock-agentcore")
+    except lambda_client.exceptions.ResourceConflictException:
+        print("  Invoke permission already exists")
+
+
+# ---------------------------------------------------------------------------
+# AgentCore Gateway
+# ---------------------------------------------------------------------------
+
+def ensure_gateway(gateway_role_arn: str) -> str:
+    """Create or find the gateway. Returns gateway ID."""
+    paginator = agentcore.get_paginator("list_gateways")
+    for page in paginator.paginate():
+        for gw in page.get("items", []):
+            if gw["name"] == GATEWAY_NAME:
+                gw_id = gw["gatewayId"]
+                print(f"  Gateway exists: {gw_id}")
+                return gw_id
+
+    print(f"  Creating gateway {GATEWAY_NAME}...")
+    response = agentcore.create_gateway(
+        name=GATEWAY_NAME,
+        description="MCP gateway for nuh-analytics RDS — execute_sql, list_tables, describe_table",
+        roleArn=gateway_role_arn,
+        protocolType="MCP",
+        authorizerType="AWS_IAM",
+    )
+    gw_id = response["gatewayId"]
+    print(f"  Gateway created: {gw_id}")
+
+    print("  Waiting for gateway to be READY...")
+    for _ in range(30):
+        gw = agentcore.get_gateway(gatewayIdentifier=gw_id)
+        status = gw.get("status", "")
+        if status == "READY":
+            print("  Gateway is READY.")
+            break
+        if "FAILED" in status:
+            raise RuntimeError(f"Gateway failed: {status}")
+        time.sleep(10)
+
+    return gw_id
+
+
+def ensure_gateway_target(gateway_id: str, lambda_arn: str):
+    """Create or reuse the Lambda gateway target."""
+    paginator = agentcore.get_paginator("list_gateway_targets")
+    for page in paginator.paginate(gatewayIdentifier=gateway_id):
+        for tgt in page.get("items", []):
+            if tgt["name"] == TARGET_NAME:
+                print(f"  Gateway target exists: {tgt['targetId']}")
+                return
+
+    print(f"  Creating gateway target {TARGET_NAME}...")
+    response = agentcore.create_gateway_target(
+        gatewayIdentifier=gateway_id,
+        name=TARGET_NAME,
+        description="Lambda: nuh-analytics-mcp — 3 read-only RDS tools",
+        credentialProviderConfigurations=[
+            {"credentialProviderType": "GATEWAY_IAM_ROLE"}
+        ],
+        targetConfiguration={
+            "mcp": {
+                "lambda": {
+                    "lambdaArn": lambda_arn,
+                    "toolSchema": {"inlinePayload": TOOL_SCHEMA},
+                }
+            }
+        },
+    )
+    print(f"  Gateway target created: {response['targetId']}")
+
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -174,19 +296,26 @@ def main():
     print("2. Deploying Lambda function...")
     lambda_arn = deploy_lambda(lambda_role_arn)
 
+    print("3. Granting AgentCore Gateway invoke permission on Lambda...")
+    grant_gateway_invoke()
+
+    print("4. Ensuring Gateway IAM role...")
+    gateway_role_arn = ensure_gateway_role(lambda_arn)
+    time.sleep(10)  # IAM propagation before gateway creation
+
+    print("5. Ensuring AgentCore Gateway...")
+    gateway_id = ensure_gateway(gateway_role_arn)
+
+    print("6. Ensuring Gateway Target...")
+    ensure_gateway_target(gateway_id, lambda_arn)
+
     print("\nDone.")
-    print(f"\nLambda ARN: {lambda_arn}")
-    print(f"\nNext step: wire this Lambda to AgentCore Gateway manually in the AWS console.")
-    print(f"  Bedrock → AgentCore → Gateways → Create Gateway")
-    print(f"  Protocol: MCP  |  Target: Lambda  |  Lambda ARN: {lambda_arn}")
-    print(f"\nTool schema for gateway target (inlinePayload):")
-    tools = [
-        {"name": "execute_sql", "description": "Run a read-only SELECT query against nuh-analytics", "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}},
-        {"name": "list_tables", "description": "List all tables and columns in nuh-analytics", "inputSchema": {"type": "object", "properties": {}}},
-        {"name": "describe_table", "description": "Get column details and sample rows for a table", "inputSchema": {"type": "object", "properties": {"table_name": {"type": "string"}}, "required": ["table_name"]}},
-    ]
-    import json as _json
-    print(_json.dumps(tools, indent=2))
+    print(f"\nLambda ARN  : {lambda_arn}")
+    print(f"Gateway ID  : {gateway_id}")
+    print(f"\nTest in AWS console:")
+    print(f"  Bedrock → AgentCore → Gateways → {GATEWAY_NAME} → Test")
+    print(f'  Tool: list_tables')
+    print(f'  Tool: execute_sql  →  {{"query": "SELECT COUNT(*) FROM emd"}}')
 
 
 if __name__ == "__main__":

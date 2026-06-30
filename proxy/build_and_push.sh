@@ -17,14 +17,14 @@ echo "==> Authenticating Docker with ECR..."
 aws ecr get-login-password --region "${REGION}" \
     | docker login --username AWS --password-stdin "${ECR_URI}"
 
-echo "==> Building image (linux/amd64 for Fargate)..."
-docker build --platform linux/amd64 \
-    -t "${REPO}" \
+echo "==> Building and pushing image (linux/amd64 for Fargate)..."
+# Use buildx to correctly build amd64 on Apple Silicon
+~/.docker/cli-plugins/docker-buildx build \
+    --platform linux/amd64 \
+    --no-cache \
+    --push \
+    -t "${ECR_URI}:latest" \
     "$(dirname "$0")"
-
-echo "==> Tagging and pushing..."
-docker tag "${REPO}:latest" "${ECR_URI}:latest"
-docker push "${ECR_URI}:latest"
 
 echo ""
 echo "Image pushed: ${ECR_URI}:latest"
