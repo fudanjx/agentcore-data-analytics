@@ -19,6 +19,7 @@ spec:
       containers:
         - name: proxy
           image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:latest
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
@@ -43,3 +44,5 @@ spec:
               port: 8080
             initialDelaySeconds: 15
             periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

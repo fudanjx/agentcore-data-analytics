@@ -1,0 +1,315 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>HRM SOC Monthly Attendance Trend 2025</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<style>
+:root {
+--bg: #0f1117;
+--card: #1a1d27;
+--border: #2a2d3e;
+--accent1: #4f8ef7;
+--accent2: #f97316;
+--accent3: #a78bfa;
+--text: #e2e8f0;
+--muted: #94a3b8;
+--green: #22d3a5;
+--red: #f87171;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+background: var(--bg);
+color: var(--text);
+font-family: 'Segoe UI', system-ui, sans-serif;
+min-height: 100vh;
+padding: 28px 32px 48px;
+}
+header {
+display: flex;
+align-items: flex-start;
+justify-content: space-between;
+flex-wrap: wrap;
+gap: 12px;
+margin-bottom: 28px;
+}
+.header-left h1 { font-size: 1.55rem; font-weight: 700; letter-spacing: .3px; }
+.header-left p { margin-top: 5px; font-size: .88rem; color: var(--muted); }
+.badge {
+display: inline-block;
+background: #1e2740;
+border: 1px solid var(--accent1);
+color: var(--accent1);
+font-size: .75rem; font-weight: 600;
+padding: 3px 10px; border-radius: 20px; margin-top: 8px;
+}
+.kpi-grid {
+display: grid;
+grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+gap: 16px; margin-bottom: 28px;
+}
+.kpi-card {
+background: var(--card); border: 1px solid var(--border);
+border-radius: 14px; padding: 18px 20px 16px;
+position: relative; overflow: hidden;
+}
+.kpi-card::before {
+content: ''; position: absolute; top: 0; left: 0; right: 0;
+height: 3px; border-radius: 14px 14px 0 0;
+}
+.kpi-card.blue::before { background: var(--accent1); }
+.kpi-card.orange::before { background: var(--accent2); }
+.kpi-card.purple::before { background: var(--accent3); }
+.kpi-card.green::before { background: var(--green); }
+.kpi-card.red::before { background: var(--red); }
+.kpi-label { font-size: .72rem; font-weight: 600; text-transform: uppercase; letter-spacing: .8px; color: var(--muted); margin-bottom: 8px; }
+.kpi-value { font-size: 1.9rem; font-weight: 700; line-height: 1; }
+.kpi-sub { font-size: .78rem; color: var(--muted); margin-top: 6px; }
+.kpi-card.blue .kpi-value { color: var(--accent1); }
+.kpi-card.orange .kpi-value { color: var(--accent2); }
+.kpi-card.purple .kpi-value { color: var(--accent3); }
+.kpi-card.green .kpi-value { color: var(--green); }
+.kpi-card.red .kpi-value { color: var(--red); }
+.chart-card {
+background: var(--card); border: 1px solid var(--border);
+border-radius: 14px; padding: 24px 24px 20px; margin-bottom: 20px;
+}
+.chart-title { font-size: 1rem; font-weight: 600; margin-bottom: 4px; }
+.chart-subtitle { font-size: .8rem; color: var(--muted); margin-bottom: 18px; }
+.chart-wrap { position: relative; height: 420px; }
+.legend {
+display: flex; flex-wrap: wrap; gap: 20px;
+margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--border);
+}
+.legend-item { display: flex; align-items: center; gap: 8px; font-size: .82rem; color: var(--muted); }
+.legend-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+.table-card {
+background: var(--card); border: 1px solid var(--border);
+border-radius: 14px; padding: 22px 24px; overflow-x: auto;
+}
+.table-card h3 { font-size: .95rem; font-weight: 600; margin-bottom: 16px; }
+table { width: 100%; border-collapse: collapse; font-size: .83rem; }
+thead tr { background: #21253a; }
+th {
+padding: 10px 14px; text-align: right; font-weight: 600;
+font-size: .72rem; text-transform: uppercase; letter-spacing: .6px;
+color: var(--muted); border-bottom: 1px solid var(--border);
+}
+th:first-child { text-align: left; }
+td { padding: 9px 14px; text-align: right; border-bottom: 1px solid #1e2130; color: var(--text); }
+td:first-child { text-align: left; font-weight: 500; }
+tbody tr:hover { background: #1e2236; }
+tbody tr:last-child td { border-bottom: none; }
+.pill-fv { display:inline-block; background:rgba(79,142,247,.18); color:var(--accent1); border-radius:6px; padding:2px 8px; font-weight:600; }
+.pill-rv { display:inline-block; background:rgba(249,115,22,.18); color:var(--accent2); border-radius:6px; padding:2px 8px; font-weight:600; }
+.pill-ratio { display:inline-block; background:rgba(167,139,250,.18); color:var(--accent3); border-radius:6px; padding:2px 8px; font-weight:600; }
+footer { margin-top: 28px; font-size: .75rem; color: #4a5568; text-align: center; }
+</style>
+</head>
+<body>
+
+<header>
+<div class="header-left">
+<h1>🏥 HRM SOC Monthly Attendance Trend</h1>
+<p>Hand &amp; Reconstructive Microsurgery · Specialist Outpatient Clinic · Completed &amp; Arrived</p>
+<span class="badge">Jan – Dec 2025</span>
+</div>
+</header>
+
+<div class="kpi-grid" id="kpiGrid"></div>
+
+<div class="chart-card">
+<div class="chart-title">Monthly Attendance by Visit Type</div>
+<div class="chart-subtitle">
+Stacked bars = First Visit (blue) + Repeat Visit (orange) &nbsp;|&nbsp;
+Purple line = FV : RV ratio (right axis)
+</div>
+<div class="chart-wrap">
+<canvas id="mainChart"></canvas>
+</div>
+<div class="legend">
+<div class="legend-item"><div class="legend-dot" style="background:var(--accent1)"></div>First Visit (FV)</div>
+<div class="legend-item"><div class="legend-dot" style="background:var(--accent2)"></div>Repeat Visit (RV)</div>
+<div class="legend-item"><div class="legend-dot" style="background:var(--accent3);border-radius:50%"></div>FV : RV Ratio (right axis)</div>
+</div>
+</div>
+
+<div class="table-card">
+<h3>📋 Monthly Breakdown</h3>
+<table id="dataTable">
+<thead>
+<tr>
+<th>Month</th>
+<th>Total</th>
+<th>First Visits</th>
+<th>Repeat Visits</th>
+<th>FV %</th>
+<th>RV %</th>
+<th>FV : RV Ratio</th>
+</tr>
+</thead>
+<tbody id="tableBody"></tbody>
+</table>
+</div>
+
+<footer>Source: NUH Analytics · nuh-analytics · soc table &nbsp;|&nbsp; Generated 2025</footer>
+
+<script>
+const rawData = [
+{ month: "Jan 2025", total: 1637, fv: 529, rv: 1104, other: 4 },
+{ month: "Feb 2025", total: 1450, fv: 503, rv: 944, other: 3 },
+{ month: "Mar 2025", total: 1266, fv: 409, rv: 851, other: 6 },
+{ month: "Apr 2025", total: 1688, fv: 592, rv: 1093, other: 3 },
+{ month: "May 2025", total: 1401, fv: 485, rv: 912, other: 4 },
+{ month: "Jun 2025", total: 1089, fv: 381, rv: 705, other: 3 },
+{ month: "Jul 2025", total: 1717, fv: 618, rv: 1098, other: 1 },
+{ month: "Aug 2025", total: 1534, fv: 579, rv: 951, other: 4 },
+{ month: "Sep 2025", total: 1812, fv: 647, rv: 1161, other: 4 },
+{ month: "Oct 2025", total: 1649, fv: 594, rv: 1053, other: 2 },
+{ month: "Nov 2025", total: 1547, fv: 531, rv: 1015, other: 1 },
+{ month: "Dec 2025", total: 1508, fv: 492, rv: 1015, other: 1 },
+];
+
+const fmtNum = n => n.toLocaleString();
+const fmtPct = (a, b) => ((a / b) * 100).toFixed(1) + '%';
+const fmtRatio = (fv, rv) => rv ? `1 : ${(rv / fv).toFixed(1)}` : '—';
+const ratioVal = (fv, rv) => rv / fv;
+
+const labels = rawData.map(d => d.month);
+const totals = rawData.map(d => d.total);
+const fvs = rawData.map(d => d.fv);
+const rvs = rawData.map(d => d.rv);
+const ratios = rawData.map(d => ratioVal(d.fv, d.rv));
+
+const totalAll = rawData.reduce((s,d) => s + d.total, 0);
+const totalFV = rawData.reduce((s,d) => s + d.fv, 0);
+const totalRV = rawData.reduce((s,d) => s + d.rv, 0);
+const avgRatio = ratioVal(totalFV, totalRV);
+const peakMonth = rawData.reduce((a,b) => a.total >= b.total ? a : b);
+const lowMonth = rawData.reduce((a,b) => a.total <= b.total ? a : b);
+
+const kpiData = [
+{ label: 'Total Visits', value: fmtNum(totalAll), sub: 'Jan – Dec 2025', cls: 'blue' },
+{ label: 'First Visits', value: fmtNum(totalFV), sub: fmtPct(totalFV,totalAll)+' of total', cls: 'blue' },
+{ label: 'Repeat Visits', value: fmtNum(totalRV), sub: fmtPct(totalRV,totalAll)+' of total', cls: 'orange' },
+{ label: 'Avg FV:RV Ratio', value: `1 : ${avgRatio.toFixed(1)}`, sub: 'Annual average', cls: 'purple' },
+{ label: 'Peak Month', value: peakMonth.month.replace(' 2025',''), sub: `${fmtNum(peakMonth.total)} visits`, cls: 'green' },
+{ label: 'Lowest Month', value: lowMonth.month.replace(' 2025',''), sub: `${fmtNum(lowMonth.total)} visits`, cls: 'red' },
+];
+
+const kpiGrid = document.getElementById('kpiGrid');
+kpiData.forEach(k => {
+kpiGrid.innerHTML += `
+<div class="kpi-card ${k.cls}">
+<div class="kpi-label">${k.label}</div>
+<div class="kpi-value">${k.value}</div>
+<div class="kpi-sub">${k.sub}</div>
+</div>`;
+});
+
+const tbody = document.getElementById('tableBody');
+rawData.forEach(d => {
+tbody.innerHTML += `
+<tr>
+<td>${d.month}</td>
+<td>${fmtNum(d.total)}</td>
+<td><span class="pill-fv">${fmtNum(d.fv)}</span></td>
+<td><span class="pill-rv">${fmtNum(d.rv)}</span></td>
+<td>${fmtPct(d.fv,d.total)}</td>
+<td>${fmtPct(d.rv,d.total)}</td>
+<td><span class="pill-ratio">${fmtRatio(d.fv,d.rv)}</span></td>
+</tr>`;
+});
+
+const ctx = document.getElementById('mainChart').getContext('2d');
+const gradFV = ctx.createLinearGradient(0,0,0,380);
+gradFV.addColorStop(0,'rgba(79,142,247,.92)');
+gradFV.addColorStop(1,'rgba(79,142,247,.60)');
+const gradRV = ctx.createLinearGradient(0,0,0,380);
+gradRV.addColorStop(0,'rgba(249,115,22,.92)');
+gradRV.addColorStop(1,'rgba(249,115,22,.60)');
+
+new Chart(ctx, {
+data: {
+labels,
+datasets: [
+{
+type: 'bar', label: 'First Visit (FV)', data: fvs,
+backgroundColor: gradFV, borderColor: 'rgba(79,142,247,1)', borderWidth: 1,
+borderRadius: { topLeft:0, topRight:0, bottomLeft:4, bottomRight:4 },
+stack: 'visits', yAxisID: 'yLeft', order: 2,
+},
+{
+type: 'bar', label: 'Repeat Visit (RV)', data: rvs,
+backgroundColor: gradRV, borderColor: 'rgba(249,115,22,1)', borderWidth: 1,
+borderRadius: { topLeft:4, topRight:4, bottomLeft:0, bottomRight:0 },
+stack: 'visits', yAxisID: 'yLeft', order: 2,
+},
+{
+type: 'line', label: 'FV : RV Ratio', data: ratios,
+borderColor: 'rgba(167,139,250,1)',
+backgroundColor: 'rgba(167,139,250,.15)',
+pointBackgroundColor: 'rgba(167,139,250,1)',
+pointBorderColor: '#0f1117', pointBorderWidth: 2,
+pointRadius: 5, pointHoverRadius: 7,
+borderWidth: 2.5, tension: 0.35, fill: false,
+yAxisID: 'yRight', order: 1,
+},
+],
+},
+options: {
+responsive: true, maintainAspectRatio: false,
+interaction: { mode: 'index', intersect: false },
+plugins: {
+legend: { display: false },
+tooltip: {
+backgroundColor: '#1e2236', borderColor: '#2a2d3e', borderWidth: 1,
+titleColor: '#e2e8f0', bodyColor: '#94a3b8', padding: 12,
+callbacks: {
+title: ctx => ctx[0].label,
+label: ctx => {
+const ds = ctx.dataset;
+if (ds.yAxisID === 'yRight') {
+const fv = fvs[ctx.dataIndex], rv = rvs[ctx.dataIndex];
+return ` FV : RV → 1 : ${(rv/fv).toFixed(2)}`;
+}
+const total = totals[ctx.dataIndex];
+const pct = ((ctx.raw/total)*100).toFixed(1);
+return ` ${ds.label}: ${ctx.raw.toLocaleString()} (${pct}%)`;
+},
+afterBody: ctx => {
+const i = ctx[0].dataIndex;
+return [``, ` Total Visits: ${totals[i].toLocaleString()}`];
+},
+},
+},
+},
+scales: {
+x: {
+grid: { color: 'rgba(42,45,62,.6)' },
+ticks: { color: '#94a3b8', font: { size: 12 } },
+border: { color: '#2a2d3e' },
+},
+yLeft: {
+type: 'linear', position: 'left', stacked: true,
+grid: { color: 'rgba(42,45,62,.6)' },
+ticks: { color: '#94a3b8', font: { size: 11 }, callback: v => v.toLocaleString() },
+border: { color: '#2a2d3e' },
+title: { display: true, text: 'Number of Visits', color: '#64748b', font: { size: 11 } },
+min: 0, max: 2200,
+},
+yRight: {
+type: 'linear', position: 'right',
+grid: { drawOnChartArea: false },
+ticks: { color: 'rgba(167,139,250,.9)', font: { size: 11 }, callback: v => `1 : ${v.toFixed(1)}` },
+border: { color: '#2a2d3e' },
+title: { display: true, text: 'FV : RV Ratio', color: 'rgba(167,139,250,.7)', font: { size: 11 } },
+min: 1.0, max: 3.0,
+},
+},
+},
+});
+</script>
+</body>
+</html>

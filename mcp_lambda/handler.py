@@ -14,6 +14,8 @@ Returns:
   {"error": "<msg>"}  on failure
 """
 
+import datetime
+import decimal
 import json
 import logging
 import os
@@ -25,6 +27,16 @@ import psycopg2.extras
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+
+def _json_default(obj):
+    if isinstance(obj, (datetime.date, datetime.datetime)):
+        return obj.isoformat()
+    if isinstance(obj, datetime.time):
+        return obj.isoformat()
+    if isinstance(obj, decimal.Decimal):
+        return float(obj)
+    raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 SECRET_ARN = os.environ["SECRET_ARN"]
@@ -176,7 +188,8 @@ def lambda_handler(event, context):
 
     try:
         result = TOOLS[tool_name](event)
-        return {"result": result}
+        # Round-trip through JSON to coerce dates/decimals before Lambda serializes the return value.
+        return json.loads(json.dumps({"result": result}, default=_json_default))
     except ValueError as e:
         logger.warning("Tool error: %s", e)
         return {"error": str(e)}
