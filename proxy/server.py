@@ -90,37 +90,79 @@ def _invoke_runtime(messages: list, runtime_arn: str, session_id: str = None, us
     return json.loads(resp["response"].read()).get("result", "")
 
 
-def _invoke_harness(messages: list, harness_arn: str, session_id: str, actor_id: str = None) -> str:
-    # Normalise OpenAI string content to [{text: "..."}] format required by invoke_harness.
+def _normalize_messages(messages: list) -> list:
+    """Convert OpenAI string content to [{text: "..."}] format required by invoke_harness."""
     normalized = []
     for m in messages:
         content = m.get("content", "")
         if isinstance(content, str):
             content = [{"text": content}]
         normalized.append({"role": m["role"], "content": content})
+    return normalized
 
-    kwargs = dict(harnessArn=harness_arn, runtimeSessionId=session_id, messages=normalized)
+
+def _stream_harness_events(messages: list, harness_arn: str, session_id: str, actor_id: str = None):
+    """Generator: yields text strings as contentBlockDelta events arrive from invoke_harness.
+
+    Retries the full call once on cold-start connection close, but only if no token
+    has been yielded yet (safe to retry before the SSE response is committed).
+    After the first token is yielded, any error propagates to the caller.
+    """
+    kwargs = dict(
+        harnessArn=harness_arn,
+        runtimeSessionId=session_id,
+        messages=_normalize_messages(messages),
+    )
     if actor_id:
         kwargs["actorId"] = actor_id
 
-    # Retry once on cold-start connection close. The first attempt warms the container;
-    # the second attempt hits it warm.
     for attempt in range(2):
+        first_token_sent = False
         try:
             resp = get_client().invoke_harness(**kwargs)
-            parts = []
             for event in resp.get("stream", []):
                 delta = event.get("contentBlockDelta", {}).get("delta", {})
                 if "text" in delta:
-                    parts.append(delta["text"])
-            return "".join(parts)
+                    first_token_sent = True
+                    yield delta["text"]
+            return  # stream complete normally
         except (botocore.exceptions.ConnectionClosedError, botocore.exceptions.EventStreamError) as e:
-            if attempt == 0 and "connection" in str(e).lower():
+            if attempt == 0 and not first_token_sent and "connection" in str(e).lower():
                 logger.warning(
                     "Harness cold-start disconnect (session=%s), retrying...", session_id
                 )
                 continue
             raise
+
+
+def _invoke_harness_buffered(messages: list, harness_arn: str, session_id: str, actor_id: str = None) -> str:
+    """Blocking call: collect all harness stream events and return full text. Used for non-streaming."""
+    return "".join(_stream_harness_events(messages, harness_arn, session_id, actor_id))
+
+
+def _sse_harness_stream(messages: list, harness_arn: str, session_id: str, actor_id, model: str, completion_id: str):
+    """Generator: yield OpenAI SSE chunks from live harness stream events."""
+    try:
+        for text in _stream_harness_events(messages, harness_arn, session_id, actor_id):
+            chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except Exception as e:
+        logger.error("Harness stream error (session=%s): %s", session_id, e)
+        yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'stream_error'}})}\n\n"
+
+    final = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _stream_response(result_text: str, model: str, completion_id: str):
@@ -157,22 +199,31 @@ async def _build_completion(
         "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
         slug, model, len(messages), stream, session_id, user_id,
     )
+    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+
     if slug in HARNESSES:
+        arn = HARNESSES[slug]
+        if stream:
+            # Pipe harness token deltas directly to SSE — no buffering.
+            return StreamingResponse(
+                _sse_harness_stream(messages, arn, session_id, user_id, model, completion_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
         result_text = await run_in_threadpool(
-            _invoke_harness, messages, HARNESSES[slug], session_id, user_id
+            _invoke_harness_buffered, messages, arn, session_id, user_id
         )
     else:
         result_text = await run_in_threadpool(
             _invoke_runtime, messages, RUNTIMES[slug], session_id, user_id
         )
+        if stream:
+            return StreamingResponse(
+                _stream_response(result_text, model, completion_id),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
-    completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    if stream:
-        return StreamingResponse(
-            _stream_response(result_text, model, completion_id),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
     return {
         "id": completion_id,
         "object": "chat.completion",
