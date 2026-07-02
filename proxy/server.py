@@ -2,13 +2,17 @@
 AgentCore OpenAI-compatible proxy.
 
 Accepts standard OpenAI /v1/chat/completions requests and forwards them to
-an AgentCore Runtime via boto3 (IAM auth automatic via pod/instance role).
+an AgentCore Runtime or Harness via boto3 (IAM auth via pod IRSA).
 Supports both streaming (SSE) and non-streaming responses.
 
 Path-prefixed routes allow multiple runtimes on one service:
-  /poc/v1/chat/completions     → agentcore_poc runtime
-  /harness/v1/chat/completions → harness_harness_e52fs runtime
+  /poc/v1/chat/completions     → agentcore_poc runtime (invoke_agent_runtime)
+  /harness/v1/chat/completions → harness_harness_e52fs (invoke_harness)
   /v1/chat/completions         → agentcore_poc (backward-compat)
+
+OpenWebUI session/user context is forwarded to AgentCore for memory:
+  chat_id                  → runtimeSessionId  (stable per conversation)
+  model_item.info.user_id  → actorId / runtimeUserId (stable per user)
 """
 
 import json
@@ -16,6 +20,7 @@ import logging
 import uuid
 
 import boto3
+import botocore.exceptions
 from botocore.config import Config
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
@@ -36,7 +41,9 @@ HARNESSES = {
     "harness": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
 }
 
-app = FastAPI(title="AgentCore Proxy", version="2.0.0")
+ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
+
+app = FastAPI(title="AgentCore Proxy", version="3.0.0")
 _client = None
 
 
@@ -55,20 +62,36 @@ def get_client():
     return _client
 
 
-def _invoke_runtime(messages: list, runtime_arn: str) -> str:
+def _extract_session_context(body: dict):
+    """Extract stable session and user identifiers from an OpenWebUI request body.
+
+    Returns (session_id, user_id):
+      session_id — from chat_id (UUID, always ≥33 chars); falls back to new uuid4
+      user_id    — from model_item.info.user_id; None if absent
+    """
+    session_id = body.get("chat_id") or str(uuid.uuid4())
+    user_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
+    return session_id, user_id
+
+
+def _invoke_runtime(messages: list, runtime_arn: str, session_id: str = None, user_id: str = None) -> str:
     payload = json.dumps({"messages": messages}).encode()
-    resp = get_client().invoke_agent_runtime(
+    kwargs = dict(
         agentRuntimeArn=runtime_arn,
         contentType="application/json",
         accept="application/json",
         payload=payload,
     )
+    if session_id:
+        kwargs["runtimeSessionId"] = session_id
+    if user_id:
+        kwargs["runtimeUserId"] = user_id
+    resp = get_client().invoke_agent_runtime(**kwargs)
     return json.loads(resp["response"].read()).get("result", "")
 
 
-def _invoke_harness(messages: list, harness_arn: str) -> str:
-    # invoke_harness requires messages as [{role, content: [{text: "..."}]}]
-    # Convert plain string content from OpenAI format if needed.
+def _invoke_harness(messages: list, harness_arn: str, session_id: str, actor_id: str = None) -> str:
+    # Normalise OpenAI string content to [{text: "..."}] format required by invoke_harness.
     normalized = []
     for m in messages:
         content = m.get("content", "")
@@ -76,18 +99,28 @@ def _invoke_harness(messages: list, harness_arn: str) -> str:
             content = [{"text": content}]
         normalized.append({"role": m["role"], "content": content})
 
-    resp = get_client().invoke_harness(
-        harnessArn=harness_arn,
-        runtimeSessionId=str(uuid.uuid4()),  # min 33 chars; UUID is 36
-        messages=normalized,
-    )
-    # Response is an event stream with contentBlockDelta events.
-    parts = []
-    for event in resp.get("stream", []):
-        delta = event.get("contentBlockDelta", {}).get("delta", {})
-        if "text" in delta:
-            parts.append(delta["text"])
-    return "".join(parts)
+    kwargs = dict(harnessArn=harness_arn, runtimeSessionId=session_id, messages=normalized)
+    if actor_id:
+        kwargs["actorId"] = actor_id
+
+    # Retry once on cold-start connection close. The first attempt warms the container;
+    # the second attempt hits it warm.
+    for attempt in range(2):
+        try:
+            resp = get_client().invoke_harness(**kwargs)
+            parts = []
+            for event in resp.get("stream", []):
+                delta = event.get("contentBlockDelta", {}).get("delta", {})
+                if "text" in delta:
+                    parts.append(delta["text"])
+            return "".join(parts)
+        except (botocore.exceptions.ConnectionClosedError, botocore.exceptions.EventStreamError) as e:
+            if attempt == 0 and "connection" in str(e).lower():
+                logger.warning(
+                    "Harness cold-start disconnect (session=%s), retrying...", session_id
+                )
+                continue
+            raise
 
 
 def _stream_response(result_text: str, model: str, completion_id: str):
@@ -112,12 +145,27 @@ def _stream_response(result_text: str, model: str, completion_id: str):
     yield "data: [DONE]\n\n"
 
 
-async def _build_completion(messages: list, slug: str, model: str, stream: bool):
-    logger.info("Request [%s]: model=%s, turns=%d, stream=%s", slug, model, len(messages), stream)
+async def _build_completion(
+    messages: list,
+    slug: str,
+    model: str,
+    stream: bool,
+    session_id: str,
+    user_id: str = None,
+):
+    logger.info(
+        "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
+        slug, model, len(messages), stream, session_id, user_id,
+    )
     if slug in HARNESSES:
-        result_text = await run_in_threadpool(_invoke_harness, messages, HARNESSES[slug])
+        result_text = await run_in_threadpool(
+            _invoke_harness, messages, HARNESSES[slug], session_id, user_id
+        )
     else:
-        result_text = await run_in_threadpool(_invoke_runtime, messages, RUNTIMES[slug])
+        result_text = await run_in_threadpool(
+            _invoke_runtime, messages, RUNTIMES[slug], session_id, user_id
+        )
+
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     if stream:
         return StreamingResponse(
@@ -148,11 +196,8 @@ def health():
 
 
 # ---------------------------------------------------------------------------
-# Per-runtime prefixed routes  /poc/v1/* and /harness/v1/*
+# Per-runtime prefixed routes  /{slug}/v1/*
 # ---------------------------------------------------------------------------
-
-ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
-
 
 @app.get("/{slug}/v1/models")
 def models_by_slug(slug: str):
@@ -175,8 +220,12 @@ async def chat_completions_by_slug(slug: str, request: Request):
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
+    session_id, user_id = _extract_session_context(body)
     try:
-        return await _build_completion(messages, slug, body.get("model", slug), body.get("stream", False))
+        return await _build_completion(
+            messages, slug, body.get("model", slug), body.get("stream", False),
+            session_id, user_id,
+        )
     except Exception as e:
         logger.error("AgentCore error [%s]: %s", slug, e)
         return JSONResponse(status_code=502, content={"error": str(e)})
@@ -203,8 +252,12 @@ async def chat_completions_compat(request: Request):
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
+    session_id, user_id = _extract_session_context(body)
     try:
-        return await _build_completion(messages, "poc", body.get("model", "agentcore"), body.get("stream", False))
+        return await _build_completion(
+            messages, "poc", body.get("model", "agentcore"), body.get("stream", False),
+            session_id, user_id,
+        )
     except Exception as e:
         logger.error("AgentCore error [compat]: %s", e)
         return JSONResponse(status_code=502, content={"error": str(e)})
