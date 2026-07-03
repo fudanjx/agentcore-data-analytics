@@ -31,7 +31,7 @@ LAMBDA_NAME = "ah-analytics-mcp"
 LAMBDA_ROLE_NAME = "ah-analytics-mcp-role"
 GATEWAY_ROLE_NAME = "ah-analytics-gateway-role"
 GATEWAY_NAME = "ah-analytics-db"
-TARGET_NAME = "rds-tools"
+TARGET_NAME = "ah-rds-tools"  # must differ from nuh-analytics "rds-tools" to avoid Strands tool name collision
 HARNESS_ID = "harness_e52fs-Du2DM0RxvF"
 
 SECRET_ARN = "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J"
