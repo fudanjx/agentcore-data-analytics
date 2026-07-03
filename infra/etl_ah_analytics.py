@@ -15,11 +15,16 @@ Column sanitisation:
   special chars (/, -, (, )) → underscores, then collapse/strip
   single-char "C" column    → record_type
 
-Date/time detection (auto-sampled per column):
-  datetime64[ns]           → TIMESTAMP
+Date/time handling — mixed SAP + EPIC eras:
+  SAP era (pre-2023): "YYYY-MM-DD HH:MM:SS" or "DD.MM.YYYY" or "D/M/YYYY H:MM"
+  EPIC era (2023+):   "YYYY-MM-DD"
+  All TIMESTAMP columns use parse_mixed_date_fast() which handles all three
+  formats per-value rather than assuming a single format for the whole column.
+
+  datetime64[ns]           → TIMESTAMP  (already parsed by pandas)
   "YYYY-MM-DD ..."         → TIMESTAMP  (ISO, pd.to_datetime)
   "DD.MM.YYYY"             → TIMESTAMP  (European, dayfirst=True)
-  "M/D/YYYY H:MM"          → TIMESTAMP  (US, pd.to_datetime)
+  "D/M/YYYY[ H:MM]"        → TIMESTAMP  (slash, dayfirst=True)
   "HH:MM:SS"               → TIME       (kept as string, psycopg2 casts)
   int64 / float64 (int)    → BIGINT
   float64 (mixed)          → DOUBLE PRECISION
@@ -173,16 +178,24 @@ def get_conn(creds, dbname=None):
 
 
 def create_database(creds):
+    """Drop and recreate the target database to ensure a clean slate on every run."""
     conn = get_conn(creds, dbname="postgres")
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
             cur.execute("SELECT 1 FROM pg_database WHERE datname = %s", (TARGET_DB,))
             if cur.fetchone():
-                print(f"  Database '{TARGET_DB}' already exists — skipping create")
-            else:
-                cur.execute(f'CREATE DATABASE "{TARGET_DB}"')
-                print(f"  Database '{TARGET_DB}' created")
+                print(f"  Dropping existing database '{TARGET_DB}' for clean reload...")
+                # Terminate active connections before dropping
+                cur.execute(
+                    "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                    "WHERE datname = %s AND pid <> pg_backend_pid()",
+                    (TARGET_DB,),
+                )
+                cur.execute(f'DROP DATABASE "{TARGET_DB}"')
+                print(f"  Database '{TARGET_DB}' dropped")
+            cur.execute(f'CREATE DATABASE "{TARGET_DB}"')
+            print(f"  Database '{TARGET_DB}' created")
     finally:
         conn.close()
 
@@ -198,11 +211,67 @@ def is_integer_float(series: pd.Series) -> bool:
     return (non_null % 1 == 0).all()
 
 
-ISO_DATE_RE = re.compile(
-    r"^\d{4}-\d{2}-\d{2}"          # YYYY-MM-DD...
-    r"|^\d{1,2}/\d{1,2}/\d{4}"    # M/D/YYYY
-)
-EURO_DATE_RE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")  # DD.MM.YYYY
+ISO_DATE_RE   = re.compile(r"^\d{4}-\d{2}-\d{2}")         # YYYY-MM-DD...
+EURO_DATE_RE  = re.compile(r"^\d{1,2}\.\d{2}\.\d{4}$")   # DD.MM.YYYY or D.MM.YYYY
+SLASH_DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}")    # D/M/YYYY or M/D/YYYY
+
+NULL_SENTINELS = {"nat", "null", "none", "nan", "", "-", "n/a", "na"}
+
+
+def parse_mixed_date_fast(series: pd.Series) -> pd.Series:
+    """Parse a date column that mixes SAP-era and EPIC-era formats.
+
+    SAP era  (pre-2023): "YYYY-MM-DD HH:MM:SS"  or  "DD.MM.YYYY"  or  "D/M/YYYY H:MM"
+    EPIC era (2023+):    "YYYY-MM-DD"
+
+    Key insight: pandas 3.x fails silently when "YYYY-MM-DD HH:MM:SS" and "YYYY-MM-DD"
+    are mixed in the same series without format="ISO8601". Using format="ISO8601" handles
+    both ISO variants correctly. European DD.MM.YYYY and D/M/YYYY slash formats are
+    split into separate groups and parsed with dayfirst=True.
+    """
+    result = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    s = series.astype(str).str.strip()
+
+    null_mask  = s.str.lower().isin(NULL_SENTINELS)
+    iso_mask   = s.str.match(r"^\d{4}-\d{2}-\d{2}") & ~null_mask
+    euro_mask  = s.str.match(r"^\d{1,2}\.\d{2}\.\d{4}") & ~null_mask & ~iso_mask
+    slash_mask = s.str.match(r"^\d{1,2}/\d{1,2}/\d{4}") & ~null_mask & ~iso_mask & ~euro_mask
+
+    iso_mask   = s.str.match(r"^\d{4}-\d{2}-\d{2}") & ~null_mask
+    euro_mask  = s.str.match(r"^\d{1,2}\.\d{2}\.\d{4}") & ~null_mask & ~iso_mask
+    slash_mask = s.str.match(r"^\d{1,2}/\d{1,2}/\d{4}") & ~null_mask & ~iso_mask & ~euro_mask
+
+    def _safe_parse(vals, **kwargs):
+        """Parse and return datetime64[ns], turning out-of-ns-range values to NaT.
+
+        pandas may produce datetime64[us] which has wider range than datetime64[ns].
+        Values outside [1678, 2262] cannot be represented in ns — set them to NaT.
+        """
+        parsed = pd.to_datetime(vals, errors="coerce", **kwargs)
+        # Null-out any parsed values outside the numpy ns range (year < 1678 or > 2262)
+        # This must happen BEFORE the ns cast to avoid OutOfBoundsDatetime crashes.
+        oob = parsed.notna() & ((parsed.dt.year < 1678) | (parsed.dt.year > 2262))
+        if oob.any():
+            parsed = parsed.copy()
+            parsed[oob] = pd.NaT
+        return parsed.astype("datetime64[ns]")
+
+    if iso_mask.any():
+        try:
+            parsed = _safe_parse(s[iso_mask], format="ISO8601")
+        except Exception:
+            parsed = _safe_parse(s[iso_mask], format="mixed")
+        result = result.copy()
+        result.loc[iso_mask] = parsed.values
+    if euro_mask.any():
+        parsed = _safe_parse(s[euro_mask], dayfirst=True)
+        result.loc[euro_mask] = parsed.values
+    if slash_mask.any():
+        # AH data: D/M/YYYY format (day first), e.g. "5/6/2018" = June 5
+        parsed = _safe_parse(s[slash_mask], dayfirst=True)
+        result.loc[slash_mask] = parsed.values
+
+    return result
 
 
 def pandas_dtype_to_pg(sanitised_col: str, original_col: str,
@@ -222,17 +291,20 @@ def pandas_dtype_to_pg(sanitised_col: str, original_col: str,
         if sanitised_col in EURO_DATE_COLS.get(table, set()):
             return "TIMESTAMP"
 
-        # Auto-detect by sampling first non-null, non-NaT value
-        sample_vals = series.dropna()
-        sample_vals = sample_vals[sample_vals.astype(str).str.strip().str.upper() != "NAT"]
-        if len(sample_vals) > 0:
-            sample = str(sample_vals.iloc[0]).strip()
-            if TIME_RE.match(sample):
-                return "TIME"
-            if EURO_DATE_RE.match(sample):
-                return "TIMESTAMP"
-            if ISO_DATE_RE.match(sample):
-                return "TIMESTAMP"
+        # Auto-detect by scanning a spread of non-null, non-sentinel values.
+        # Sample across the full column (not just the first row) to handle
+        # mixed SAP/EPIC eras where early rows are one format and later rows another.
+        clean = series.dropna()
+        clean = clean[~clean.astype(str).str.strip().str.lower().isin(NULL_SENTINELS)]
+        if len(clean) > 0:
+            # Check up to 5 values spread across the column
+            step = max(1, len(clean) // 5)
+            for val in clean.iloc[::step].head(5):
+                s = str(val).strip()
+                if TIME_RE.match(s):
+                    return "TIME"
+                if ISO_DATE_RE.match(s) or EURO_DATE_RE.match(s) or SLASH_DATE_RE.match(s):
+                    return "TIMESTAMP"
         return "TEXT"
 
     if dtype == "int32":
@@ -283,12 +355,15 @@ def prepare_df(df: pd.DataFrame, table: str) -> tuple[pd.DataFrame, list, dict]:
 
         if pg_type == "TIMESTAMP":
             if str(df[san_col].dtype) in ("object", "string", "str"):
-                # Replace "NaT" string sentinels before parsing
-                df[san_col] = df[san_col].replace({"NaT": None, "NULL": None, "": None})
-                if san_col in EURO_DATE_COLS.get(table, set()):
-                    df[san_col] = pd.to_datetime(df[san_col], dayfirst=True, errors="coerce")
-                else:
-                    df[san_col] = pd.to_datetime(df[san_col], errors="coerce")
+                before_null = df[san_col].isna().sum()
+                df[san_col] = parse_mixed_date_fast(df[san_col])
+                after_null = df[san_col].isna().sum()
+                total = len(df)
+                # Warn if parse failure is suspiciously high (>5% of non-sentinel values)
+                if after_null > before_null and (after_null - before_null) / total > 0.05:
+                    print(f"    WARNING: {san_col} parse failures = "
+                          f"{after_null - before_null:,} "
+                          f"({100*(after_null-before_null)/total:.1f}% of rows)")
 
         elif pg_type == "TIME":
             # Replace NaT/NULL strings with None; keep valid "HH:MM:SS" strings
@@ -378,11 +453,13 @@ def process_file(s3_key: str, table: str, creds: dict) -> int:
 
     dt_cols = [(c, t) for c, t in pg_types.items() if t in ("TIMESTAMP", "TIME")]
     print(f"  Date/time columns ({len(dt_cols)}):")
-    for col, pg_type in dt_cols[:8]:
+    for col, pg_type in dt_cols:
+        total = len(df)
+        null_count = df[col].isna().sum()
+        pct_null = 100 * null_count / total
         sample = df[col].dropna().iloc[0] if df[col].notna().any() else "all null"
-        print(f"    {col} ({pg_type}): {sample}")
-    if len(dt_cols) > 8:
-        print(f"    ... and {len(dt_cols)-8} more")
+        flag = " *** HIGH NULL ***" if pg_type == "TIMESTAMP" and pct_null > 5 else ""
+        print(f"    {col} ({pg_type}): null={null_count:,}/{total:,} ({pct_null:.1f}%) | {sample}{flag}")
 
     conn = get_conn(creds, dbname=TARGET_DB)
     try:
