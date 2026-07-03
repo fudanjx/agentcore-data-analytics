@@ -1,0 +1,25 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: etl-ah-analytics
+  namespace: agentcore
+spec:
+  ttlSecondsAfterFinished: 300
+  template:
+    spec:
+      serviceAccountName: agentcore-proxy
+      restartPolicy: Never
+      containers:
+        - name: etl
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
+          command: ["python3", "/app/infra/etl_ah_analytics.py"]
+          env:
+            - name: SECRET_ARN
+              value: arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J
+          resources:
+            requests:
+              cpu: 500m
+              memory: 4Gi
+            limits:
+              cpu: 2000m
+              memory: 16Gi
