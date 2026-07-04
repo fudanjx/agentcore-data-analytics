@@ -29,3 +29,6 @@ cdk.out/
 # Temp files
 /tmp/
 *.tmp
+*.pem
+him_scripts/
+.gstack/
