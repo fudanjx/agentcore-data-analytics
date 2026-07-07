@@ -74,20 +74,106 @@ def _extract_session_context(body: dict):
     return session_id, user_id
 
 
-def _invoke_runtime(messages: list, runtime_arn: str, session_id: str = None, user_id: str = None) -> str:
+def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, user_id: str = None) -> dict:
     payload = json.dumps({"messages": messages}).encode()
     kwargs = dict(
         agentRuntimeArn=runtime_arn,
         contentType="application/json",
-        accept="application/json",
+        accept="text/event-stream",
         payload=payload,
     )
     if session_id:
         kwargs["runtimeSessionId"] = session_id
     if user_id:
         kwargs["runtimeUserId"] = user_id
-    resp = get_client().invoke_agent_runtime(**kwargs)
-    return json.loads(resp["response"].read()).get("result", "")
+    return kwargs
+
+
+def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, user_id: str = None):
+    """Generator: yields text deltas from a streaming AgentCore Runtime response.
+
+    The Phase 2 container emits text/event-stream with OpenAI-format chunks. We read
+    the botocore StreamingBody line by line, parse `data: {json}` payloads, and
+    forward the delta.content text.
+
+    Retries once on ConnectionClosedError if the error occurs before any token is
+    yielded (cold-start container spin-up window).
+    """
+    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
+
+    for attempt in range(2):
+        first_token_sent = False
+        try:
+            resp = get_client().invoke_agent_runtime(**kwargs)
+            body = resp["response"]  # botocore StreamingBody
+
+            for raw_line in body.iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    return
+                try:
+                    obj = json.loads(payload)
+                except Exception:
+                    continue
+                choices = obj.get("choices") or []
+                if not choices:
+                    continue
+                delta = (choices[0].get("delta") or {})
+                text = delta.get("content")
+                if text:
+                    first_token_sent = True
+                    yield text
+            return
+        except botocore.exceptions.ConnectionClosedError as e:
+            if attempt == 0 and not first_token_sent:
+                logger.warning(
+                    "Runtime cold-start disconnect (session=%s), retrying...", session_id
+                )
+                continue
+            raise
+
+
+def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str, user_id: str = None) -> str:
+    """Non-streaming path: collect all deltas and return the concatenated string."""
+    return "".join(_stream_runtime_events(messages, runtime_arn, session_id, user_id))
+
+
+async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id, model: str, completion_id: str):
+    """Async generator: yield OpenAI SSE chunks from live runtime stream events.
+
+    Wraps the blocking `_stream_runtime_events` sync iterator via `iterate_in_threadpool`
+    so each `iter_lines()` read runs off the event loop and streamed chunks are flushed
+    to the client immediately (rather than buffered until the generator completes).
+    """
+    from starlette.concurrency import iterate_in_threadpool
+
+    try:
+        sync_iter = _stream_runtime_events(messages, runtime_arn, session_id, user_id)
+        async for text in iterate_in_threadpool(sync_iter):
+            chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "model": model,
+                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except Exception as e:
+        logger.error("Runtime stream error (session=%s): %s", session_id, e)
+        yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'stream_error'}})}\n\n"
+
+    final = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
 
 
 def _normalize_messages(messages: list) -> list:
@@ -214,15 +300,17 @@ async def _build_completion(
             _invoke_harness_buffered, messages, arn, session_id, user_id
         )
     else:
-        result_text = await run_in_threadpool(
-            _invoke_runtime, messages, RUNTIMES[slug], session_id, user_id
-        )
+        # Runtime path — Phase 2: container emits text/event-stream SSE natively.
+        arn = RUNTIMES[slug]
         if stream:
             return StreamingResponse(
-                _stream_response(result_text, model, completion_id),
+                _sse_runtime_stream(messages, arn, session_id, user_id, model, completion_id),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
+        result_text = await run_in_threadpool(
+            _invoke_runtime_buffered, messages, arn, session_id, user_id
+        )
 
     return {
         "id": completion_id,

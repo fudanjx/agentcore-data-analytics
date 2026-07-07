@@ -1,16 +1,17 @@
 """Deploy AgentCore POC.
 
 Creates/updates:
-  1. IAM role for AgentCore Runtime
+  1. IAM role for AgentCore Runtime — grants Bedrock invoke, Gateway invoke, S3 skills read
   2. AgentCore Runtime  — hosts the agent container (ECR image) in VPC mode
   3. AgentCore Endpoint — named endpoint for the runtime
 
 Access is via the EKS proxy (agentcore-proxy pod) — no Lambda or API Gateway involved.
 
+Phase 2: RDS credentials are no longer needed by the runtime — the agent uses
+AgentCore Gateways for DB access via a localhost SigV4 proxy inside the container.
+
 Usage:
     export ECR_IMAGE_URI=<account>.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
-    export RDS_SECRET_ARN=arn:aws:secretsmanager:ap-southeast-1:...
-    export RDS_DB_NAME=nuh-analytics
     python infra/deploy.py
 """
 
@@ -29,6 +30,20 @@ RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
 # VPC config — private subnets in bot-nuhs-vpc, same VPC as RDS
 VPC_SUBNETS = ["subnet-061205c705e0f41d4", "subnet-0466b6e1fbb8a49f3"]
 VPC_SECURITY_GROUPS = ["sg-07258677b7e691e48"]  # agentcore-poc-runtime-sg
+
+# Gateway ARNs the runtime is allowed to invoke via the localhost SigV4 proxy
+GATEWAY_ARNS = [
+    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/nuh-analytics-db-fhbzdmtdta",
+    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-db-gszih4adsx",
+    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/timesfm-gateway-w4fho4r9um",
+]
+
+# S3 skills bucket the agent reads on startup
+SKILLS_BUCKET = "ah-data-analytics"
+SKILLS_PREFIX = "skills/"
+
+# AgentCore Memory (shared with the harness for unified user facts across agents)
+MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
 
 iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
@@ -69,9 +84,32 @@ def ensure_runtime_role() -> str:
                 ],
             },
             {
+                # AgentCore Gateway invocation — the runtime hits the Gateway MCP URLs
+                # via a localhost SigV4 proxy. This grants IAM permission on each gateway.
                 "Effect": "Allow",
-                "Action": ["secretsmanager:GetSecretValue"],
-                "Resource": "*",
+                "Action": ["bedrock-agentcore:InvokeGateway"],
+                "Resource": GATEWAY_ARNS,
+            },
+            {
+                # Read Agent Skills from S3 at container startup
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:ListBucket"],
+                "Resource": [
+                    f"arn:aws:s3:::{SKILLS_BUCKET}",
+                    f"arn:aws:s3:::{SKILLS_BUCKET}/{SKILLS_PREFIX}*",
+                ],
+            },
+            {
+                # AgentCore Memory — retrieve prior context and save turns
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:RetrieveMemoryRecords",
+                    "bedrock-agentcore:ListEvents",
+                    "bedrock-agentcore:GetMemoryRecord",
+                    "bedrock-agentcore:ListMemoryRecords",
+                ],
+                "Resource": MEMORY_ARN,
             },
             {
                 "Effect": "Allow",
@@ -138,8 +176,6 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
         "AWS_DEFAULT_REGION": REGION,
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
-        "RDS_SECRET_ARN": os.environ.get("RDS_SECRET_ARN", ""),
-        "RDS_DB_NAME": os.environ.get("RDS_DB_NAME", ""),
     }
 
     existing_id = _find_existing_runtime()

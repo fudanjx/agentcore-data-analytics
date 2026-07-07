@@ -1,7 +1,7 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM python:3.12-alpine AS builder
+FROM --platform=linux/arm64 python:3.12-alpine AS builder
 
-RUN apk add --no-cache gcc musl-dev postgresql-dev libffi-dev nodejs npm
+RUN apk add --no-cache gcc musl-dev libffi-dev nodejs npm
 
 WORKDIR /build
 
@@ -11,15 +11,14 @@ RUN npm install -g @anthropic-ai/claude-code
 # Install Python packages
 RUN pip install --no-cache-dir --prefix=/install claude-agent-sdk
 COPY requirements.txt .
-RUN sed 's/psycopg2-binary.*/psycopg2/' requirements.txt > requirements-alpine.txt && \
-    pip install --no-cache-dir --prefix=/install -r requirements-alpine.txt
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM python:3.12-alpine
+FROM --platform=linux/arm64 python:3.12-alpine
 
-# Runtime deps: libpq for psycopg2, nodejs to run the claude CLI
-RUN apk add --no-cache libpq nodejs
+# Runtime deps: nodejs to run the claude CLI
+RUN apk add --no-cache nodejs
 
 WORKDIR /app
 
@@ -32,6 +31,9 @@ COPY --from=builder /usr/local/bin/claude /usr/local/bin/claude
 
 # Copy application code
 COPY app/ ./app/
+
+# Skills directory (populated at container startup from S3)
+RUN mkdir -p /app/skills && chown 1000:1000 /app/skills
 
 RUN adduser -D -u 1000 appuser
 USER appuser
