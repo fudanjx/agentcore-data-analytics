@@ -11,7 +11,8 @@ description: Column reference and SQL guidance for the ah-analytics outpatient t
 
 ```sql
 WHERE "prelim_flag" = 'N'
-  AND "APPT_STATUS" NOT IN ('Booked', 'Cancelled')
+  -- AND "APPT_STATUS" NOT IN ('Booked', 'Cancelled')
+  STATUS IN ("A")
   AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
   AND "Trt_Cat" != 'NC'
 ```
