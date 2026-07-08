@@ -32,3 +32,4 @@ cdk.out/
 *.pem
 him_scripts/
 .gstack/
+.code-workspace
