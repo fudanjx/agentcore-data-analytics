@@ -290,10 +290,8 @@ def main():
     print(f"\nAgentCore Runtime ID : {runtime_id}")
     print(f"AgentCore Endpoint   : {endpoint_arn}")
     print(f"\nAccess via EKS proxy (VPC-internal, no auth required):")
-    print(f"  DIFY (in-cluster) :    http://agentcore-proxy.agentcore.svc.cluster.local")
-    print(f"  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com")
-    print(f"\nDirect Python access:")
-    print(f"  python3 py_sdk.py \"your question\"")
+    print(f"  DIFY (in-cluster) :    http://agentcore-proxy.agentcore.svc.cluster.local/poc/v1")
+    print(f"  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/poc/v1")
 
 
 if __name__ == "__main__":

@@ -6,15 +6,19 @@ Four deployable components:
 
 | Component | Where | Purpose |
 |---|---|---|
-| `agentcore-poc` container | AWS AgentCore Runtime (ap-southeast-1) | Legacy Claude Agent SDK agent (path prefix `/poc`) |
-| `agentcore-proxy` container | EKS Fargate (`agentcore` namespace) | OpenAI-compatible proxy → AgentCore runtime/harness |
+| `agentcore-poc` container | AWS AgentCore Runtime (ap-southeast-1) | Claude Agent SDK agent with Gateway MCP + S3 Skills + Memory (path prefix `/poc`) |
+| `agentcore-proxy` container | EKS Fargate (`agentcore` namespace) | Proxy fronting all backends — OpenAI-compatible + Dify App API |
 | MCP Lambdas | Lambda in VPC | Gateway backends: `nuh-analytics-mcp`, `ah-analytics-mcp`, `timesfm-mcp` |
 | `timesfm-service` pod | EKS Fargate (`agentcore` namespace) | TimesFM 2.5-200m forecasting service (CPU) |
 
-Plus supporting infra:
+Plus AWS-console-managed infra (created once via console, referenced by the proxy):
 - AgentCore Gateways (3): `nuh-analytics-db`, `ah-analytics-db`, `timesfm-gateway`
-- AgentCore Harness: `harness_e52fs` (Strands agent, managed memory)
+- AgentCore Harnesses (2): `harness_e52fs` (Strands, for OpenWebUI), `harness_dify` (Strands, for Dify)
+- AgentCore Memory: single shared instance keyed off harness_e52fs
+- S3 Skills bucket: `s3://ah-data-analytics/skills/` — synced by the poc container on startup
 - RDS PostgreSQL with two databases: `nuh-analytics`, `ah-analytics`
+
+Proxy exposes three backend slugs — `/poc`, `/harness`, `/dify` — each in two shapes: OpenAI (`/{slug}/v1/chat/completions`) and Dify App (`/dify/{slug}/v1/chat-messages`).
 
 ---
 
@@ -34,47 +38,36 @@ aws eks update-kubeconfig --region ap-southeast-1 --name ai-project
 
 ## Part 1 — Agent Container (`agentcore_poc` Runtime)
 
-### Step 1 — Configure
+The poc container no longer talks to RDS directly. It uses the three AgentCore Gateway MCP servers (via an in-process SigV4 signing proxy on `127.0.0.1:9000`), and loads Agent Skills from S3 at startup. Memory is bridged to AgentCore Memory via `app/memory.py`.
+
+### Step 1 — Build and deploy
 
 ```bash
-cp .env.example .env
-```
-
-```dotenv
-AWS_DEFAULT_REGION=ap-southeast-1
-CLAUDE_CODE_USE_BEDROCK=1
-RDS_SECRET_ARN=arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J
-RDS_DB_NAME=nuh-analytics
-```
-
-### Step 2 — Test locally (optional)
-
-```bash
-pip3 install -r requirements.txt
-export $(grep -v '^#' .env | xargs)
-uvicorn app.main:app --port 8080 --reload
-
-curl -X POST http://localhost:8080/invocations \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"list all tables"}]}'
-```
-
-RDS timeout is expected locally (private VPC).
-
-### Step 3 — Build and deploy
-
-```bash
-bash infra/build_and_push.sh       # linux/arm64 to ECR
+bash infra/build_and_push.sh       # linux/arm64 → ECR
 export ECR_IMAGE_URI=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
-export RDS_SECRET_ARN=arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J
-export RDS_DB_NAME=nuh-analytics
-python3 infra/deploy.py            # creates Runtime + Endpoint
+python3 infra/deploy.py            # creates IAM role + Runtime + Endpoint (idempotent)
 ```
 
-### Step 4 — Verify
+The IAM role provisioned by `infra/deploy.py` includes:
+- `bedrock:InvokeModel*` on the inference profile
+- `bedrock-agentcore:InvokeGateway` on the three gateway ARNs (nuh, ah, timesfm)
+- `s3:GetObject`/`ListBucket` on the Skills bucket
+- `bedrock-agentcore:CreateEvent`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
+- `ec2:CreateNetworkInterface`/... for VPC mode
+- No RDS or Secrets Manager access — this container no longer needs it
 
-AWS Console → Bedrock → AgentCore → `agentcore_poc` → Test.
-Or: `python3 py_sdk.py "list all tables"`.
+### Step 2 — Verify
+
+AWS Console → Bedrock → AgentCore → `agentcore_poc` → Test with a prompt.
+Or via the proxy: `curl -s http://<proxy-nlb>/poc/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"poc","messages":[{"role":"user","content":"list tables in nuh-analytics"}]}'`.
+
+Container logs (CloudWatch: `/aws/bedrock-agentcore/runtimes/agentcore_poc-*-DEFAULT`) should show on startup:
+```
+Startup: syncing skills from S3...
+Skills sync complete: 7 files in /app/skills
+Startup: launching Gateway SigV4 proxy on localhost...
+Gateway SigV4 proxy listening on 127.0.0.1:9000
+```
 
 ---
 
@@ -133,15 +126,21 @@ kubectl run test --rm -i --restart=Never --image=curlimages/curl -n dify \
 
 ### Step 6 — Configure frontends
 
-**DIFY** (same cluster):
-- Base URL for NUH Analytics agent: `http://agentcore-proxy.agentcore.svc.cluster.local/poc`
-- Base URL for Strands Harness (multi-DB + forecasting): `http://agentcore-proxy.agentcore.svc.cluster.local/harness`
+Base URL pattern is `<host>/<slug>/v1` where `<slug>` is one of `poc`, `harness`, `dify`.
+
+**DIFY** (Model Provider → OpenAI-API-compatible, same cluster or via NLB):
+- Base URL: `http://agentcore-proxy.agentcore.svc.cluster.local/dify/v1` (dedicated `harness_dify` backend)
 - API Key: any value (proxy ignores it)
-- Model: match slug (`poc` or `harness`)
+- Model name: `dify` (or anything — passed through as label)
+- Completion mode: Chat, Streaming: on
+- **Do not** use `/dify/dify/v1` — Dify auto-appends `/chat/completions` to whatever you paste.
+
+*(Optional)* If you want to embed us as a Dify **App** rather than as a model provider, hit `POST /dify/dify/v1/chat-messages` directly — that endpoint speaks Dify's App Chat API with `event: message` / `event: message_end` SSE frames.
 
 **Open WebUI** (EC2 in default VPC via peering):
-- Base URL: `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/harness`
+- Base URL: `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/harness/v1`
 - Send `chat_id` and `model_item.info.user_id` in the request body (Open WebUI does this automatically)
+- Cross-chat memory works on the `/harness` and `/dify` backends. On `/poc`, memory recall from OpenWebUI is currently broken because OpenWebUI's backend strips user identity when calling external OpenAI providers — see REFLECTION.md finding 33 for the TODO.
 
 ---
 
@@ -254,11 +253,42 @@ From Open WebUI, ask: *"Based on monthly admissions [100,105,...,145], forecast 
 
 ---
 
-## Part 6 — Data Ingestion into RDS
+## Part 6 — AgentCore Harnesses + Skills Bucket (AWS Console)
+
+The two harnesses (`harness_e52fs`, `harness_dify`) and the shared memory instance are provisioned through the **AWS console**, not code. This is intentional — the console UI is the only interface that exposes all harness configuration knobs (memory strategies, gateway attachment, skills path, model choice, prompt library).
+
+Steps for each harness:
+
+1. **Bedrock → AgentCore → Harnesses → Create harness.** Name: e.g. `harness_e52fs` (OpenWebUI) or `harness_dify` (DIFY).
+2. **Model**: pick a cross-region profile like `global.anthropic.claude-sonnet-4-6` or an application inference profile ARN.
+3. **Memory**: **Enable**. Add both strategies:
+   - Semantic — namespace `/actors/{actorId}/facts/`
+   - Summarization — namespace `/actors/{actorId}/summaries/{sessionId}/`
+
+   Both harnesses can point at the SAME memory instance (`harness_harness_e52fs_8d3d-vtE3DJC9ia`) for unified user memory across frontends — this is how the current deployment is configured.
+4. **Gateways / Tools**: attach the 3 gateways `nuh-analytics-db`, `ah-analytics-db`, `timesfm-gateway`. Every time you add a gateway to a harness, three things must happen (AWS does the first automatically):
+   - `update_harness(tools=...)` — via console
+   - Add the gateway ARN to the harness's execution IAM policy `AmazonBedrockAgentCoreHarnessGatewayPolicy_*`
+   - Restart/reload (usually implicit)
+5. **Skills**: point at the repo path where your `SKILL.md` and `Skill_*.md` files live. **Use a plain path** like `.claude/Skills` — NOT `tree/main/.claude/Skills` (the URL fragment form throws `Skill path 'tree/main/...' not found in repository` at invocation time).
+
+**Skills bucket for the poc runtime** (separate from the harness skills path): the poc container syncs from `s3://ah-data-analytics/skills/` at startup. Upload skills there once:
+
+```bash
+aws s3 sync .claude/Skills/ s3://ah-data-analytics/skills/
+```
+
+The runtime IAM role provisioned by `infra/deploy.py` already grants `s3:GetObject`/`ListBucket` on this bucket.
+
+After creating each harness, capture the ARN and add it to the proxy's `HARNESSES` dict in `proxy/server.py`, then redeploy the proxy. The proxy is the single place where slug→backend mapping lives; adding a new frontend is one line.
+
+---
+
+## Part 7 — Data Ingestion into RDS
 
 RDS is in private subnets — not reachable from a developer Mac. Use ECS Fargate task inside the VPC.
 
-### 6.1 nuh-analytics
+### 7.1 nuh-analytics
 
 ```bash
 aws s3 cp infra/etl_nuh_analytics.py \
@@ -274,7 +304,7 @@ aws ecs run-task \
 aws logs tail /ecs/agentcore-nuh-etl --region ap-southeast-1 --follow
 ```
 
-### 6.2 ah-analytics
+### 7.2 ah-analytics
 
 Same pattern, uses `agentcore-ah-etl:1` task definition. The ETL drops and recreates the `ah-analytics` database on every run for clean reloads.
 
@@ -292,7 +322,7 @@ aws ecs run-task \
 
 **Critical:** Both ETL scripts handle mixed SAP-era (`DD.MM.YYYY`, `D/M/YYYY`) and EPIC-era (`YYYY-MM-DD`) date formats in the same column. See `parse_mixed_date_fast()` in `etl_ah_analytics.py`. Without this, ~60% of dates parse to NaT.
 
-### 6.3 PII masking
+### 7.3 PII masking
 
 ```bash
 python3 infra/mask_pii.py           # requires VPC access — run from an ECS task
@@ -306,11 +336,13 @@ Masks phone numbers and street addresses in `emd`, `inpatient_movement`, and any
 
 | Change | Rebuild + redeploy |
 |--------|---------------------|
-| `app/` (agent container) | `bash infra/build_and_push.sh && python3 infra/deploy.py` |
+| `app/` (agent container) | `bash infra/build_and_push.sh && ECR_IMAGE_URI=... python3 infra/deploy.py` |
 | `proxy/server.py` | `bash proxy/build_and_push.sh && kubectl rollout restart deployment/agentcore-proxy -n agentcore` |
 | `mcp_lambda/handler.py` (both DBs use same handler) | `python3 mcp_lambda/deploy.py && python3 mcp_lambda/deploy_ah.py` |
 | `timesfm_service/server.py` | `bash timesfm_service/build_and_push.sh && kubectl rollout restart deployment/timesfm-service -n agentcore` |
 | `timesfm_mcp/handler.py` | `NLB_ENDPOINT=http://... python3 timesfm_mcp/deploy.py` |
+| Adding a new frontend/backend | Add a line to `RUNTIMES` or `HARNESSES` in `proxy/server.py`, rebuild + roll the proxy. All routes (`/{slug}/v1/...`, `/dify/{slug}/v1/chat-messages`) auto-mount |
+| Adding Agent Skills to the poc runtime | `aws s3 sync .claude/Skills/ s3://ah-data-analytics/skills/` then restart the runtime (deploy.py or force new revision) |
 | Adding a new tool to a Gateway | Edit `TOOL_SCHEMA` in the deploy script and re-run — `create_gateway_target` is idempotent by name; delete first if updating an existing target |
 
 All deploy scripts are idempotent.
@@ -331,6 +363,12 @@ All deploy scripts are idempotent.
 | Harness "Failed to load tool ... 403 Forbidden" | Harness execution role missing new gateway ARN | Add ARN to `AmazonBedrockAgentCoreHarnessGatewayPolicy_bd7bg` |
 | Harness "Tool name X already exists" | Two Gateway targets named identically | Rename target — tool names are `{target}___{tool}` |
 | Harness 502 "Connection was closed before valid response" | Cold-start disconnect | Proxy catches `ConnectionClosedError` and retries once (was catching wrong exception class before fix) |
+| Dify Model Provider validation "404 Not Found" | Wrong Base URL — Dify auto-appends `/chat/completions` | Set Base URL to `<host>/{slug}/v1`, NOT `<host>/dify/{slug}/v1` |
+| Dify "role failed to satisfy enum [user, assistant]" | Dify sends a `system` message but `invoke_harness` only accepts user/assistant | Fixed — proxy hoists system messages into the harness `systemPrompt` field |
+| Harness "Skill path 'tree/main/.claude/Skills' not found" | Skills path in harness config is a GitHub URL fragment | Set to plain repo path like `.claude/Skills` |
+| Poc container: `actor=None, session=<random-uuid>` in logs | AgentCore Runtime dropped `runtimeUserId` header; body has no `user_id` | Ensure the caller passes `runtimeUserId` (boto3) or `user_id`/`chat_id` in the JSON body |
+| OpenWebUI cross-chat memory doesn't work on `/poc` | OpenWebUI backend strips `user_id` when calling external OpenAI providers | See REFLECTION.md finding 33 — currently TODO. Use `/harness` or `/dify` for OpenWebUI |
+| Container can't resolve `<gw-id>.gateway.bedrock-agentcore.<region>.amazonaws.com` | Missing VPC endpoint for the `.gateway` subdomain | Create `com.amazonaws.<region>.bedrock-agentcore.gateway` — different from the plain `bedrock-agentcore` endpoint |
 | MCP tool returns `An internal error occurred` on describe_table | `datetime`/`Decimal` not JSON-serialisable | Redeploy Lambda — handler round-trips through `json.dumps` with `_json_default` |
 | MCP tool "Missing 'tool' field" | Gateway sends args directly, not wrapped in `{tool, arguments}` | Handler infers tool from event shape |
 | ETL primary date column has >5% null | Mixed SAP/EPIC date formats | Use `parse_mixed_date_fast()` — handles `YYYY-MM-DD [HH:MM:SS]`, `DD.MM.YYYY`, `D/M/YYYY` per-value |
@@ -350,8 +388,10 @@ All deploy scripts are idempotent.
 | Resource | ID / ARN |
 |---|---|
 | AgentCore poc runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m` |
-| AgentCore harness | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
-| Harness memory | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia` |
+| AgentCore harness (OpenWebUI) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
+| AgentCore harness (DIFY) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E` |
+| Shared memory (both harnesses + poc) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia` |
+| S3 Skills bucket (poc runtime) | `s3://ah-data-analytics/skills/` |
 | Inference profile | `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3` |
 | RDS endpoint | `jinxin-postgres.cf7in3efovlt.ap-southeast-1.rds.amazonaws.com` |
 | Secrets Manager | `arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:agentcore-rds-credentials-tlv56J` |
@@ -372,13 +412,14 @@ All deploy scripts are idempotent.
 
 ## VPC Interface Endpoints (bot-nuhs-vpc, ap-southeast-1)
 
-| Endpoint ID | Service |
-|---|---|
-| `vpce-0b582d02606dfbe00` | `bedrock-runtime` |
-| `vpce-0d7da6165d12a2ae8` | `bedrock-agentcore` |
-| `vpce-059f7b6613b722983` | `secretsmanager` |
-| `vpce-02600a734df24aff5` | `ecr.api` |
-| `vpce-084fe8036d1b6e33b` | `ecr.dkr` |
-| `vpce-0cb3dca98becb59a1` | S3 Gateway |
+| Endpoint ID | Service | Purpose |
+|---|---|---|
+| `vpce-0b582d02606dfbe00` | `bedrock-runtime` | Bedrock InvokeModel calls |
+| `vpce-0d7da6165d12a2ae8` | `bedrock-agentcore` | AgentCore control plane + `invoke_agent_runtime` / `invoke_harness` |
+| `vpce-0265c2f3efe0f6151` | `bedrock-agentcore.gateway` | AgentCore Gateway MCP calls (`<gw-id>.gateway.bedrock-agentcore...`) — separate from the plain `bedrock-agentcore` endpoint |
+| `vpce-059f7b6613b722983` | `secretsmanager` | Currently unused by the poc runtime; kept for ETL / harness |
+| `vpce-02600a734df24aff5` | `ecr.api` | ECR image pull |
+| `vpce-084fe8036d1b6e33b` | `ecr.dkr` | ECR image pull |
+| `vpce-0cb3dca98becb59a1` | S3 Gateway | S3 (Skills sync, ETL staging) |
 
-All use security group `sg-0be4a7ae0ed2caf17` (vpc-endpoints-sg).
+All Interface Endpoints use security group `sg-0be4a7ae0ed2caf17` (vpc-endpoints-sg), allow 443 inbound from `10.0.0.0/16`.

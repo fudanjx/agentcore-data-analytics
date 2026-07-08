@@ -55,7 +55,7 @@ def _extract_session_context(request: Request, body: dict) -> tuple[str, str | N
 
     Preferred source: AgentCore Runtime headers forwarded from the boto3
     invoke_agent_runtime API — same identity contract the harness path uses.
-    Fallback: OpenWebUI-style body fields, for direct callers like py_sdk.py.
+    Fallback: OpenWebUI-style body fields, for direct boto3 callers.
 
     session_id must be >=33 chars for AgentCore Memory. Pad if shorter.
     """
