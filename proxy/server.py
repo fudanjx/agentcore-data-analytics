@@ -1,22 +1,32 @@
 """
-AgentCore OpenAI-compatible proxy.
+AgentCore proxy — OpenAI-compatible + Dify-compatible.
 
-Accepts standard OpenAI /v1/chat/completions requests and forwards them to
-an AgentCore Runtime or Harness via boto3 (IAM auth via pod IRSA).
-Supports both streaming (SSE) and non-streaming responses.
+Accepts:
+  - OpenAI /v1/chat/completions (OpenWebUI, etc.)
+  - Dify /v1/chat-messages       (Dify Apps)
 
-Path-prefixed routes allow multiple runtimes on one service:
-  /poc/v1/chat/completions     → agentcore_poc runtime (invoke_agent_runtime)
-  /harness/v1/chat/completions → harness_harness_e52fs (invoke_harness)
-  /v1/chat/completions         → agentcore_poc (backward-compat)
+Forwards to an AgentCore Runtime or Harness via boto3 (IAM auth via pod IRSA).
+Both streaming (SSE) and blocking responses are supported on both surfaces.
 
-OpenWebUI session/user context is forwarded to AgentCore for memory:
-  chat_id                  → runtimeSessionId  (stable per conversation)
-  model_item.info.user_id  → actorId / runtimeUserId (stable per user)
+Path-prefixed routes allow multiple backends on one service:
+  /poc/v1/chat/completions       → agentcore_poc runtime  (invoke_agent_runtime)
+  /harness/v1/chat/completions   → harness_e52fs         (invoke_harness)
+  /v1/chat/completions           → agentcore_poc          (OpenAI compat root)
+  /dify/poc/v1/chat-messages     → agentcore_poc runtime
+  /dify/harness/v1/chat-messages → harness_e52fs
+
+OpenWebUI → AgentCore identity:
+  chat_id                  → runtimeSessionId
+  model_item.info.user_id  → actorId / runtimeUserId
+
+Dify → AgentCore identity:
+  conversation_id          → runtimeSessionId
+  user                     → actorId / runtimeUserId
 """
 
 import json
 import logging
+import time
 import uuid
 
 import boto3
@@ -25,6 +35,7 @@ from botocore.config import Config
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import iterate_in_threadpool
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-proxy")
@@ -39,6 +50,7 @@ RUNTIMES = {
 # Harnesses invoked via invoke_harness (managed runtimes cannot be called directly)
 HARNESSES = {
     "harness": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
+    "dify": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E",
 }
 
 ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
@@ -75,7 +87,12 @@ def _extract_session_context(body: dict):
 
 
 def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, user_id: str = None) -> dict:
-    payload = json.dumps({"messages": messages}).encode()
+    body = {"messages": messages}
+    if session_id:
+        body["chat_id"] = session_id
+    if user_id:
+        body["model_item"] = {"info": {"user_id": user_id}}
+    payload = json.dumps(body).encode()
     kwargs = dict(
         agentRuntimeArn=runtime_arn,
         contentType="application/json",
@@ -150,8 +167,6 @@ async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str,
     so each `iter_lines()` read runs off the event loop and streamed chunks are flushed
     to the client immediately (rather than buffered until the generator completes).
     """
-    from starlette.concurrency import iterate_in_threadpool
-
     try:
         sync_iter = _stream_runtime_events(messages, runtime_arn, session_id, user_id)
         async for text in iterate_in_threadpool(sync_iter):
@@ -176,15 +191,29 @@ async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str,
     yield "data: [DONE]\n\n"
 
 
-def _normalize_messages(messages: list) -> list:
-    """Convert OpenAI string content to [{text: "..."}] format required by invoke_harness."""
-    normalized = []
+def _normalize_messages(messages: list) -> tuple[list, list]:
+    """Split OpenAI-style messages for invoke_harness.
+
+    invoke_harness only accepts roles 'user' and 'assistant' — system messages
+    must be hoisted into the separate `systemPrompt` field.
+
+    Returns (harness_messages, system_prompt) where each item is content-normalised
+    to the [{text: "..."}] shape the harness expects.
+    """
+    harness_messages: list = []
+    system_prompt: list = []
     for m in messages:
         content = m.get("content", "")
         if isinstance(content, str):
-            content = [{"text": content}]
-        normalized.append({"role": m["role"], "content": content})
-    return normalized
+            content_blocks = [{"text": content}]
+        else:
+            content_blocks = content
+        role = m.get("role")
+        if role == "system":
+            system_prompt.extend(content_blocks)
+        else:
+            harness_messages.append({"role": role, "content": content_blocks})
+    return harness_messages, system_prompt
 
 
 def _stream_harness_events(messages: list, harness_arn: str, session_id: str, actor_id: str = None):
@@ -194,11 +223,14 @@ def _stream_harness_events(messages: list, harness_arn: str, session_id: str, ac
     has been yielded yet (safe to retry before the SSE response is committed).
     After the first token is yielded, any error propagates to the caller.
     """
+    harness_messages, system_prompt = _normalize_messages(messages)
     kwargs = dict(
         harnessArn=harness_arn,
         runtimeSessionId=session_id,
-        messages=_normalize_messages(messages),
+        messages=harness_messages,
     )
+    if system_prompt:
+        kwargs["systemPrompt"] = system_prompt
     if actor_id:
         kwargs["actorId"] = actor_id
 
@@ -400,3 +432,123 @@ async def chat_completions_compat(request: Request):
     except Exception as e:
         logger.error("AgentCore error [compat]: %s", e)
         return JSONResponse(status_code=502, content={"error": str(e)})
+
+
+# ---------------------------------------------------------------------------
+# Dify Chat App API — /dify/{slug}/v1/chat-messages
+#
+# Spec: https://docs.dify.ai/api-reference/chats/send-chat-message
+# Dify sends a single-turn request per HTTP call; conversation history is
+# maintained server-side by echoing conversation_id back to the client.
+# ---------------------------------------------------------------------------
+
+def _dify_parse(body: dict):
+    """Return (query, user, conversation_id, response_mode).
+
+    Mints a fresh conversation_id when the caller sends an empty one, so the
+    first response can echo a stable id the client will reuse on the next turn.
+    """
+    query = (body.get("query") or "").strip()
+    user = body.get("user") or None
+    conversation_id = body.get("conversation_id") or str(uuid.uuid4())
+    response_mode = body.get("response_mode") or "streaming"
+    return query, user, conversation_id, response_mode
+
+
+def _dify_event(event: str, conversation_id: str, message_id: str,
+                task_id: str, **extra) -> str:
+    frame = {
+        "event": event,
+        "conversation_id": conversation_id,
+        "message_id": message_id,
+        "task_id": task_id,
+        "created_at": int(time.time()),
+        **extra,
+    }
+    return f"data: {json.dumps(frame)}\n\n"
+
+
+async def _dify_sse(sync_iter, conversation_id: str, message_id: str, task_id: str):
+    """Wrap a sync text-delta iterator into Dify-format SSE frames.
+
+    Uses iterate_in_threadpool so each blocking read from botocore runs off
+    the event loop — same pattern as _sse_runtime_stream.
+    """
+    try:
+        async for text in iterate_in_threadpool(sync_iter):
+            yield _dify_event("message", conversation_id, message_id, task_id, answer=text)
+    except Exception as e:
+        logger.error("Dify stream error (conv=%s): %s", conversation_id, e)
+        yield _dify_event(
+            "error", conversation_id, message_id, task_id,
+            status=500, code="runtime_error", message=str(e),
+        )
+        return
+
+    yield _dify_event(
+        "message_end", conversation_id, message_id, task_id,
+        metadata={"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
+    )
+
+
+def _dify_blocking_body(answer: str, conversation_id: str, message_id: str, task_id: str) -> dict:
+    return {
+        "event": "message",
+        "task_id": task_id,
+        "id": message_id,
+        "message_id": message_id,
+        "conversation_id": conversation_id,
+        "mode": "chat",
+        "answer": answer,
+        "metadata": {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
+        "created_at": int(time.time()),
+    }
+
+
+@app.post("/dify/{slug}/v1/chat-messages")
+async def dify_chat_messages(slug: str, request: Request):
+    if slug not in ALL_SLUGS:
+        return JSONResponse(status_code=404, content={"error": f"Unknown backend: {slug}"})
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"code": "invalid_param",
+                                                       "message": "invalid JSON body",
+                                                       "status": 400})
+
+    query, user, conversation_id, response_mode = _dify_parse(body)
+    if not query:
+        return JSONResponse(status_code=400, content={"code": "invalid_param",
+                                                       "message": "query is required",
+                                                       "status": 400})
+
+    message_id = str(uuid.uuid4())
+    task_id = str(uuid.uuid4())
+    messages = [{"role": "user", "content": query}]
+
+    logger.info("Dify [%s]: mode=%s, conv=%s, user=%s, q_chars=%d",
+                slug, response_mode, conversation_id, user, len(query))
+
+    # Build the sync generator that yields text deltas from the appropriate backend
+    if slug in HARNESSES:
+        def sync_iter():
+            yield from _stream_harness_events(messages, HARNESSES[slug], conversation_id, user)
+    else:
+        def sync_iter():
+            yield from _stream_runtime_events(messages, RUNTIMES[slug], conversation_id, user)
+
+    if response_mode == "blocking":
+        try:
+            answer = await run_in_threadpool(lambda: "".join(sync_iter()))
+            return _dify_blocking_body(answer, conversation_id, message_id, task_id)
+        except Exception as e:
+            logger.error("Dify blocking error [%s] (conv=%s): %s", slug, conversation_id, e)
+            return JSONResponse(status_code=502, content={"code": "runtime_error",
+                                                           "message": str(e),
+                                                           "status": 502})
+
+    return StreamingResponse(
+        _dify_sse(sync_iter(), conversation_id, message_id, task_id),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )

@@ -50,16 +50,25 @@ def ping():
     return {"status": "ok"}
 
 
-def _extract_session_context(body: dict) -> tuple[str, str | None]:
-    """Return (session_id, actor_id) from an OpenWebUI-style request body.
+def _extract_session_context(request: Request, body: dict) -> tuple[str, str | None]:
+    """Return (session_id, actor_id).
 
-    session_id must be >=33 chars for AgentCore Memory. If chat_id is a UUID
-    (36 chars) it satisfies this; otherwise pad. If no chat_id, generate a new UUID.
+    Preferred source: AgentCore Runtime headers forwarded from the boto3
+    invoke_agent_runtime API — same identity contract the harness path uses.
+    Fallback: OpenWebUI-style body fields, for direct callers like py_sdk.py.
+
+    session_id must be >=33 chars for AgentCore Memory. Pad if shorter.
     """
-    session_id = body.get("chat_id") or str(uuid.uuid4())
+    session_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-session-id")
+    actor_id = request.headers.get("x-amzn-bedrock-agentcore-runtime-user-id")
+
+    if not session_id:
+        session_id = body.get("chat_id") or str(uuid.uuid4())
+    if not actor_id:
+        actor_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
+
     if len(session_id) < 33:
         session_id = session_id.ljust(33, "x")
-    actor_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
     return session_id, actor_id
 
 
@@ -153,9 +162,10 @@ async def invoke(request: Request):
         messages = [{"role": "user", "content": str(prompt)}]
 
     model_slug = body.get("model", "poc")
-    session_id, actor_id = _extract_session_context(body)
-    logger.info("Invoke: model=%s, turns=%d, actor=%s, session=%s",
-                model_slug, len(messages), actor_id, session_id)
+    session_id, actor_id = _extract_session_context(request, body)
+    header_keys = [k for k in request.headers.keys() if "amzn" in k.lower() or "agentcore" in k.lower() or "session" in k.lower() or "user" in k.lower()]
+    logger.info("Invoke: model=%s, turns=%d, actor=%s, session=%s, id_headers=%s",
+                model_slug, len(messages), actor_id, session_id, header_keys)
 
     return StreamingResponse(
         _sse_stream(messages, model_slug, actor_id, session_id),

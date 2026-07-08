@@ -14,21 +14,25 @@ EKS Fargate: agentcore-proxy      (amd64, namespace: agentcore)
         ▼
 AgentCore Runtime / Harness      (ap-southeast-1, private VPC)
         │
-        ├─ agentcore_poc         Claude Agent SDK + execute_sql MCP tool
-        │                        (VPC-mode container, arm64)
+        ├─ agentcore_poc         Claude Agent SDK + Gateway MCP + S3 Skills
+        │                        (VPC-mode container, arm64, native SSE streaming)
+        │                        Uses same 3 gateways as the harnesses, via localhost SigV4 proxy
         │
-        └─ harness_e52fs         Strands Agent, model=global.anthropic.claude-sonnet-4-6
-                │  3 gateway tools mounted:
-                │
-                ├──▶ nuh-analytics-db (Gateway) → nuh-analytics-mcp (Lambda) → RDS nuh-analytics
-                │
-                ├──▶ ah-analytics-db  (Gateway) → ah-analytics-mcp  (Lambda) → RDS ah-analytics
-                │
-                └──▶ timesfm-gateway  (Gateway) → timesfm-mcp       (Lambda)
-                                                                    │  HTTP POST
-                                                                    ▼
-                                                    Internal NLB → EKS pod: timesfm-service
-                                                                    (TimesFM 2.5-200m, CPU)
+        ├─ harness_e52fs         Strands Agent, model=global.anthropic.claude-sonnet-4-6
+        │       │  3 gateway tools mounted:
+        │       │
+        │       ├──▶ nuh-analytics-db (Gateway) → nuh-analytics-mcp (Lambda) → RDS nuh-analytics
+        │       │
+        │       ├──▶ ah-analytics-db  (Gateway) → ah-analytics-mcp  (Lambda) → RDS ah-analytics
+        │       │
+        │       └──▶ timesfm-gateway  (Gateway) → timesfm-mcp       (Lambda)
+        │                                                                   │  HTTP POST
+        │                                                                   ▼
+        │                                                   Internal NLB → EKS pod: timesfm-service
+        │                                                                   (TimesFM 2.5-200m, CPU)
+        │
+        └─ harness_dify          Strands Agent — dedicated harness for DIFY frontend
+                                 Same gateway toolset as harness_e52fs
 ```
 
 ## What's in this repo
@@ -111,23 +115,37 @@ aws ecs run-task --cluster embedded-web-app --task-definition agentcore-ah-etl:1
 
 ## API Endpoints
 
-Two path prefixes on the same proxy — pick the one that matches your agent.
+The proxy exposes **three backends × two API shapes** on the same service. Pick the slug that matches your backend, and the shape that matches your frontend.
+
+### Slugs → backend
+
+| Slug | Backend | AWS call |
+|------|---------|----------|
+| `/poc` | `agentcore_poc` runtime (Claude Agent SDK) | `invoke_agent_runtime` |
+| `/harness` | `harness_e52fs` (Strands Agent for OpenWebUI) | `invoke_harness` |
+| `/dify` | `harness_dify` (Strands Agent for DIFY) | `invoke_harness` |
+
+### API shapes
+
+- **OpenAI-compatible** (Open WebUI, DIFY Model Provider, LangChain, etc.): `POST {base}/v1/chat/completions`. Also `GET {base}/v1/models`.
+- **Dify App Chat API** (embedding as a Dify App): `POST {base}/v1/chat-messages`. Streams Dify SSE events (`message`, `message_end`, `error`).
+
+For OpenAI-compatible clients the base is `http://<host>/{slug}/v1`. For the Dify App shape it is `http://<host>/dify/{slug}/v1`.
 
 ### From inside the EKS cluster (DIFY)
 
-| Slug | Base URL |
-|------|----------|
-| `/poc` (Claude Agent SDK) | `http://agentcore-proxy.agentcore.svc.cluster.local/poc` |
-| `/harness` (Strands Agent) | `http://agentcore-proxy.agentcore.svc.cluster.local/harness` |
+| Backend | Base URL (OpenAI shape) |
+|---------|-------------------------|
+| poc | `http://agentcore-proxy.agentcore.svc.cluster.local/poc/v1` |
+| harness | `http://agentcore-proxy.agentcore.svc.cluster.local/harness/v1` |
+| dify | `http://agentcore-proxy.agentcore.svc.cluster.local/dify/v1` |
 
 ### From VPC / peered VPC (Open WebUI)
 
-| Slug | Base URL |
-|------|----------|
-| `/poc` | `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/poc` |
-| `/harness` | `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/harness` |
+Replace the cluster DNS with the internal NLB `k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com`. All endpoints are VPC-internal, no auth (any Bearer token is accepted).
 
-Append `/v1/chat/completions` for chat and `/v1/models` for the model list. All endpoints are internal-only.
+**Dify Model Provider config (recommended integration):**
+Set `Base URL = http://<nlb>/dify/v1` (or `/harness/v1`, `/poc/v1`). Model type: `LLM`, mode: `Chat`, streaming on. API Key: any value.
 
 ### Direct boto3 (bypasses proxy)
 
@@ -146,22 +164,41 @@ print(json.loads(resp["response"].read())["result"])
 
 ## Session and Memory Wiring
 
-The proxy maps OpenWebUI request fields to AgentCore session/memory parameters. Same conversation always reuses the same runtime session → container stays warm, memory namespaces work correctly.
+The proxy carries session/user identity from the frontend into AgentCore. Same conversation → same runtime session → warm container reuse + memory namespace hits.
 
 ```
-OpenWebUI chat_id                → runtimeSessionId  (must be ≥ 33 chars)
+OpenWebUI chat_id                → runtimeSessionId  (≥ 33 chars, proxy pads if shorter)
 OpenWebUI model_item.info.user_id → actorId (harness) / runtimeUserId (runtime)
+Dify conversation_id             → runtimeSessionId  (echoed back so client can reuse)
+Dify user                        → actorId / runtimeUserId
 ```
 
 AgentCore managed memory uses two strategies (configured on the harness):
-- **Semantic** — `/actors/{actorId}/facts/` — cross-session user facts
-- **Summarization** — `/actors/{actorId}/summaries/{sessionId}/` — per-conversation summaries
+- **Semantic** — `/actors/{actorId}/facts/` — cross-session user facts. Extracted asynchronously (~30–60 s after the turn is saved).
+- **Summarization** — `/actors/{actorId}/summaries/{sessionId}/` — per-conversation summaries.
+
+### Known limitation — memory on `/poc` (Claude Agent SDK) is partial ⚠️
+
+Cross-session memory works reliably on the two **harness** backends (`/harness`, `/dify`) — those are managed by AWS and read `actorId`/`runtimeSessionId` from the boto3 API natively.
+
+On the **`/poc`** backend (Claude Agent SDK inside our container) it is only *partially* wired:
+- `runtimeSessionId` is forwarded by AgentCore Runtime as HTTP header `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` — the container reads it.
+- `runtimeUserId` is silently dropped by AgentCore Runtime — not forwarded as a header. The proxy works around this by injecting `chat_id`/`user_id` into the payload body, and the container reads them from there.
+- OpenWebUI, however, does **not** send `chat_id` or `user_id` in its outbound OpenAI-shaped request body — only `{model, messages, stream}` — so when OpenWebUI calls `/poc`, the container has no user identity and skips both memory save and memory retrieval.
+- Direct boto3 invocations that pass `runtimeUserId` do work end-to-end.
+
+Verified end-to-end via direct API test: turn 1 saves `Charlie / ICU team` under a user id, ~1 min later (async fact extractor) turn 2 in a new session recalls it. But **from OpenWebUI, the `/poc` path currently loses user identity at the OpenWebUI-backend → proxy hop**.
+
+**TODO:** either (a) enable an OpenWebUI Function/Filter that injects `user_id`/`chat_id` into outbound bodies, or (b) find/enable OpenWebUI's "Include User Info" toggle so it forwards `X-OpenWebUI-User-Id` as a header, then have the proxy read that header. The two managed harnesses are not affected because AgentCore's `invoke_harness` API takes `actorId` as a first-class parameter that the proxy already sets from any source it has — including a stable derived id when the body lacks one.
 
 ## Streaming (SSE)
 
-`/harness/v1/chat/completions?stream=true` streams tokens as they arrive from AWS's `invoke_harness` event stream. The proxy consumes `contentBlockDelta` events and emits OpenAI-format SSE chunks, so Open WebUI shows the response typing in real-time.
+All three backends stream token-by-token when the client asks for `stream=true` (OpenAI) or `response_mode="streaming"` (Dify).
 
-Cold-start retry: if the first `invoke_harness` call disconnects before the first token (`ConnectionClosedError`, cold container spin-up), the proxy retries once silently.
+- **Harness paths (`/harness`, `/dify`)** — the proxy consumes `contentBlockDelta` events from `invoke_harness`'s event stream and emits OpenAI-format SSE chunks.
+- **Runtime path (`/poc`)** — the container uses `ClaudeAgentOptions(include_partial_messages=True)` and yields `content_block_delta` `text_delta` events as they arrive. Real progressive delivery — verified with a 300-word essay test (156 SSE lines spread over 7.7 s).
+- **Cold-start retry** — if the first `invoke_harness` / `invoke_agent_runtime` call disconnects before the first token (`ConnectionClosedError`, cold container spin-up), the proxy retries once silently. Both connection classes are caught (`ConnectionClosedError`, `EventStreamError`).
+- **Do not block the event loop** — the proxy wraps the blocking botocore stream iterator with `starlette.concurrency.iterate_in_threadpool` so tokens flush to the client as they arrive.
 
 ## Agent Tools (Harness Gateway Tools)
 
@@ -197,7 +234,8 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 | Resource | Value |
 |----------|-------|
 | AgentCore poc runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m` |
-| AgentCore harness | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
+| AgentCore harness (OpenWebUI) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
+| AgentCore harness (DIFY) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E` |
 | Harness memory | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia` |
 | Inference profile | `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3` |
 | RDS endpoint | `jinxin-postgres.cf7in3efovlt.ap-southeast-1.rds.amazonaws.com` |
@@ -209,6 +247,86 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 | Proxy internal NLB | `k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com` |
 | TimesFM internal NLB | `k8s-agentcor-timesfms-fb1729afc9-4eef87d9ac68417f.elb.ap-southeast-1.amazonaws.com` |
 | MCP Gateways | `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `timesfm-gateway-w4fho4r9um` |
+
+## Replicating in a New AWS Account
+
+The minimum path from zero to a working OpenWebUI / DIFY endpoint. Each step is idempotent — safe to re-run.
+
+**Pre-flight checklist (blockers if missing):**
+1. **Bedrock model access** — request `anthropic.claude-*` model access in your target model region (usually `us-east-1`) and create an **application inference profile** pointing at it. AgentCore needs the profile ARN, not the bare model id.
+2. **VPC with private + public subnets**, NAT for private egress, and these VPC Interface Endpoints in the private subnets:
+   - `com.amazonaws.<region>.bedrock-runtime`
+   - `com.amazonaws.<region>.bedrock-agentcore`
+   - `com.amazonaws.<region>.bedrock-agentcore.gateway`  ← different from the one above; needed for Gateway MCP calls
+   - `com.amazonaws.<region>.secretsmanager`
+   - `com.amazonaws.<region>.ecr.api` and `com.amazonaws.<region>.ecr.dkr`
+3. **Tag your private subnets** with `kubernetes.io/role/internal-elb = 1` — internal NLBs won't provision without this.
+4. **EKS cluster with a Fargate profile** that covers the `agentcore` namespace (wildcard is fine). Note the OIDC provider ARN — IRSA needs it.
+5. **RDS PostgreSQL** in the same VPC, private subnets only (`PubliclyAccessible: false`). Credentials in Secrets Manager.
+6. **ECR repos**: `agentcore-poc`, `agentcore-proxy`, `timesfm-service`. `aws ecr create-repository` — one per component.
+7. **Confirm no org SCP blocks** `AuthType: NONE` on Lambda Function URLs (we don't use them, but check). Confirm `bedrock-agentcore:*` actions are allowed.
+
+**Then, in this order:**
+
+```bash
+# ── 1. Update account/region constants ────────────────────────────
+# Search & replace 964340114883 → your account id; ap-southeast-1 → your region
+# Files to edit: infra/deploy.py, proxy/server.py, mcp_lambda/*.py, timesfm_mcp/deploy.py
+grep -rn "964340114883\|ap-southeast-1" infra/ proxy/ mcp_lambda/ timesfm_mcp/ app/
+
+# ── 2. Data plane: ETL + Skills ───────────────────────────────────
+# Load your parquet/CSV data into RDS via an ECS Fargate ETL task inside the VPC.
+# See infra/etl_nuh_analytics.py for the pattern.
+aws s3 sync .claude/Skills/ s3://<your-skills-bucket>/skills/
+
+# ── 3. MCP Lambdas (one per database) ─────────────────────────────
+python3 mcp_lambda/deploy.py     # nuh-analytics-mcp + gateway
+python3 mcp_lambda/deploy_ah.py  # ah-analytics-mcp  + gateway
+
+# ── 4. TimesFM forecasting (optional) ─────────────────────────────
+bash timesfm_service/build_and_push.sh
+kubectl apply -f timesfm_service/k8s/
+NLB=$(kubectl get svc timesfm-svc-internal -n agentcore -o jsonpath='{.status.loadBalancer.ingress[0].hostname}')
+NLB_ENDPOINT="http://${NLB}" python3 timesfm_mcp/deploy.py
+
+# ── 5. AgentCore Runtime (poc) ────────────────────────────────────
+bash infra/build_and_push.sh       # arm64 image → ECR
+export ECR_IMAGE_URI=<account>.dkr.ecr.<region>.amazonaws.com/agentcore-poc:latest
+python3 infra/deploy.py            # creates IAM role + runtime + endpoint
+
+# ── 6. AgentCore Harness (one per frontend) ───────────────────────
+# Create in AWS console → Bedrock AgentCore → Harnesses.
+# Attach the 3 gateway targets. Enable memory (semantic + summarization).
+# Load Skills from your S3 bucket (plain repo/prefix path — no URL fragment).
+# Repeat once per frontend (harness_e52fs for OpenWebUI, harness_dify for DIFY, etc.)
+
+# ── 7. Proxy (single service, all backends) ───────────────────────
+# Edit proxy/server.py RUNTIMES/HARNESSES dicts with your new ARNs.
+bash proxy/build_and_push.sh        # amd64 image → ECR
+kubectl apply -f proxy/k8s/         # deployment + service + IRSA SA
+```
+
+**Post-deploy verification:**
+```bash
+# OpenAI shape
+curl -sS http://<nlb>/harness/v1/chat/completions -H 'Content-Type: application/json' \
+  -d '{"model":"harness","messages":[{"role":"user","content":"hi"}]}' | jq
+# Dify shape
+curl -sS http://<nlb>/dify/harness/v1/chat-messages -H 'Content-Type: application/json' \
+  -d '{"query":"hi","user":"tester","response_mode":"blocking","conversation_id":"","inputs":{}}' | jq
+```
+
+**Best-practice recap (from real pitfalls in this build):**
+- Split architectures: AgentCore Runtime containers are `linux/arm64`; everything on EKS Fargate is `linux/amd64`. Always pass `--platform` to `docker build`.
+- Runtime names: `[a-zA-Z][a-zA-Z0-9_]{0,47}` — underscores only, no hyphens.
+- Gateway target names must be globally unique across a single harness (tool names are formed as `{target}___{tool}`).
+- Every new gateway added to a harness needs THREE things: (a) `update_harness(tools=...)`, (b) add the gateway ARN to `AmazonBedrockAgentCoreHarnessGatewayPolicy_*`, (c) restart/reload.
+- Skills path in the harness config is a **plain repo path** like `.claude/Skills`, not a URL fragment like `tree/main/.claude/Skills`.
+- IAM propagation for VPC Lambdas: `time.sleep(15–20)` after `put_role_policy` before `create_function`.
+- Set `CLAUDE_CODE_USE_BEDROCK=1` via `ClaudeAgentOptions(env=...)`, NOT container env — the SDK spawns a subprocess with its own env.
+- `invoke_agent_runtime` IAM policies: use `Resource: "*"` — the check is against the endpoint ARN, not the runtime ARN.
+- For Dify integration: point Dify's OpenAI-compatible Model Provider at `/{slug}/v1` (Dify auto-appends `/chat/completions`). Never at `/dify/{slug}/v1`.
+- For OpenWebUI cross-chat memory: pick a harness backend (`/harness` or `/dify`), not `/poc` — see the memory-limitation note above.
 
 ## Troubleshooting
 
@@ -222,6 +340,10 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 | Harness 502 "Connection was closed" | Cold-start disconnect | Proxy retries once on `ConnectionClosedError` — verify catch is correct exception class |
 | Harness "Failed to load tool ... 403 Forbidden" | Harness execution role missing new gateway ARN | Add gateway ARN to `AmazonBedrockAgentCoreHarnessGatewayPolicy_bd7bg` |
 | Harness "Tool name X already exists" | Two Gateway targets with same name | Rename target so tool names `{target}___{tool}` are unique |
+| Dify validation "Credentials validation failed 404" | Wrong Base URL — Dify appends `/chat/completions` | Set Base URL to `/harness/v1` (or `/poc/v1`, `/dify/v1`), NOT `/dify/harness/v1` |
+| Dify "role failed to satisfy enum [user, assistant]" | Dify sends `role: system` messages; `invoke_harness` rejects them | Proxy hoists system messages into the harness `systemPrompt` field — see `_normalize_messages` in `proxy/server.py` |
+| Dify "Skill path not found in repository" | Harness skill config points at wrong GitHub path | Fix skill config in AWS console → Edit harness → Skills. Use plain repo path, not URL fragment |
+| OpenWebUI `/poc` chat: memory not recalled | OpenWebUI does not forward `user_id` to external OpenAI providers | See "Session and Memory Wiring" — TODO. `/harness`/`/dify` are unaffected |
 | MCP tool returns `An internal error occurred` | `datetime`/`Decimal` not JSON-serialisable | Fixed in handler — redeploy Lambda |
 | MCP tool "Missing 'tool' field" | Gateway sends args directly, not wrapped | Handler infers tool from event shape — see `mcp_lambda/handler.py` |
 | ETL primary date column has >5% null | Mixed SAP/EPIC formats not handled | Use `parse_mixed_date_fast()` in `etl_ah_analytics.py` |

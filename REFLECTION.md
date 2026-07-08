@@ -6,9 +6,31 @@ This document captures what worked, what failed, root causes, and how to do it f
 
 ## What We Built
 
-A production-grade multi-tool agent on AWS AgentCore, accessible from DIFY and Open WebUI via OpenAI-compatible API, running 100% within AWS private networking. No internet traffic. Two runtime harnesses (Claude Agent SDK + Strands), two database backends (`nuh-analytics`, `ah-analytics`), and Google TimesFM time-series forecasting — all wired into a single Strands harness.
+A production-grade multi-tool agent on AWS AgentCore, accessible from DIFY and Open WebUI via OpenAI-compatible API, running 100% within AWS private networking. No internet traffic. Three backends (one Claude Agent SDK runtime + two Strands harnesses — one per frontend), two database backends (`nuh-analytics`, `ah-analytics`), Google TimesFM time-series forecasting, S3-loaded Skills, AgentCore Memory, native token-level streaming, and both OpenAI and Dify API shapes served from a single proxy.
 
-**Total wall-clock time:** ~5 days of iteration across multiple sessions.
+**Total wall-clock time:** ~6 days of iteration across multiple sessions.
+
+## Current Status (as of the phase 2 branch)
+
+| Capability | Status |
+|---|---|
+| Real token-level streaming from `/poc` | ✅ Verified end-to-end (156 SSE lines / 7.7 s) |
+| Streaming from `/harness`, `/dify` | ✅ Native — pipes `contentBlockDelta` events straight through |
+| OpenAI-compatible endpoints (`/{slug}/v1/chat/completions`) | ✅ Used by OpenWebUI and Dify Model Provider |
+| Dify App-shape endpoints (`/dify/{slug}/v1/chat-messages`) | ✅ Streaming + blocking modes |
+| Gateway MCP tools (nuh, ah, timesfm) on `/poc` via localhost SigV4 proxy | ✅ All three return 200 OK |
+| S3 Skills sync at container startup | ✅ 7 files loaded on boot |
+| System-prompt injection from frontend (role: system) | ✅ Merged into base prompt (poc) / hoisted into `systemPrompt` (harness) |
+| AgentCore Memory on `/harness`, `/dify` | ✅ Cross-session recall works (~60 s ingestion lag) |
+| **AgentCore Memory on `/poc` (Claude Agent SDK)** | ⚠️ **PARTIAL — TODO** |
+
+### TODO: Cross-chat memory on the `/poc` backend
+
+Direct boto3 tests with an explicit `runtimeUserId` DO save and retrieve memory correctly on `/poc`. But **from OpenWebUI**, memory does not work because OpenWebUI's backend → external-OpenAI outbound request strips user identity (see finding 33 below). Two ways to fix:
+1. Add an OpenWebUI Function/Filter that injects `user_id`/`chat_id` into outbound bodies.
+2. Find or enable OpenWebUI's "Include User Info" toggle so it emits `X-OpenWebUI-User-Id`, then read that header in the proxy.
+
+The two managed harnesses (`/harness`, `/dify`) are unaffected — AgentCore Harness accepts `actorId` as a first-class API parameter that the proxy sets from whatever identity source it has.
 
 ---
 
@@ -197,6 +219,64 @@ ctrl._service_model.operation_model('CreateGatewayTarget').input_shape
 **Failed:** `The provided execution role does not have permissions to call CreateNetworkInterface on EC2` — even after `put_role_policy` returned success
 **Fix:** `time.sleep(20)` after creating role + attaching managed policy before `create_function` in VPC mode
 **Lesson:** Role creation is eventually consistent. For VPC Lambda creation specifically, allow 15-20 seconds.
+
+---
+
+## Phase 2 Additions — Streaming, Memory, Gateway MCP, Multi-frontend
+
+### 31. "AgentCore Runtime doesn't stream" — false alarm
+**Failed:** Chunks arrived in a single burst 15 seconds after invocation on the `/poc` path. Initial assumption: AgentCore's ingress buffers.
+**Root cause:** Two separate bugs stacked:
+- The Claude Agent SDK only emitted `AssistantMessage` at end-of-turn — its `StreamEvent` `content_block_delta` events (token-level deltas) were not consumed.
+- The proxy's sync stream iterator was called directly from the async event loop, so tokens buffered until the whole generator finished.
+
+**Fix:** `ClaudeAgentOptions(include_partial_messages=True)` + consume `StreamEvent` events (`evt.event.type == "content_block_delta"`, `delta.type == "text_delta"`), AND wrap the botocore blocking iterator in `starlette.concurrency.iterate_in_threadpool`.
+**Lesson:** Before blaming platform infrastructure, isolate the transport layer. A `/stream-test` endpoint that emits 20 chunks with `asyncio.sleep(0.5)` between them (no LLM) proved AgentCore streams correctly — the bug was 100% in our container.
+
+### 32. `runtimeSessionId` is forwarded to the container, `runtimeUserId` is silently dropped
+**Failed:** Container-side memory used `actor_id=None` even when the proxy correctly set `runtimeUserId` on `invoke_agent_runtime`.
+**Root cause:** boto3's service model marks both fields as `location=header`, but AgentCore Runtime only forwards `X-Amzn-Bedrock-AgentCore-Runtime-Session-Id` to the container. The `-User-Id` header is consumed by AgentCore's own control-plane and NOT propagated. Verified by logging `request.headers` inside the container.
+**Fix:** Belt-and-suspenders — read the session-id header when present, AND have the proxy inject `chat_id`/`user_id` into the payload body so the container reads them from either source.
+**Lesson:** Don't trust the boto3 service-model definition to describe what the container actually receives. Log the incoming request headers on your container's first day and check.
+
+### 33. OpenWebUI does NOT forward user identity to external OpenAI providers
+**Failed:** Even with the proxy's fix for #32, OpenWebUI-driven cross-chat memory on `/poc` still failed.
+**Root cause:** OpenWebUI's browser → backend request DOES carry `chat_id` and `model_item.info.user_id` (visible in devtools). But OpenWebUI's backend → external-OpenAI outbound request strips them — the wire only carries `{model, messages, stream}` + `Authorization: Bearer <token>`. No `X-*-User-Id` header either.
+**Fix (not yet applied — see README TODO):** either enable an OpenWebUI Function/Filter that adds `user_id`/`chat_id` to the outbound body, or find/enable OpenWebUI's "Include User Info" toggle. The harness backends (`/harness`, `/dify`) work today because `invoke_harness` takes `actorId` as a first-class API parameter and the proxy can derive one from whatever it has.
+**Lesson:** What the frontend HAS is not what the frontend SENDS. Log the exact wire body/headers before designing anything that depends on identity flowing through.
+
+### 34. `invoke_harness` rejects `role: system`
+**Failed:** Dify's OpenAI-shaped call included a system message → AWS returned `Value at 'messages.1.member.role' failed to satisfy constraint: Member must satisfy enum value set: [user, assistant]`.
+**Root cause:** `invoke_harness` accepts only `user`/`assistant` in `messages`. System prompts belong in a **separate** `systemPrompt` field on the API call.
+**Fix:** Rewrote `_normalize_messages` in the proxy to split system messages into `systemPrompt: [{text: "..."}]` and pass them alongside `messages`.
+**Lesson:** OpenAI-compatible ≠ OpenAI. When adapting an OpenAI shape to a non-OpenAI backend, always check the target's role enum and hoist the incompatible role somewhere valid.
+
+### 35. Dify Model Provider validation hits `/chat/completions`, not `/chat-messages`
+**Failed:** Registering `http://<nlb>/dify/harness/v1` in Dify → `Credentials validation failed with status code 404`.
+**Root cause:** Dify's OpenAI-API-compatible provider auto-appends `/chat/completions` to whatever Base URL you enter. It has zero awareness of Dify's own `/chat-messages` App API — those are two different surfaces.
+**Fix:** Point Dify at the plain OpenAI-shaped path (`/harness/v1` or `/poc/v1` or `/dify/v1`) and let it append `/chat/completions`.
+**Lesson:** The `/chat-messages` route we built for Dify is only for callers that talk to us **as a Dify App** (e.g. someone embedding this in another Dify-based product). For "register as a model provider" — the far more common use case — Dify uses the OpenAI protocol and only needs the existing OpenAI endpoints.
+
+### 36. Async memory fact-extraction lag makes retrieval look broken
+**Failed:** Turn 1 saved "my name is Charlie", turn 2 (new session) 5 seconds later couldn't recall it.
+**Root cause:** AgentCore Memory's semantic strategy extracts facts asynchronously. Documented as "eventually consistent" but the actual lag is ~30–60 s in ap-southeast-1.
+**Fix:** In tests, wait ~60 s before opening the second chat; in production this is fine because users don't normally start a second chat 5 s later.
+**Lesson:** Distinguish "event was saved" (immediate, checkable via `list-events`) from "fact was extracted and searchable" (async). Verify both stages independently when debugging.
+
+### 37. Local SigV4 signing proxy for Gateway MCP (Claude Agent SDK can't sign)
+**Failed:** Claude Agent SDK's `McpHttpServerConfig` only accepts static headers, but AgentCore Gateway requires a fresh SigV4 signature per HTTPS request.
+**Fix:** In-process localhost SigV4 proxy on `127.0.0.1:9000` started as a daemon thread from the container's lifespan. The SDK talks HTTP to localhost, our proxy signs and forwards HTTPS to the Gateway.
+**Lesson:** For SDKs that can't do per-request auth signing, a localhost signing proxy is a clean solution — much simpler than forking the SDK. Bind to 127.0.0.1 only, no auth needed, single process.
+
+### 38. Gateway DNS resolution needs a *separate* VPC endpoint
+**Failed:** Container inside VPC couldn't resolve `<gateway-id>.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com`.
+**Root cause:** `com.amazonaws.<region>.bedrock-agentcore` VPC endpoint covers the control-plane only. Gateway MCP calls use the `bedrock-agentcore.gateway` subdomain, which requires a separate VPC Interface Endpoint: `com.amazonaws.<region>.bedrock-agentcore.gateway`.
+**Fix:** Create the extra endpoint.
+**Lesson:** AWS service subdomains often have their own endpoints. If DNS fails, check whether the specific subdomain has a discrete endpoint before rechecking route tables.
+
+### 39. Multi-frontend architecture: one harness per frontend, one slug per route
+**Won:** Adding a Dify-specific harness (`harness_dify`) with distinct memory + skills config was a two-step change: (a) create the harness in the AWS console, (b) add one entry to the proxy's `HARNESSES` dict. All existing routes (`/{slug}/v1/chat/completions`, `/dify/{slug}/v1/chat-messages`) light up automatically because they're parameterised on the slug set.
+**Lesson:** Keep the route → backend map in a single dict at the top of the proxy. New frontend = one line of config.
 
 ---
 
