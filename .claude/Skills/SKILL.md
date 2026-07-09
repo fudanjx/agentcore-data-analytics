@@ -22,9 +22,9 @@ description: Routes queries to the correct ah-analytics database table (outpatie
 ```sql
 -- outpatient
 WHERE "prelim_flag" = 'N'
-  AND "APPT_STATUS" NOT IN ('Booked', 'Cancelled')
+  WHERE ("Status" != 'P' OR "Status" IS NULL)
   AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
-  AND "Trt_Cat" != 'NC'
+  AND ("Trt_Cat" != 'NC' OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
 
 -- urgentcarecenter
 WHERE "prelim_flag" = 'N'
@@ -35,7 +35,14 @@ WHERE "prelim_flag" = 'N'
 WHERE "prelim_flag" = 'N'
   AND "Adm_Status" != 'P'
   AND "Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
-  AND "Adm_Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')
+  AND (
+    CASE
+      WHEN LEFT("Adm_Nrs_OU", 2) = 'LW'
+           AND "Adm_Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU')
+        THEN "Adm_Nrs_OU"
+      ELSE "Current_Ward"
+    END
+  ) NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')
 
 -- discharge
 WHERE "prelim_flag" = 'N'
@@ -53,12 +60,19 @@ WHERE "prelim_flag" = 'N'
 ## How tables join
 
 ```
-urgentcarecenter ──(PAT_ENC_CSN_ID or SAP_IP_CASE_NO)──▶ admission
-outpatient       ──(PAT_ENC_CSN_ID)─────────────────────▶ procedure
-admission        ──(Case_No)──────────────────────────────▶ discharge   (1:1)
-admission        ──(Case_No)──────────────────────────────▶ inflight    (1:many, one row per patient-day)
-admission        ──(Case_No or PAT_ENC_CSN_ID)────────────▶ procedure   (1:many)
+urgentcarecenter ──(SAP_IP_CASE_NO or PAT_ENC_CSN_ID)──▶ admission
+outpatient       ──(Case_No or PAT_ENC_CSN_ID)─────────▶ procedure   (1:many)    
+admission        ──(Case_No or PAT_ENC_CSN_ID)─────────▶ discharge   (1:1)
+admission        ──(Case_No or PAT_ENC_CSN_ID)─────────▶ inflight    (1:many, one row per patient-day)
+admission        ──(Case_No or PAT_ENC_CSN_ID)─────────▶ procedure   (1:many)
 ```
+
+**⚠️ Two overlapping data-source transitions affect every join key above — check both before trusting a join:**
+
+1. **Jan 2023 SAP → Epic cutover.** `PAT_ENC_CSN_ID` is only populated for Epic-sourced (post-2023-01-01) records — it is null/blank for anything before that date. Any join or filter on `PAT_ENC_CSN_ID` spanning pre-2023 dates will silently drop those rows. Use `Case_No` (or `SAP_IP_CASE_NO` for `urgentcarecenter`) instead for pre-2023 data.
+2. **Feb 2026 NBS go-live at AH.** `Case_No` is being deprecated. Confirmed behaviour: `Case_No` is blank for **new encounters created from Feb 2026 onward**, but remains populated for encounters that were already created before the go-live (even if they still appear in current extracts). So `Case_No`-based joins do **not** uniformly break for all 2026 data — only for genuinely new encounters post-go-live. For any query touching Feb 2026 onward, prefer `PAT_ENC_CSN_ID` and treat `Case_No` as unreliable/partial, not simply "gone."
+
+Net effect: **`PAT_ENC_CSN_ID` is the safer join key from Jan 2023 onward; `Case_No` is the safer key before Jan 2023.** For date ranges spanning both eras, or spanning the Feb 2026 cutover, coalesce on both keys rather than trusting either alone, and sanity-check row counts on both sides of a join.
 
 ## Critical pitfalls
 
