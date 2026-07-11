@@ -47,7 +47,7 @@ In other words: if a patient was admitted through an ambulatory/day-surgery/ED h
 | `Current_Ward` | TEXT | Patient's current/latest ward — used as the fallback in the `Adm_Ward` derivation above |
 | `Adm_Ward` | TEXT (derived) | The actual ward used for admission-by-ward reporting — see derivation above |
 | `Adm_Dept_OU` | TEXT | Admitting department code |
-| `Adm_Cls` | TEXT | Patient class at admission (`A`, `B1`, `B2`, `C`) |
+| `Adm_Cls` | TEXT | Raw patient class code at admission — not resolved through the lookup below. For usual reporting, use the derived patient class (`Class_abc`/`Class_abc_MOH`) instead. |
 | `Adm_Acmd_Cat` | TEXT | Accommodation category (`ICU`, `HD`, `ISO`, `A1`, `B1`, `B2`, `C`) |
 | `Adm_Trt_Cat` | TEXT | Treatment category code |
 | `Wish_Cls` | TEXT | Patient's requested class |

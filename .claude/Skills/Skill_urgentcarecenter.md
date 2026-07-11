@@ -21,7 +21,7 @@ WHERE "prelim_flag" = 'N'
 |--------|------|---------|
 | `Visit_Date` | TIMESTAMP | Date of attendance — primary date filter |
 | `Visit_Time` | TIME | Arrival/registration time |
-| `Case_End_Type` | TEXT | Discharge disposition — see values below |
+| `Case_End_Type` | TEXT | Discharge disposition |
 | `TRIAGE_ACUITY` | TEXT | Triage acuity P1–P5 (preferred field) |
 | `CONSULT_ACUITY` | TEXT | Fallback acuity if `TRIAGE_ACUITY` is null |
 | `PACS` | TEXT | Legacy acuity; use only if both above are null |
@@ -29,8 +29,8 @@ WHERE "prelim_flag" = 'N'
 | `Att_Phy_Name` | TEXT | Attending physician name |
 | `Att_Phy_MCR_No` | TEXT | Attending physician MCR |
 | `Pri_Diag_Code` | TEXT | Primary diagnosis ICD code |
-| `PAT_ENC_CSN_ID` | TEXT | Join key to `admission` |
-| `SAP_IP_CASE_NO` | TEXT | Alternate join to `admission."Case_No"` |
+| `PAT_ENC_CSN_ID` | TEXT | Join key to `admission`. **Null before 2023-01-01** (SAP era) — use `SAP_IP_CASE_NO` for pre-2023 data. |
+| `SAP_IP_CASE_NO` | TEXT | Alternate join to `admission."Case_No"` — the pre-2023 (SAP-era) join key |
 | `Gender` | TEXT | `Male` / `Female` |
 | `PAT_AGE` | TEXT | Age at visit |
 | `EVENT_ARRIVAL_TIME` | TIMESTAMP | Actual arrival timestamp |
@@ -76,6 +76,20 @@ EXTRACT(EPOCH FROM ("ED_DEPARTURE_DTTM" - "EVENT_ARRIVAL_TIME")) / 3600 AS ed_lo
 -- Wait for inpatient bed (minutes)
 EXTRACT(EPOCH FROM ("IP_ADMIT_TIME" - "IP_BED_REQUEST_TIME")) / 60 AS bed_wait_mins
 ```
+## Example: monthly attendance
+
+```sql
+SELECT
+  DATE_TRUNC('month', "Visit_Date") AS month,
+  COALESCE(NULLIF("TRIAGE_ACUITY",''), NULLIF("CONSULT_ACUITY",''), "PACS") AS acuity,
+  "Arrival_Mode",
+  COUNT(*) AS attendances
+FROM urgentcarecenter
+WHERE "Case_End_Type" != 'Cancelled'
+  AND "Att_Phy_Name" != 'CANCELLATION'
+  AND "Visit_Date" >= '2024-01-01'
+GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC;
+```
 
 ## Example: monthly attendance by disposition
 
@@ -99,3 +113,5 @@ FROM urgentcarecenter u
 LEFT JOIN admission a
   ON u."PAT_ENC_CSN_ID" = a."PAT_ENC_CSN_ID"
 ```
+
+⚠️ For dates before 2023-01-01, `PAT_ENC_CSN_ID` will be null on both sides — join on `u."SAP_IP_CASE_NO" = a."Case_No"` instead for pre-2023 data. See `SKILL.md` for the full explanation.

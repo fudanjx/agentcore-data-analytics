@@ -77,9 +77,9 @@ Net effect: **`PAT_ENC_CSN_ID` is the safer join key from Jan 2023 onward; `Case
 ## Critical pitfalls
 
 1. **`Operation_Date` in `procedure` is TEXT** — cast before date filtering: `CAST("Operation_Date" AS DATE)`
-2. **`inflight` has one row per patient per day** — `SUM("cnt")` = patient-days; `COUNT(DISTINCT "Case_No")` on one date = census
-3. **`procedure` has one row per procedure** — use `COUNT(DISTINCT "Case_No")` for episode counts
-4. **`Accom_Category = 'OTHER'` in `inflight`** — fall back to `"Class"` column for patient class
+2. **`inflight` has one row per patient per day in the raw parquet, but the actual patient-days report also folds in a synthetic same-day-admission-and-discharge dataset sourced from `admission`** (patients admitted and discharged the same calendar date never appear in a daily census snapshot). Querying `inflight` alone undercounts patient-days for wards with high same-day turnover. See Skill_inflight.md.
+3. **`procedure` has one row per procedure** — use `COUNT(DISTINCT "Case_No")` for episode counts, **except** production's own case-counting sometimes uses a different device-dependent identifier (`Admsn CSN` on corporate devices) rather than `Case_No` — see Skill_procedure.md before promising exact parity with `Monthly_SurgicalEpisodes`.
+4. **`Accom_Category = 'OTHER'` in `inflight`** — fall back to `"Class"` column for patient class, then apply the ICU/HD/ISO override chain documented in Skill_inflight.md. 
 5. **`prelim_flag = 'Y'`** — provisional data; always exclude unless user asks for it
 
 ## Sub-skills for column-level detail
