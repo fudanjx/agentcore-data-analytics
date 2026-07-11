@@ -14,7 +14,7 @@ The production `pt_days_by_ward` report (and every other patient-days figure) is
 
 To replicate this, conceptually union:
 1. `inflight` rows, plus
-2. one synthetic row per `admission`/`discharge` episode where `Adm_Date = Disch_Date`, using: `Ward = Nrs_OU (discharge)`, `Dept_OU = Disch_Dept_OU`, `LOS = 1`, `Class = Disch_Cls`, `Accom_Category = Adm_Acmd_Cat`, `Inflight_Date = Disch_Date`.
+2. one synthetic row per same-day-admission-and-discharge episode, **sourced from the `discharge` table** (filtered using `discharge`'s own mandatory filters — see `Skill_discharge.md`), joined to `admission` only for `Adm_Date` and `Adm_Acmd_Cat`: `Ward = Nrs_OU (discharge)`, `Dept_OU = Disch_Dept_OU`, `LOS = 1`, `Class = Disch_Class`, `Accom_Category = Adm_Acmd_Cat`, `Inflight_Date = Disch_Date`.
 
 ```sql
 -- Conceptual union (adapt to your engine)
@@ -25,6 +25,9 @@ SELECT d."Nrs_OU" AS "Ward", d."Disch_Date" AS "Inflight_Date", d."cnt",
 FROM discharge d
 JOIN admission a ON d."Case_No" = a."Case_No"
 WHERE a."Adm_Date" = d."Disch_Date"
+  AND d."Disch_Status" != 'P'
+  AND d."Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
+  AND d."Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 ```
 
 ## Mandatory WHERE filters

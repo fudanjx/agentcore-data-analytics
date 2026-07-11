@@ -15,18 +15,24 @@ WHERE "prelim_flag" = 'N'
   AND CAST("Operation_Date" AS DATE) >= '2024-01-01'
 ```
 
-## Critical: episode vs procedure count
+## Critical: episode vs procedure count, and the two different case identifiers
+
+**Always clarify which one the user actually wants before writing the query — they give very different numbers for the same date range:**
 
 ```sql
 COUNT(*)                      -- procedures (each row = one procedure)
 COUNT(DISTINCT "Case_No")     -- cases/episodes (deduplicate multi-procedure cases)
 ```
 
+**Episode-level counting is only actually built for day surgery — there's no inpatient equivalent.** In production, the `Case_Identifier` dedup (`COUNT(DISTINCT "Case_Identifier")`) is only ever applied to the day-surgery/OP subset (`Adm_Type IN ('DS','ES','DO')`) to produce a "surgical episodes" count alongside the plain procedure count. **There is no equivalent dedup step anywhere in production for inpatient procedures** (`Adm_Type IN ('DI','SD','EM','EL')`) — inpatient procedure reporting only ever counts rows (`COUNT(*)`). So:
+- Day surgery: both `COUNT(*)` (procedures) *and* `COUNT(DISTINCT "Case_Identifier")` (episodes) are established, production-verified numbers.
+- Inpatient: only `COUNT(*)` (procedures) exists as a production number. If someone asks for inpatient procedure *episodes*, that's not a replication of an existing report — it's new logic you'd have to construct (e.g. `COUNT(DISTINCT "Case_Identifier")` on the inpatient subset, same identifier caveat as above), and there's no published figure to validate it against.
+
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join to `admission` / `discharge`. **Blank for new encounters created from Feb 2026 (NBS go-live) onward** — use `PAT_ENC_CSN_ID`. Also see the `Case_Identifier`/`Admsn CSN` caveat above — `Case_No` is not always what production dedupes episodes on. |
+| `Case_No` | TEXT | Episode identifier — join to `admission` / `discharge` / `outpatient`. **Blank for new encounters created from Feb 2026 (NBS go-live) onward** — use `PAT_ENC_CSN_ID`. Also see the `Case_Identifier`/`Admsn CSN` caveat above — `Case_No` is not always what production dedupes episodes on. |
 | `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter — join to `outpatient`. **Null before 2023-01-01** (SAP era). |
 | `Operation_Date` | TEXT | Date of procedure — **must cast**: `CAST("Operation_Date" AS DATE)` |
 | `OT_Begin_Date` | TIMESTAMP | OT session start date |
@@ -130,7 +136,7 @@ EXTRACT(EPOCH FROM (
 WHERE CAST("Proc_Row_Num" AS INT) = 1
 ```
 
-## Example: Monthly_IPProcedures (inpatient procedures by sub-specialty and OpTable)
+## Example: inpatient procedures by sub-specialty and Op Table (procedure count only)
 
 ```sql
 SELECT
@@ -157,20 +163,19 @@ WHERE "Adm_Type" IN ('DS','ES','DO')
 GROUP BY 1, 2, 3, 4, 5, 6 ORDER BY 1;
 ```
 
-## Example: monthly OT cases by sub-specialty
+## Example: monthly OT episodes vs. procedures by sub-specialty
 
 ```sql
 SELECT
   DATE_TRUNC('month', CAST("Operation_Date" AS DATE)) AS month,
   "Sub-Specialty",
-  COUNT(DISTINCT "Case_No") AS cases,
+  COUNT(DISTINCT "Case_Identifier") AS episodes,   -- NOT Case_No — see identifier caveat above
   COUNT(*) AS procedures
 FROM procedure
-WHERE "prelim_flag" = 'N'
-  AND "Treatment_OU" IN ('ALEX DAY SURGERY OT','ALEX MAIN OPERATING THEATRE')
+WHERE UPPER("Treatment_OU") IN ('ALEX DAY SURGERY OT','ALEX MAIN OPERATING THEATRE')
   AND "Adm_Type" NOT IN ('DO','ES')
   AND CAST("Operation_Date" AS DATE) >= '2024-01-01'
-GROUP BY 1, 2 ORDER BY 1, cases DESC;
+GROUP BY 1, 2 ORDER BY 1, episodes DESC;
 ```
 
 ## Joins
