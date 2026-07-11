@@ -22,7 +22,7 @@ description: Routes queries to the correct ah-analytics database table (outpatie
 ```sql
 -- outpatient
 WHERE "prelim_flag" = 'N'
-  WHERE ("Status" != 'P' OR "Status" IS NULL)
+  AND ("Status" != 'P' OR "Status" IS NULL)
   AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
   AND ("Trt_Cat" != 'NC' OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
 
