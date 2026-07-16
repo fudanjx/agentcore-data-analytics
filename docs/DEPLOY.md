@@ -9,14 +9,17 @@ Four deployable components:
 | `agentcore-poc` container | AWS AgentCore Runtime (ap-southeast-1) | Claude Agent SDK agent with Gateway MCP + S3 Skills + Memory (path prefix `/poc`) |
 | `agentcore-proxy` container | EKS Fargate (`agentcore` namespace) | Proxy fronting all backends — OpenAI-compatible + Dify App API |
 | MCP Lambdas | Lambda in VPC | Gateway backends: `nuh-analytics-mcp`, `ah-analytics-mcp`, `timesfm-mcp` |
+| `ah-analytics-s3tables-mcp` Lambda | Lambda (no VPC) | Athena-backed MCP for `ah-analytics` S3 Tables |
+| `ah-analytics-s3tables-loader` Lambda | Lambda (container image) | S3-event-triggered: parquet → S3 Tables (Iceberg) |
 | `timesfm-service` pod | EKS Fargate (`agentcore` namespace) | TimesFM 2.5-200m forecasting service (CPU) |
 
 Plus AWS-console-managed infra (created once via console, referenced by the proxy):
-- AgentCore Gateways (3): `nuh-analytics-db`, `ah-analytics-db`, `timesfm-gateway`
+- AgentCore Gateways (4): `nuh-analytics-db`, `ah-analytics-db`, `ah-analytics-s3tables`, `timesfm-gateway`
 - AgentCore Harnesses (2): `harness_e52fs` (Strands, for OpenWebUI), `harness_dify` (Strands, for Dify)
 - AgentCore Memory: single shared instance keyed off harness_e52fs
 - S3 Skills bucket: `s3://ah-data-analytics/skills/` — synced by the poc container on startup
 - RDS PostgreSQL with two databases: `nuh-analytics`, `ah-analytics`
+- S3 Tables bucket: `ah-analytics` (Iceberg, 6 tables mirroring `ah-analytics` RDS) — queried via Athena workgroup `ah-s3tables-wg`, federated Glue catalog `s3tablescatalog/ah-analytics`
 
 Proxy exposes three backend slugs — `/poc`, `/harness`, `/dify` — each in two shapes: OpenAI (`/{slug}/v1/chat/completions`) and Dify App (`/dify/{slug}/v1/chat-messages`).
 
@@ -175,6 +178,84 @@ python3 mcp_lambda/deploy_ah.py
 ```
 
 **Important:** The Gateway Target name is `ah-rds-tools`, not `rds-tools`. Strands SDK builds tool names as `{target}___{tool}`, so both DBs having `rds-tools___describe_table` would collide.
+
+---
+
+## Part 4b — S3 Tables backend for `ah-analytics` (Iceberg + Athena)
+
+Parallel path to Part 4. Source parquet files in `s3://ah-data-analytics/` are event-loaded into a managed S3 Tables (Iceberg) bucket and queried by the agent via a new Athena-backed MCP Gateway. No RDS hop.
+
+### 4b.1 Bootstrap (one-off)
+
+```bash
+python3 infra/ah_s3tables_bootstrap.py
+```
+
+Creates:
+- S3 Tables bucket `ah-analytics` (`arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics`)
+- Glue Data Catalog federation (parent catalog `s3tablescatalog`, child `s3tablescatalog/ah-analytics`)
+- Namespace `ah_analytics`
+- Adds current caller as Lake Formation admin
+- Athena workgroup `ah-s3tables-wg` with results at `s3://agentcore-tmp-964340114883/athena-results/`
+- LF grants (DESCRIBE + SELECT) on `ah_analytics.*` to the MCP role once it exists
+
+Idempotent — re-run after deploying the MCP Lambda so the LF grant picks up the new role.
+
+### 4b.2 Loader Lambda (container image, S3-event triggered)
+
+```bash
+python3 lambda_s3tables_loader/deploy.py
+```
+
+Builds and pushes an x86_64 container to ECR (`ah-analytics-s3tables-loader`), creates the Lambda (10 GB memory, 15-min timeout, 4 GB `/tmp`), and configures S3 notifications on `ah-data-analytics` so each `Combined_*_encoded.parquet.gzip` upload fires one loader invocation per file.
+
+The loader uses PyIceberg with the S3 Tables REST catalog. It reuses `parse_mixed_date_fast` and `sanitise_column_name` from `infra/ah_transforms.py` (shared with the Fargate RDS ETL). All column names are lowercased (Glue federation requirement). Tables are partitioned by `month(<date_col>)`.
+
+Trigger the initial full load without re-uploading source files:
+
+```bash
+for KEY in Combined_SOC_encoded.parquet.gzip Combined_UCC_encoded.parquet.gzip \
+           Combined_adm_encoded.parquet.gzip Combined_disch_encoded.parquet.gzip \
+           Combined_inflight_encoded.parquet.gzip Combined_procedure_encoded.parquet.gzip; do
+  jq -n --arg k "$KEY" '{Records:[{s3:{bucket:{name:"ah-data-analytics"},object:{key:$k}}}]}' > /tmp/ev.json
+  aws lambda invoke --function-name ah-analytics-s3tables-loader \
+    --payload fileb:///tmp/ev.json --cli-binary-format raw-in-base64-out \
+    --invocation-type Event --region ap-southeast-1 /tmp/out.json
+done
+```
+
+### 4b.3 MCP Lambda + Gateway + harness wire-up
+
+```bash
+python3 mcp_lambda_s3tables/deploy.py
+python3 infra/ah_s3tables_bootstrap.py   # re-run to grant LF to the new MCP role
+```
+
+Creates:
+- Lambda `ah-analytics-s3tables-mcp` (zip, boto3-only, no VPC — Athena is a public API)
+- IAM role `ah-analytics-s3tables-mcp-role` (Athena + Glue + s3tables read + Lake Formation `GetDataAccess`)
+- Gateway `ah-analytics-s3tables` (MCP, AWS_IAM auth)
+- Gateway target `ah-s3tables-tools` — same 3 tools as `ah-rds-tools`: `execute_sql`, `list_tables`, `describe_table`
+- Added to `harness_e52fs` alongside the RDS gateway
+
+Tool names in Strands become `ah-s3tables-tools___execute_sql`, etc — no collision with `ah-rds-tools___execute_sql`.
+
+### Verification
+
+```bash
+# List tables
+echo '{}' | aws lambda invoke --function-name ah-analytics-s3tables-mcp \
+  --payload fileb:///dev/stdin --cli-binary-format raw-in-base64-out \
+  --region ap-southeast-1 /dev/stdout
+
+# Athena query with partition pruning (typically scans <1 MB on 1M-row outpatient)
+aws athena start-query-execution \
+  --query-string "SELECT year(visit_date) y, month(visit_date) m, COUNT(*) c FROM outpatient \
+                  WHERE visit_date >= TIMESTAMP '2024-01-01' GROUP BY 1,2 ORDER BY 1,2" \
+  --work-group ah-s3tables-wg \
+  --query-execution-context Catalog=s3tablescatalog/ah-analytics,Database=ah_analytics \
+  --region ap-southeast-1
+```
 
 ---
 
@@ -404,10 +485,17 @@ All deploy scripts are idempotent.
 | TimesFM internal NLB | `k8s-agentcor-timesfms-fb1729afc9-4eef87d9ac68417f.elb.ap-southeast-1.amazonaws.com` |
 | Gateway (NUH) | `nuh-analytics-db-fhbzdmtdta` |
 | Gateway (AH) | `ah-analytics-db-gszih4adsx` |
+| Gateway (AH S3 Tables) | `ah-analytics-s3tables-uhtyjdutj7` |
 | Gateway (TimesFM) | `timesfm-gateway-w4fho4r9um` |
 | Lambda (NUH MCP) | `arn:aws:lambda:ap-southeast-1:964340114883:function:nuh-analytics-mcp` |
 | Lambda (AH MCP) | `arn:aws:lambda:ap-southeast-1:964340114883:function:ah-analytics-mcp` |
+| Lambda (AH S3 Tables MCP) | `arn:aws:lambda:ap-southeast-1:964340114883:function:ah-analytics-s3tables-mcp` |
+| Lambda (AH S3 Tables loader) | `arn:aws:lambda:ap-southeast-1:964340114883:function:ah-analytics-s3tables-loader` |
 | Lambda (TimesFM MCP bridge) | `arn:aws:lambda:ap-southeast-1:964340114883:function:timesfm-mcp` |
+| S3 Tables bucket (AH) | `arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics` |
+| Athena workgroup (AH S3 Tables) | `ah-s3tables-wg` |
+| Federated Glue catalog (AH S3 Tables) | `s3tablescatalog/ah-analytics` |
+| ECR (AH S3 Tables loader) | `964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/ah-analytics-s3tables-loader` |
 | Harness gateway policy | `arn:aws:iam::964340114883:policy/service-role/AmazonBedrockAgentCoreHarnessGatewayPolicy_bd7bg` |
 
 ## VPC Interface Endpoints (bot-nuhs-vpc, ap-southeast-1)

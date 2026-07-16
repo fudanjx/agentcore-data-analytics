@@ -10,7 +10,7 @@ The agent is hosted on **AWS AgentCore**, with three backends behind a single VP
 - **`harness_e52fs`** — AWS-managed Strands harness serving OpenWebUI. Managed memory + tool routing.
 - **`harness_dify`** — AWS-managed Strands harness serving Dify. Same tool set as `harness_e52fs`, isolated skill/memory scope.
 
-All three share the same three Gateway MCP tool backends: `nuh-analytics-db`, `ah-analytics-db`, `timesfm-gateway`.
+All three share the same four Gateway MCP tool backends: `nuh-analytics-db`, `ah-analytics-db`, `ah-analytics-s3tables` (Athena over Iceberg), `timesfm-gateway`.
 
 ## Non-goals
 
@@ -49,11 +49,17 @@ AgentCore backends (ap-southeast-1, private VPC)
               ├── skills: loaded from a GitHub repo path
               └── model: global.anthropic.claude-sonnet-4-6
 
-3 Gateway MCP endpoints (shared by all backends)
+4 Gateway MCP endpoints (shared by all backends)
         │
-        ├── nuh-analytics-db  ─→ Lambda nuh-analytics-mcp   ─→ RDS nuh-analytics
-        ├── ah-analytics-db   ─→ Lambda ah-analytics-mcp    ─→ RDS ah-analytics
-        └── timesfm-gateway   ─→ Lambda timesfm-mcp (bridge) ─→ NLB ─→ EKS timesfm-service (CPU)
+        ├── nuh-analytics-db      ─→ Lambda nuh-analytics-mcp             ─→ RDS nuh-analytics
+        ├── ah-analytics-db       ─→ Lambda ah-analytics-mcp              ─→ RDS ah-analytics
+        ├── ah-analytics-s3tables ─→ Lambda ah-analytics-s3tables-mcp     ─→ Athena ─→ S3 Tables (Iceberg) ah-analytics
+        └── timesfm-gateway       ─→ Lambda timesfm-mcp (bridge)          ─→ NLB ─→ EKS timesfm-service (CPU)
+
+S3-event data pipeline for the Iceberg backend
+        │
+        └── S3 ObjectCreated on s3://ah-data-analytics/Combined_*_encoded.parquet.gzip
+              └── Lambda ah-analytics-s3tables-loader (container, PyIceberg) ─→ S3 Tables ah-analytics
 ```
 
 ---
@@ -133,7 +139,8 @@ Streaming (`response_mode: "streaming"`) emits Dify SSE events: `event: message`
 - **Harness (OpenWebUI):** `harness_e52fs` — ARN `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF`
 - **Harness (Dify):** `harness_dify` — ARN `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E`
 - **Shared memory:** `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia`
-- **Gateways:** `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `timesfm-gateway-w4fho4r9um`
+- **Gateways:** `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `ah-analytics-s3tables-uhtyjdutj7`, `timesfm-gateway-w4fho4r9um`
+- **S3 Tables bucket (AH Iceberg backend):** `arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics`, namespace `ah_analytics`, Athena workgroup `ah-s3tables-wg`, federated Glue catalog `s3tablescatalog/ah-analytics`
 - **Inference profile:** `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3`
 
 ### EKS Proxy
