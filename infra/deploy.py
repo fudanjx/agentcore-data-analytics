@@ -43,8 +43,8 @@ SKILLS_BUCKET = "ah-data-analytics"
 SKILLS_PREFIX = "skills/"
 
 # AgentCore Memory (shared with the harness for unified user facts across agents)
-MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
-
+# MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
+MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/memory_agentcore_dev-X9UlwN6fTM"
 iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
 sts = boto3.client("sts", region_name=REGION)

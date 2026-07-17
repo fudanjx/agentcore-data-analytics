@@ -23,8 +23,8 @@ kubectl rollout status deployment/agentcore-proxy -n agentcore
 ###agentcore
 #powershell
 docker buildx build --platform linux/arm64 --push `
-  -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.1 .
+  -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.2 .
 
 $env:AWS_DEFAULT_REGION = "ap-southeast-1"
-$env:ECR_IMAGE_URI = "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.1"
+$env:ECR_IMAGE_URI = "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.2"
 python infra/deploy.py
