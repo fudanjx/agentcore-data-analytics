@@ -86,8 +86,11 @@ def _extract_session_context(body: dict):
     return session_id, user_id
 
 
-def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, user_id: str = None) -> dict:
+def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None,
+                    user_id: str = None, inputs: dict = None) -> dict:
     body = {"messages": messages}
+    if inputs:
+        body["inputs"] = inputs
     if session_id:
         body["chat_id"] = session_id
     if user_id:
@@ -106,7 +109,8 @@ def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, us
     return kwargs
 
 
-def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, user_id: str = None):
+def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str,
+                           user_id: str = None, inputs: dict = None):
     """Generator: yields text deltas from a streaming AgentCore Runtime response.
 
     The Phase 2 container emits text/event-stream with OpenAI-format chunks. We read
@@ -116,7 +120,7 @@ def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, us
     Retries once on ConnectionClosedError if the error occurs before any token is
     yielded (cold-start container spin-up window).
     """
-    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
+    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id, inputs)
 
     for attempt in range(2):
         first_token_sent = False
@@ -155,12 +159,14 @@ def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, us
             raise
 
 
-def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str, user_id: str = None) -> str:
+def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str,
+                             user_id: str = None, inputs: dict = None) -> str:
     """Non-streaming path: collect all deltas and return the concatenated string."""
-    return "".join(_stream_runtime_events(messages, runtime_arn, session_id, user_id))
+    return "".join(_stream_runtime_events(messages, runtime_arn, session_id, user_id, inputs))
 
 
-async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id, model: str, completion_id: str):
+async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id,
+                              model: str, completion_id: str, inputs: dict = None):
     """Async generator: yield OpenAI SSE chunks from live runtime stream events.
 
     Wraps the blocking `_stream_runtime_events` sync iterator via `iterate_in_threadpool`
@@ -168,7 +174,7 @@ async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str,
     to the client immediately (rather than buffered until the generator completes).
     """
     try:
-        sync_iter = _stream_runtime_events(messages, runtime_arn, session_id, user_id)
+        sync_iter = _stream_runtime_events(messages, runtime_arn, session_id, user_id, inputs)
         async for text in iterate_in_threadpool(sync_iter):
             chunk = {
                 "id": completion_id,
@@ -312,6 +318,7 @@ async def _build_completion(
     stream: bool,
     session_id: str,
     user_id: str = None,
+    inputs: dict = None,
 ):
     logger.info(
         "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
@@ -336,12 +343,14 @@ async def _build_completion(
         arn = RUNTIMES[slug]
         if stream:
             return StreamingResponse(
-                _sse_runtime_stream(messages, arn, session_id, user_id, model, completion_id),
+                _sse_runtime_stream(
+                    messages, arn, session_id, user_id, model, completion_id, inputs
+                ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
         result_text = await run_in_threadpool(
-            _invoke_runtime_buffered, messages, arn, session_id, user_id
+            _invoke_runtime_buffered, messages, arn, session_id, user_id, inputs
         )
 
     return {
@@ -395,7 +404,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
     try:
         return await _build_completion(
             messages, slug, body.get("model", slug), body.get("stream", False),
-            session_id, user_id,
+            session_id, user_id, body.get("inputs") or None,
         )
     except Exception as e:
         logger.error("AgentCore error [%s]: %s", slug, e)
@@ -427,7 +436,7 @@ async def chat_completions_compat(request: Request):
     try:
         return await _build_completion(
             messages, "poc", body.get("model", "agentcore"), body.get("stream", False),
-            session_id, user_id,
+            session_id, user_id, body.get("inputs") or None,
         )
     except Exception as e:
         logger.error("AgentCore error [compat]: %s", e)
@@ -443,7 +452,7 @@ async def chat_completions_compat(request: Request):
 # ---------------------------------------------------------------------------
 
 def _dify_parse(body: dict):
-    """Return (query, user, conversation_id, response_mode).
+    """Return (query, user, conversation_id, response_mode, inputs).
 
     Mints a fresh conversation_id when the caller sends an empty one, so the
     first response can echo a stable id the client will reuse on the next turn.
@@ -452,7 +461,10 @@ def _dify_parse(body: dict):
     user = body.get("user") or None
     conversation_id = body.get("conversation_id") or str(uuid.uuid4())
     response_mode = body.get("response_mode") or "streaming"
-    return query, user, conversation_id, response_mode
+    inputs = body.get("inputs") or {}
+    if not isinstance(inputs, dict):
+        raise ValueError("inputs must be an object")
+    return query, user, conversation_id, response_mode, inputs
 
 
 def _dify_event(event: str, conversation_id: str, message_id: str,
@@ -516,11 +528,43 @@ async def dify_chat_messages(slug: str, request: Request):
                                                        "message": "invalid JSON body",
                                                        "status": 400})
 
-    query, user, conversation_id, response_mode = _dify_parse(body)
+    try:
+        query, user, conversation_id, response_mode, inputs = _dify_parse(body)
+    except ValueError as e:
+        return JSONResponse(status_code=400, content={"code": "invalid_param",
+                                                       "message": str(e),
+                                                       "status": 400})
     if not query:
         return JSONResponse(status_code=400, content={"code": "invalid_param",
                                                        "message": "query is required",
                                                        "status": 400})
+
+    version_1_key = inputs.get("version_1_key")
+    version_2_key = inputs.get("version_2_key")
+    if bool(version_1_key) != bool(version_2_key):
+        return JSONResponse(status_code=400, content={
+            "code": "invalid_param",
+            "message": "inputs.version_1_key and inputs.version_2_key must be provided together",
+            "status": 400,
+        })
+    document_inputs = None
+    if version_1_key and version_2_key:
+        if not isinstance(version_1_key, str) or not isinstance(version_2_key, str):
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_param",
+                "message": "document keys must be strings",
+                "status": 400,
+            })
+        document_inputs = {
+            "version_1_key": version_1_key.strip(),
+            "version_2_key": version_2_key.strip(),
+        }
+        if not all(document_inputs.values()):
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_param",
+                "message": "document keys must not be empty",
+                "status": 400,
+            })
 
     message_id = str(uuid.uuid4())
     task_id = str(uuid.uuid4())
@@ -531,11 +575,19 @@ async def dify_chat_messages(slug: str, request: Request):
 
     # Build the sync generator that yields text deltas from the appropriate backend
     if slug in HARNESSES:
+        if document_inputs:
+            return JSONResponse(status_code=400, content={
+                "code": "invalid_param",
+                "message": "structured document inputs require an AgentCore runtime backend",
+                "status": 400,
+            })
         def sync_iter():
             yield from _stream_harness_events(messages, HARNESSES[slug], conversation_id, user)
     else:
         def sync_iter():
-            yield from _stream_runtime_events(messages, RUNTIMES[slug], conversation_id, user)
+            yield from _stream_runtime_events(
+                messages, RUNTIMES[slug], conversation_id, user, document_inputs
+            )
 
     if response_mode == "blocking":
         try:
