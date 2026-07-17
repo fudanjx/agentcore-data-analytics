@@ -28,6 +28,9 @@ from app import gateway_proxy, memory
 logger = logging.getLogger(__name__)
 
 MAX_DOCUMENT_BYTES = int(os.environ.get("MAX_DOCUMENT_BYTES", str(50 * 1024 * 1024)))
+MAX_SDK_BUFFER_BYTES = int(
+    os.environ.get("CLAUDE_AGENT_MAX_BUFFER_BYTES", str(10 * 1024 * 1024))
+)
 _DOCUMENT_INPUT_PATTERN = re.compile(
     r"<DOCUMENT_INPUT>\s*(?P<payload>.*?)\s*</DOCUMENT_INPUT>",
     re.IGNORECASE | re.DOTALL,
@@ -249,7 +252,8 @@ async def stream(
         mcp_servers=mcp_servers,
         skills="all",
         permission_mode="bypassPermissions",
-        max_turns=15,
+        max_turns=50,
+        max_buffer_size=MAX_SDK_BUFFER_BYTES,
         include_partial_messages=True,
         env=bedrock_env,
     )

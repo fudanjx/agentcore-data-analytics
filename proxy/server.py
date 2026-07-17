@@ -45,6 +45,7 @@ REGION = "ap-southeast-1"
 # Runtimes invoked via invoke_agent_runtime
 RUNTIMES = {
     "poc": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m",
+    "dev": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_dev-CaLENLDE5V"
 }
 
 # Harnesses invoked via invoke_harness (managed runtimes cannot be called directly)

@@ -23,8 +23,8 @@ import time
 import boto3
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
-RUNTIME_NAME = "agentcore_poc"
-ENDPOINT_NAME = "agentcore_poc_endpoint"
+RUNTIME_NAME = "agentcore_dev"
+ENDPOINT_NAME = "agentcore_dev_endpoint"
 RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
 
 # VPC config — private subnets in bot-nuhs-vpc, same VPC as RDS

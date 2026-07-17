@@ -43,6 +43,8 @@ python /app/.claude/skills/document-review/scripts/inspect_pdf.py INPUT.pdf --ou
 python /app/.claude/skills/document-review/scripts/inspect_docx.py INPUT.docx --output docx.json
 ```
 
-Read the JSON outputs, then use the `Read` tool on relevant PDF pages or rendered PNGs for visual
-verification. Avoid loading every rendered page when annotation locations identify the relevant
-pages.
+Inspect large JSON outputs in bounded chunks; do not read or print an entire large extraction in
+one tool call. Start with metadata, annotations/comments, and tracked changes, then read only the
+page text or table sections needed for each finding. Use the `Read` tool on relevant PDF pages or
+rendered PNGs for visual verification. Avoid loading every rendered page when annotation locations
+identify the relevant pages.

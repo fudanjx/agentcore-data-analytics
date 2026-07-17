@@ -1,0 +1,25 @@
+
+###agentcore runtime
+
+TAG=v0.0.1 ./proxy/build_and_push.sh
+$env:AWS_DEFAULT_REGION = "ap-southeast-1"
+$env:ECR_IMAGE_URI = "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.1"
+
+python infra/deploy.py
+
+### proxy
+
+#bash
+TAG=v0.0.2 ./proxy/build_and_push.sh
+kubectl set image deployment/agentcore-proxy \
+  proxy=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.2 \
+  -n agentcore
+
+kubectl rollout status deployment/agentcore-proxy -n agentcore
+#powershell
+docker buildx build --platform linux/arm64 --push `
+  -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.1 .
+
+$env:AWS_DEFAULT_REGION = "ap-southeast-1"
+$env:ECR_IMAGE_URI = "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:v0.0.1"
+python infra/deploy.py

@@ -1,5 +1,5 @@
 claude-agent-sdk>=0.2.0
-boto3>=1.34.0
+boto3>=1.40.67
 fastapi>=0.110.0
 uvicorn>=0.29.0
 httpx>=0.27.0
