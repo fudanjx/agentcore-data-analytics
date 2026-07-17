@@ -28,6 +28,7 @@ from app import gateway_proxy, memory
 logger = logging.getLogger(__name__)
 
 MAX_DOCUMENT_BYTES = int(os.environ.get("MAX_DOCUMENT_BYTES", str(50 * 1024 * 1024)))
+MAX_DOCUMENT_COUNT = int(os.environ.get("MAX_DOCUMENT_COUNT", "10"))
 MAX_SDK_BUFFER_BYTES = int(
     os.environ.get("CLAUDE_AGENT_MAX_BUFFER_BYTES", str(10 * 1024 * 1024))
 )
@@ -65,8 +66,10 @@ def _extract_tagged_documents(messages: list[dict]) -> list[dict[str, str]]:
     if not isinstance(payload, dict) or not isinstance(payload.get("documents"), list):
         raise ValueError("DOCUMENT_INPUT.documents must be an array")
     documents = payload["documents"]
-    if len(documents) != 2:
-        raise ValueError("DOCUMENT_INPUT must contain exactly two documents")
+    if not documents:
+        raise ValueError("DOCUMENT_INPUT must contain at least one document")
+    if len(documents) > MAX_DOCUMENT_COUNT:
+        raise ValueError(f"DOCUMENT_INPUT cannot contain more than {MAX_DOCUMENT_COUNT} documents")
     validated: list[dict[str, str]] = []
     names: set[str] = set()
     for index, document in enumerate(documents, start=1):
@@ -113,6 +116,10 @@ def _suffix_from_response(response: httpx.Response) -> str:
         "application/pdf": ".pdf",
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document": ".docx",
         "application/msword": ".doc",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": ".xlsx",
+        "application/vnd.ms-excel": ".xls",
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12": ".xlsb",
+        "application/vnd.oasis.opendocument.spreadsheet": ".ods",
         "image/png": ".png",
         "image/jpeg": ".jpg",
         "image/tiff": ".tiff",
@@ -125,7 +132,7 @@ def _validate_document_url(reference: str) -> None:
         raise ValueError("Document reference must be a valid HTTP or HTTPS URL")
 
 
-def _download_presigned_url(reference: str, destination_dir: str, version: str) -> str:
+def _download_presigned_url(reference: str, destination_dir: str, index: int) -> str:
     _validate_document_url(reference)
     with httpx.stream(
         "GET", reference, follow_redirects=True, timeout=httpx.Timeout(60, connect=10)
@@ -133,18 +140,18 @@ def _download_presigned_url(reference: str, destination_dir: str, version: str) 
         response.raise_for_status()
         declared_size = int(response.headers.get("content-length") or 0)
         if declared_size > MAX_DOCUMENT_BYTES:
-            raise ValueError(f"Version {version} document exceeds the size limit")
+            raise ValueError(f"Document {index} exceeds the size limit")
         suffix = _suffix_from_response(response)
-        local_path = Path(destination_dir) / f"version_{version}{suffix}"
+        local_path = Path(destination_dir) / f"document_{index:03d}{suffix}"
         downloaded = 0
         with local_path.open("wb") as output:
             for chunk in response.iter_bytes():
                 downloaded += len(chunk)
                 if downloaded > MAX_DOCUMENT_BYTES:
-                    raise ValueError(f"Version {version} document exceeds the size limit")
+                    raise ValueError(f"Document {index} exceeds the size limit")
                 output.write(chunk)
     if downloaded == 0:
-        raise ValueError(f"Version {version} document is empty")
+        raise ValueError(f"Document {index} is empty")
     return str(local_path)
 
 
@@ -209,19 +216,19 @@ async def stream(
         temp_dir = tempfile.TemporaryDirectory(prefix="document-review-")
         try:
             # Sequential calls avoid a failed background download racing cleanup.
-            version_1_path = await asyncio.to_thread(
-                _download_presigned_url, documents[0]["url"], temp_dir.name, "1"
-            )
-            version_2_path = await asyncio.to_thread(
-                _download_presigned_url, documents[1]["url"], temp_dir.name, "2"
-            )
+            downloaded_documents = []
+            for index, document in enumerate(documents, start=1):
+                local_path = await asyncio.to_thread(
+                    _download_presigned_url, document["url"], temp_dir.name, index
+                )
+                downloaded_documents.append((document["name"], local_path))
         except Exception:
             temp_dir.cleanup()
             raise
+        file_lines = "\n".join(f"- {name}: {path}" for name, path in downloaded_documents)
         prompt += (
-            "\n\nThe validated files have been downloaded by the application. Read these local files:\n"
-            f"- {documents[0]['name']}: {version_1_path}\n"
-            f"- {documents[1]['name']}: {version_2_path}\n"
+            "\n\nThe validated files have been downloaded by the application. "
+            f"Read these local files:\n{file_lines}\n"
         )
 
     # Inject prior-conversation context from AgentCore Memory

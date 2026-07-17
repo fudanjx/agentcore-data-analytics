@@ -64,11 +64,17 @@ def test_document_input_is_optional():
     assert _redact_document_references(messages) == messages
 
 
+def test_accepts_one_document():
+    payload = '{"documents": [{"name": "report", "url": "https://example.com/report.xlsx"}]}'
+    assert _extract_tagged_documents(_messages(payload)) == [
+        {"name": "report", "url": "https://example.com/report.xlsx"}
+    ]
+
+
 @pytest.mark.parametrize(
     "payload,error",
     [
-        ('{"documents": []}', "exactly two"),
-        ('{"documents": [{"name": "a", "url": "https://example.com/a"}]}', "exactly two"),
+        ('{"documents": []}', "at least one"),
         ('{"documents": {}}', "must be an array"),
         ('{"documents": [}', "invalid JSON"),
         (
