@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Review"
+  short_description: "Compare PDF and DOCX review comments"
+  default_prompt: "Use $document-review to compare these document versions and verify which review comments were addressed."

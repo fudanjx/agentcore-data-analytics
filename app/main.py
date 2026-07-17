@@ -5,7 +5,7 @@ GET /ping is the AgentCore health check endpoint.
 
 Phase 2:
 - /invocations always returns text/event-stream with OpenAI-compatible SSE chunks.
-- On startup: sync skills from S3 → /app/skills/, then launch the local SigV4
+- On startup: sync skills from S3 into /app/.claude/skills/, then launch the local SigV4
   proxy for AgentCore Gateway MCP calls on 127.0.0.1:9000.
 """
 

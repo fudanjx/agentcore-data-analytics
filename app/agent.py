@@ -4,7 +4,7 @@ Claude Agent SDK loop for the agentcore_poc runtime.
 Phase 2 refactor:
 - Streams text deltas as an async generator (was: single buffered return).
 - Uses AgentCore Gateway MCP servers via localhost SigV4 proxy (was: in-process psycopg2 tool).
-- Loads Agent Skills from /app/skills/ synced from S3 at startup.
+- Loads project Agent Skills from /app/.claude/skills/, with S3 updates at startup.
 - Merges `role: system` messages from the caller into the base system prompt,
   so Open WebUI's "System Prompt" setting flows straight through.
 """
@@ -169,19 +169,6 @@ def _build_prompt(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
-def _load_skill_paths() -> list[str]:
-    """Return the list of skill file paths that exist on disk."""
-    skill_dir = "/app/skills"
-    if not os.path.isdir(skill_dir):
-        return []
-    paths = sorted(
-        os.path.join(skill_dir, f)
-        for f in os.listdir(skill_dir)
-        if f.endswith(".md")
-    )
-    return paths
-
-
 def _build_mcp_servers() -> dict:
     """Return McpHttpServerConfig dicts pointing at the local SigV4 proxy."""
     urls = gateway_proxy.mcp_urls()
@@ -241,12 +228,11 @@ async def stream(
             system_prompt += mem_context
             logger.info("Memory: %d chars of context injected", len(mem_context))
 
-    skill_paths = _load_skill_paths()
     mcp_servers = _build_mcp_servers()
 
     logger.info(
-        "Agent invoke: prompt_chars=%d, skills=%d, mcp_servers=%s, actor=%s, session=%s",
-        len(prompt), len(skill_paths), list(mcp_servers.keys()), actor_id, session_id,
+        "Agent invoke: prompt_chars=%d, mcp_servers=%s, actor=%s, session=%s",
+        len(prompt), list(mcp_servers.keys()), actor_id, session_id,
     )
 
     bedrock_env = {
@@ -257,9 +243,11 @@ async def stream(
 
     options = ClaudeAgentOptions(
         model=INFERENCE_PROFILE_ARN,
+        cwd="/app",
+        setting_sources=["project"],
         system_prompt=system_prompt,
         mcp_servers=mcp_servers,
-        skills=skill_paths if skill_paths else None,
+        skills="all",
         permission_mode="bypassPermissions",
         max_turns=15,
         include_partial_messages=True,
