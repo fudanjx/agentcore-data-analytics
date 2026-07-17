@@ -73,15 +73,13 @@ def _extract_session_context(request: Request, body: dict) -> tuple[str, str | N
 
 
 async def _sse_stream(messages: list[dict], model_slug: str,
-                     actor_id: str | None, session_id: str, inputs: dict | None = None):
+                     actor_id: str | None, session_id: str):
     """Emit OpenAI-format SSE chunks from the agent's text deltas."""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
 
     try:
-        async for text in agent.stream(
-            messages, actor_id=actor_id, session_id=session_id, inputs=inputs
-        ):
+        async for text in agent.stream(messages, actor_id=actor_id, session_id=session_id):
             chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
@@ -170,7 +168,7 @@ async def invoke(request: Request):
                 model_slug, len(messages), actor_id, session_id, header_keys)
 
     return StreamingResponse(
-        _sse_stream(messages, model_slug, actor_id, session_id, body.get("inputs")),
+        _sse_stream(messages, model_slug, actor_id, session_id),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",

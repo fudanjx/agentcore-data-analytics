@@ -42,12 +42,6 @@ GATEWAY_ARNS = [
 SKILLS_BUCKET = "ah-data-analytics"
 SKILLS_PREFIX = "skills/"
 
-# Fixed private bucket containing documents referenced by Dify prompt variables.
-# Set DOCUMENT_BUCKET when running this deployment script. Optionally restrict reads
-# further with DOCUMENT_KEY_PREFIX, for example "document-review/".
-DOCUMENT_BUCKET = os.environ.get("DOCUMENT_BUCKET", "").strip()
-DOCUMENT_KEY_PREFIX = os.environ.get("DOCUMENT_KEY_PREFIX", "").strip().lstrip("/")
-
 # AgentCore Memory (shared with the harness for unified user facts across agents)
 MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
 
@@ -150,14 +144,6 @@ def ensure_runtime_role() -> str:
         ],
     }
 
-    if DOCUMENT_BUCKET:
-        object_prefix = f"{DOCUMENT_KEY_PREFIX}*" if DOCUMENT_KEY_PREFIX else "*"
-        inline["Statement"].append({
-            "Effect": "Allow",
-            "Action": ["s3:GetObject"],
-            "Resource": f"arn:aws:s3:::{DOCUMENT_BUCKET}/{object_prefix}",
-        })
-
     try:
         arn = iam.get_role(RoleName=RUNTIME_ROLE_NAME)["Role"]["Arn"]
         print(f"  Role exists: {arn}")
@@ -191,11 +177,6 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
     }
-    if DOCUMENT_BUCKET:
-        env_vars["DOCUMENT_BUCKET"] = DOCUMENT_BUCKET
-    if DOCUMENT_KEY_PREFIX:
-        env_vars["DOCUMENT_KEY_PREFIX"] = DOCUMENT_KEY_PREFIX
-
     existing_id = _find_existing_runtime()
 
     if existing_id:

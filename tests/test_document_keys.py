@@ -4,7 +4,7 @@ import types
 import pytest
 
 # The local development environment does not need the container-only Claude SDK
-# to test the pure S3-key parsing and validation helpers.
+# to test document input parsing and validation.
 sdk = types.ModuleType("claude_agent_sdk")
 sdk.ClaudeAgentOptions = type("ClaudeAgentOptions", (), {})
 sdk.ResultMessage = type("ResultMessage", (), {})
@@ -23,36 +23,80 @@ memory.save_turn = lambda *args: None
 sys.modules.setdefault("app.gateway_proxy", gateway_proxy)
 sys.modules.setdefault("app.memory", memory)
 
-from app.agent import _extract_document_keys, _validate_document_key
+from app.agent import (
+    _extract_tagged_documents,
+    _redact_document_references,
+    _validate_document_url,
+)
 
 
-def test_extracts_dify_prompt_variables():
-    messages = [{
-        "role": "user",
-        "content": (
-            "Compare the two documents.\n"
-            "VERSION_1_S3_KEY: document-review/user-123/v1.pdf\n"
-            "VERSION_2_S3_KEY: document-review/user-123/v2.pdf\n"
-        ),
+def _messages(payload: str) -> list[dict]:
+    return [{
+        "role": "system",
+        "content": f"Compare the documents.\n<DOCUMENT_INPUT>{payload}</DOCUMENT_INPUT>",
     }]
 
-    assert _extract_document_keys(messages) == {
-        "1": "document-review/user-123/v1.pdf",
-        "2": "document-review/user-123/v2.pdf",
-    }
+
+def test_extracts_tagged_json_document_input():
+    messages = _messages("""{
+      "documents": [
+        {"name": "version_1", "url": "https://example.com/v1.docx?sign=one"},
+        {"name": "version_2", "url": "https://example.com/v2.docx?sign=two"}
+      ]
+    }""")
+
+    assert _extract_tagged_documents(messages) == [
+        {"name": "version_1", "url": "https://example.com/v1.docx?sign=one"},
+        {"name": "version_2", "url": "https://example.com/v2.docx?sign=two"},
+    ]
+    sanitized = _redact_document_references(messages)[0]["content"]
+    assert "Compare the documents." in sanitized
+    assert "sign=one" not in sanitized
+    assert "sign=two" not in sanitized
 
 
-def test_structured_inputs_are_supported():
-    assert _extract_document_keys([], {
-        "version_1_key": "document-review/user-123/v1.pdf",
-        "version_2_key": "document-review/user-123/v2.pdf",
-    }) == {
-        "1": "document-review/user-123/v1.pdf",
-        "2": "document-review/user-123/v2.pdf",
-    }
+def test_document_input_is_optional():
+    messages = [
+        {"role": "system", "content": "You are a coding assistant."},
+        {"role": "user", "content": "Explain this function."},
+    ]
+    assert _extract_tagged_documents(messages) == []
+    assert _redact_document_references(messages) == messages
 
 
-@pytest.mark.parametrize("key", ["s3://bucket/a.pdf", "../a.pdf", "/a.pdf", "a\\b.pdf"])
-def test_rejects_unsafe_or_non_key_references(key):
+@pytest.mark.parametrize(
+    "payload,error",
+    [
+        ('{"documents": []}', "exactly two"),
+        ('{"documents": [{"name": "a", "url": "https://example.com/a"}]}', "exactly two"),
+        ('{"documents": {}}', "must be an array"),
+        ('{"documents": [}', "invalid JSON"),
+        (
+            '{"documents": ['
+            '{"name": "same", "url": "https://example.com/a"},'
+            '{"name": "same", "url": "https://example.com/b"}]}',
+            "Duplicate document name",
+        ),
+    ],
+)
+def test_rejects_invalid_document_input(payload, error):
+    with pytest.raises(ValueError, match=error):
+        _extract_tagged_documents(_messages(payload))
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "http://internal.example:8080/document.docx",
+        "https://user:password@sharepoint.example.com/shared/document.docx",
+        "https://example.com/any/path",
+    ],
+)
+def test_accepts_http_document_urls(url):
+    _validate_document_url(url)
+
+
+@pytest.mark.parametrize("url", ["ftp://example.com/a.pdf", "not-a-url"])
+def test_rejects_non_http_document_urls(url):
     with pytest.raises(ValueError):
-        _validate_document_key(key)
+        _validate_document_url(url)
