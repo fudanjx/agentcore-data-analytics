@@ -7,7 +7,8 @@ AgentCore sessions.
 
 The deployed site is `https://insights.bot-alex.com`. The ALB forwards only
 that host name to EC2 port `3001`; the EC2 security group accepts that port
-only from the ALB security group.
+only from the ALB security group. A small Caddy sidecar owns that host port and
+passes traffic to `open-webui-insights` over the Compose network.
 
 The existing `open-webui`, `litellm`, `postgres`, and `autoheal` services are
 not recreated during deployment. Start or update only the new service with:
@@ -18,6 +19,17 @@ docker compose up -d --no-deps open-webui-insights
 
 The service is memory-limited, bypasses local embedding and retrieval, disables
 Ollama, and uses the private AgentCore `/insights/v1` endpoint.
+
+### Upload processing bypass
+
+OpenWebUI v0.10.2's browser normally appends `process=true` to chat-upload
+requests, which starts OpenWebUI's own extraction/RAG background job. Insights
+does not use that job: its file filter forwards only the owned S3 manifest to
+AgentCore, whose Code Interpreter performs analysis on demand. The Caddy
+sidecar therefore changes only `POST /api/v1/files[/]` to `process=false`.
+Every other request, query value, request body, and response is proxied without
+modification. This prevents the browser from waiting for OpenWebUI's unrelated
+file-processing status stream while retaining normal drag-and-drop uploads.
 
 Uploaded S3 objects expire after seven days. New users receive the `pending`
 role until an administrator approves them.
@@ -61,6 +73,7 @@ against the S3 URI.
 
 ```bash
 ./insights/verify.sh
+python3 /home/ubuntu/app/insights/e2e_smoke.py --verify-upload-bypass
 python3 /home/ubuntu/app/insights/e2e_smoke.py
 python3 /home/ubuntu/app/insights/pending_role_smoke.py
 ```
@@ -69,3 +82,8 @@ The end-to-end smoke test logs in with the protected bootstrap file, uploads a
 small CSV, creates a chat, waits for the asynchronous AgentCore response, and
 requires `E2E_SUM=6`. The pending-role test creates a temporary account,
 requires the `pending` role, and deletes the account immediately.
+
+`--verify-upload-bypass` sends a >3 MiB CSV to the normal browser-style
+`?process=true` endpoint and requires the response to have no pending
+OpenWebUI processing status. It validates the Caddy rewrite without invoking
+AgentCore.

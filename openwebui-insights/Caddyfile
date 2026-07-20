@@ -1,0 +1,20 @@
+{
+	# TLS is terminated by the existing ALB. Do not expose Caddy's admin API.
+	auto_https off
+	admin off
+}
+
+:8080 {
+	# OpenWebUI v0.10.2 uploads chat attachments with process=true by default.
+	# This deployment delegates file analysis to AgentCore Code Interpreter, so
+	# prevent OpenWebUI's independent extraction/RAG job from being created.
+	@chat_file_upload {
+		method POST
+		path /api/v1/files /api/v1/files/
+	}
+	uri @chat_file_upload query process false
+
+	# Every other path, method, query value, request body, and response passes
+	# through unchanged to the isolated Insights OpenWebUI service.
+	reverse_proxy open-webui-insights:8080
+}

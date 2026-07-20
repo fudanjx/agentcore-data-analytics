@@ -91,9 +91,10 @@ enhancement. Plain identity headers are likewise trusted only on the private
 OpenWebUI-server → proxy hop; replace them with signed short-lived JWTs before
 allowing untrusted callers on that path.
 
-`process=false` was used in the end-to-end validation. Confirm or enforce that
-the OpenWebUI browser flow always sets it before claiming a universal guarantee
-that OpenWebUI never parses an uploaded file locally.
+The OpenWebUI browser normally asks for `process=true`; the Insights Caddy
+sidecar rewrites only `POST /api/v1/files[/]` to `process=false`. This enforces
+the no-local-extraction behavior without changing the browser UI or any other
+OpenWebUI endpoint.
 
 ## What's in this repo
 

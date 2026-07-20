@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import mimetypes
+import os
 import sys
 import time
 import urllib.error
@@ -188,21 +189,54 @@ def main() -> int:
         "--check-chat",
         help="Validate an existing smoke-test chat instead of creating a new one",
     )
+    parser.add_argument(
+        "--verify-upload-bypass",
+        action="store_true",
+        help="Upload a >3 MiB CSV through process=true and require the proxy to suppress processing",
+    )
+    parser.add_argument(
+        "--token-env",
+        help="Environment variable containing a pre-issued OpenWebUI bearer token",
+    )
+    parser.add_argument(
+        "--token-file",
+        type=Path,
+        help="Mode-600 temporary file containing a pre-issued OpenWebUI bearer token",
+    )
     args = parser.parse_args()
     base_url = args.base_url.rstrip("/")
 
-    credentials = load_env(args.env_file)
-    signin = request_json(
-        f"{base_url}/api/v1/auths/signin",
-        payload={
-            "email": credentials["ADMIN_EMAIL"],
-            "password": credentials["ADMIN_PASSWORD"],
-        },
-    )
-    token = signin.get("token")
-    user_id = signin.get("id")
-    if not token or not user_id or signin.get("role") != "admin":
-        raise RuntimeError("Admin sign-in did not return an admin session")
+    if args.token_env and args.token_file:
+        raise RuntimeError("Use only one of --token-env or --token-file")
+    if args.token_env or args.token_file:
+        token = (
+            os.environ.get(args.token_env)
+            if args.token_env
+            else args.token_file.read_text(encoding="utf-8").strip()
+        )
+        if not token:
+            source = (
+                f"environment variable {args.token_env!r}"
+                if args.token_env
+                else f"token file {args.token_file}"
+            )
+            raise RuntimeError(f"{source} is empty")
+        # The token is created only inside the EC2 container for operational
+        # smoke tests. Avoid printing or persisting it.
+        user_id = "token-session"
+    else:
+        credentials = load_env(args.env_file)
+        signin = request_json(
+            f"{base_url}/api/v1/auths/signin",
+            payload={
+                "email": credentials["ADMIN_EMAIL"],
+                "password": credentials["ADMIN_PASSWORD"],
+            },
+        )
+        token = signin.get("token")
+        user_id = signin.get("id")
+        if not token or not user_id or signin.get("role") != "admin":
+            raise RuntimeError("Admin sign-in did not return an admin session")
 
     if args.check_chat:
         answer = wait_for_chat_answer(
@@ -218,6 +252,40 @@ def main() -> int:
         print(f"user_id={user_id}")
         print(f"chat_id={args.check_chat}")
         print("agentcore_answer=E2E_SUM=6")
+        return 0
+
+    if args.verify_upload_bypass:
+        filename = "agentcore-insights-upload-bypass.csv"
+        # Exceeds the reported failure threshold without consuming AgentCore or
+        # relying on OpenWebUI's document extractor.
+        contents = b"item,value\n" + (b"alpha,1\n" * 450_000)
+        if len(contents) <= 3 * 1024 * 1024:
+            raise RuntimeError("Upload-bypass fixture must exceed 3 MiB")
+        upload_body, upload_type = multipart_file(
+            field_name="file",
+            filename=filename,
+            contents=contents,
+        )
+        uploaded = request_json(
+            f"{base_url}/api/v1/files/?process=true",
+            token=token,
+            data=upload_body,
+            content_type=upload_type,
+        )
+        file_id = str(uploaded.get("id") or "")
+        if not file_id:
+            raise RuntimeError("Upload did not return a file id")
+        processing_status = (uploaded.get("data") or {}).get("status")
+        if processing_status:
+            raise RuntimeError(
+                "Upload proxy did not suppress OpenWebUI processing; "
+                f"status={processing_status!r}"
+            )
+        print("signin_role=admin")
+        print(f"user_id={user_id}")
+        print(f"file_id={file_id}")
+        print(f"upload_bytes={len(contents)}")
+        print("upload_processing=not_started")
         return 0
 
     model_id = choose_model(

@@ -37,11 +37,10 @@ Known gaps:
   short-lived JWT; verify issuer, audience, expiry, and replay protection;
   derive `actorId` only from verified claims.
 
-- **Browser-direct S3 upload / absolute no-parse guarantee.** Uploads are
-  currently mediated by OpenWebUI, not browser-to-S3 presigned PUTs.
-  `BYPASS_EMBEDDING_AND_RETRIEVAL=true` skips OpenWebUI RAG/embedding, and the
-  end-to-end test uses `process=false`; verify or enforce that the UI always
-  sends `process=false` before treating local file parsing as universally off.
+- **Browser-direct S3 upload.** Uploads are currently mediated by OpenWebUI,
+  not browser-to-S3 presigned PUTs. The Insights Caddy sidecar enforces
+  `process=false` on the upload endpoint, so OpenWebUI's extraction/RAG job is
+  not started; this does not make the browser upload directly to S3.
 
 - **Dify identity and native-S3 compatibility are deferred.** The Insights
   actor/chat namespace and chat-wide S3 manifest filter currently apply only
