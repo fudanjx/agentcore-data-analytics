@@ -13,13 +13,13 @@ from proxy import server
 USER_ID = "fce94d3d-e556-429e-8dcc-6565d9851512"
 CHAT_ID = "ab3a94f6-aa17-46f5-8d74-c97f2ab0023f"
 FILE_ID = "7a40b85b-c03d-43e1-a5b4-173953cc555c"
-FILE_URI = (
-    "s3://agentcore-openwebui-test-964340114883/"
-    f"openwebui-test/{FILE_ID}_costs.csv"
-)
 INSIGHTS_FILE_URI = (
     "s3://agentcore-openwebui-insights-964340114883/"
     f"openwebui-insights/{FILE_ID}_costs.csv"
+)
+NON_INSIGHTS_FILE_URI = (
+    "s3://agentcore-openwebui-test-964340114883/"
+    f"openwebui-test/{FILE_ID}_costs.csv"
 )
 
 
@@ -112,7 +112,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         self,
         *,
         file_id=FILE_ID,
-        uri=FILE_URI,
+        uri=INSIGHTS_FILE_URI,
         filename="costs.csv",
         size=1945,
     ):
@@ -131,25 +131,46 @@ class OpenWebUIIdentityTests(unittest.TestCase):
             patch.object(server, "get_s3", return_value=s3),
         ):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json={**self.body, "agentcore_files": manifest},
                 headers=self.headers,
             )
         return response, completion
 
-    def test_openwebui_headers_become_namespaced_actor_and_session(self):
+    def test_legacy_harness_accepts_requests_without_identity_headers_or_manifest_validation(self):
+        completion = AsyncMock(return_value={"ok": True})
+        with (
+            patch.object(server, "_build_completion", completion),
+            patch.object(
+                server,
+                "get_s3",
+                side_effect=AssertionError("legacy harness must not access S3"),
+            ),
+        ):
+            response = self.client.post(
+                "/harness/v1/chat/completions",
+                json={**self.body, "agentcore_files": "not-a-list"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        args = completion.await_args.args
+        self.assertRegex(args[4], r"^[0-9a-f-]{36}$")
+        self.assertIsNone(args[5])
+        self.assertEqual(args[0], self.body["messages"])
+
+    def test_insights_headers_become_namespaced_actor_and_session(self):
         completion = AsyncMock(return_value={"ok": True})
         with patch.object(server, "_build_completion", completion):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=self.body,
                 headers=self.headers,
             )
 
         self.assertEqual(response.status_code, 200)
         args = completion.await_args.args
-        self.assertEqual(args[4], f"owui-{USER_ID}-{CHAT_ID}")
-        self.assertEqual(args[5], f"openwebui:{USER_ID}")
+        self.assertEqual(args[4], f"owui-insights-{USER_ID}-{CHAT_ID}")
+        self.assertEqual(args[5], f"openwebui-insights:{USER_ID}")
 
     def test_insights_headers_use_separate_actor_and_session_namespaces(self):
         completion = AsyncMock(return_value={"ok": True})
@@ -200,7 +221,9 @@ class OpenWebUIIdentityTests(unittest.TestCase):
                 "/insights/v1/chat/completions",
                 json={
                     **self.body,
-                    "agentcore_files": [self.manifest_entry()],
+                    "agentcore_files": [
+                        self.manifest_entry(uri=NON_INSIGHTS_FILE_URI)
+                    ],
                 },
                 headers=self.headers,
             )
@@ -222,7 +245,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         }
         with patch.object(server, "_build_completion", completion):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=body,
                 headers=self.headers,
             )
@@ -251,12 +274,12 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         }
         with patch.object(server, "_build_completion", completion):
             first = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=body,
                 headers=self.headers,
             )
             second = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=body,
                 headers=self.headers,
             )
@@ -265,10 +288,10 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         self.assertEqual(second.status_code, 200)
         first_args = completion.await_args_list[0].args
         second_args = completion.await_args_list[1].args
-        self.assertTrue(first_args[4].startswith("owui-bg-"))
-        self.assertTrue(second_args[4].startswith("owui-bg-"))
+        self.assertTrue(first_args[4].startswith("owui-insights-bg-"))
+        self.assertTrue(second_args[4].startswith("owui-insights-bg-"))
         self.assertNotEqual(first_args[4], second_args[4])
-        self.assertEqual(first_args[5], f"openwebui-task:{USER_ID}")
+        self.assertEqual(first_args[5], f"openwebui-insights-task:{USER_ID}")
         self.assertEqual(first_args[0], body["messages"])
 
     def test_same_foreground_session_harness_invocations_are_serialized(self):
@@ -277,7 +300,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         def post():
             with TestClient(server.app) as client:
                 return client.post(
-                    "/harness/v1/chat/completions",
+                    "/insights/v1/chat/completions",
                     json=self.body,
                     headers=self.headers,
                 )
@@ -293,7 +316,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         completion = AsyncMock(return_value={"ok": True})
         with patch.object(server, "_build_completion", completion):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=self.body,
                 headers={"X-OpenWebUI-Chat-Id": CHAT_ID},
             )
@@ -306,7 +329,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         completion = AsyncMock(return_value={"ok": True})
         with patch.object(server, "_build_completion", completion):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=self.body,
                 headers={"X-OpenWebUI-User-Id": USER_ID},
             )
@@ -325,7 +348,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         system_content = "\n".join(
             message["content"] for message in messages if message["role"] == "system"
         )
-        self.assertIn(FILE_URI, system_content)
+        self.assertIn(INSIGHTS_FILE_URI, system_content)
         self.assertIn("Code Interpreter", system_content)
         self.assertIn("aws s3 cp", system_content)
         self.assertIn("--region ap-southeast-1", system_content)
@@ -409,8 +432,8 @@ class OpenWebUIIdentityTests(unittest.TestCase):
                 self.manifest_entry(
                     file_id=file_id,
                     uri=(
-                        "s3://agentcore-openwebui-test-964340114883/"
-                        f"openwebui-test/{file_id}_costs.csv"
+                        "s3://agentcore-openwebui-insights-964340114883/"
+                        f"openwebui-insights/{file_id}_costs.csv"
                     ),
                 )
             )
@@ -436,7 +459,7 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         completion = AsyncMock(return_value={"ok": True})
         with patch.object(server, "_build_completion", completion):
             response = self.client.post(
-                "/harness/v1/chat/completions",
+                "/insights/v1/chat/completions",
                 json=self.body,
                 headers=self.headers,
             )

@@ -1,27 +1,53 @@
 """
 AgentCore proxy — OpenAI-compatible + Dify-compatible.
 
-Accepts:
-  - OpenAI /v1/chat/completions (OpenWebUI, etc.)
-  - Dify /v1/chat-messages       (Dify Apps)
-
 Forwards to an AgentCore Runtime or Harness via boto3 (IAM auth via pod IRSA).
-Both streaming (SSE) and blocking responses are supported on both surfaces.
+Chat APIs support streaming SSE and non-streaming responses.
 
-Path-prefixed routes allow multiple backends on one service:
-  /poc/v1/chat/completions       → agentcore_poc runtime  (invoke_agent_runtime)
-  /harness/v1/chat/completions   → harness_e52fs         (invoke_harness)
-  /v1/chat/completions           → agentcore_poc          (OpenAI compat root)
-  /dify/poc/v1/chat-messages     → agentcore_poc runtime
-  /dify/harness/v1/chat-messages → harness_e52fs
+Routes are defined by two dimensions:
+  1. Upstream API/application: OpenAI-compatible clients (including OpenWebUI)
+     or the native Dify App API.
+  2. Downstream AgentCore target: selected by `{slug}`.
 
-OpenWebUI → AgentCore identity:
-  chat_id                  → runtimeSessionId
-  model_item.info.user_id  → actorId / runtimeUserId
+Path-prefixed routes — OpenAI-compatible API:
+  GET  /{slug}/v1/models
+  POST /{slug}/v1/chat/completions
 
-Dify → AgentCore identity:
-  conversation_id          → runtimeSessionId
-  user                     → actorId / runtimeUserId
+  /poc/v1/...       Generic OpenAI client → `agentcore_poc` Runtime
+                     (invoke_agent_runtime). `chat_id` and
+                     `model_item.info.user_id` are optional; absent values
+                     produce a fresh session and no ActorID/runtimeUserId.
+
+  /harness/v1/...   Legacy OpenWebUI → `harness_e52fs` (invoke_harness).
+                     Uses optional OpenAI body context (`chat_id` and
+                     `model_item.info.user_id`); it neither requires trusted
+                     identity headers nor processes `agentcore_files` S3
+                     manifests.
+
+  /insights/v1/...  OpenWebUI Insights → the same `harness_e52fs`
+                     (invoke_harness). Requires the same trusted headers;
+                     maps to isolated `openwebui-insights` / `owui-insights`
+                     ActorID and runtimeSessionId namespaces and validates the
+                     Insights S3 file manifest.
+
+  /dify/v1/...      Generic OpenAI-compatible client → `harness_dify`
+                     (invoke_harness). Body `chat_id` and
+                     `model_item.info.user_id` remain optional.
+
+  /v1/...           Backward-compatible root alias for `/poc/v1/...`.
+
+Path-prefixed routes — native Dify App API:
+  POST /dify/{slug}/v1/chat-messages
+  POST /dify/{slug}/files/upload
+      Dify selects any valid `{slug}` above. Its payload `conversation_id`
+      becomes runtimeSessionId (a UUID is minted when absent), and `user`
+      becomes ActorID/runtimeUserId. The upload route uses the same `user` to
+      scope the file's S3 key.
+
+Additional route:
+  GET  /health      Liveness/readiness response.
+
+The standalone POST /v1/files is the OpenAI-style proxy-managed upload API.
 """
 
 import json
@@ -52,14 +78,6 @@ REGION = "ap-southeast-1"
 # See infra/user_uploads_bootstrap.py.
 UPLOADS_BUCKET = os.environ.get("UPLOADS_BUCKET", "agentcore-user-uploads-964340114883")
 UPLOADS_PREFIX = "uploads/"
-OPENWEBUI_UPLOADS_BUCKET = os.environ.get(
-    "OPENWEBUI_UPLOADS_BUCKET",
-    "agentcore-openwebui-test-964340114883",
-)
-OPENWEBUI_UPLOADS_PREFIX = os.environ.get(
-    "OPENWEBUI_UPLOADS_PREFIX",
-    "openwebui-test/",
-)
 INSIGHTS_UPLOADS_BUCKET = os.environ.get(
     "INSIGHTS_UPLOADS_BUCKET",
     "agentcore-openwebui-insights-964340114883",
@@ -68,19 +86,11 @@ INSIGHTS_UPLOADS_PREFIX = os.environ.get(
     "INSIGHTS_UPLOADS_PREFIX",
     "openwebui-insights/",
 )
-OPENWEBUI_SOURCE_PROFILES = {
-    "harness": {
-        "actor_namespace": "openwebui",
-        "session_namespace": "owui",
-        "bucket": OPENWEBUI_UPLOADS_BUCKET,
-        "prefix": OPENWEBUI_UPLOADS_PREFIX,
-    },
-    "insights": {
-        "actor_namespace": "openwebui-insights",
-        "session_namespace": "owui-insights",
-        "bucket": INSIGHTS_UPLOADS_BUCKET,
-        "prefix": INSIGHTS_UPLOADS_PREFIX,
-    },
+INSIGHTS_OPENWEBUI_SOURCE_PROFILE = {
+    "actor_namespace": "openwebui-insights",
+    "session_namespace": "owui-insights",
+    "bucket": INSIGHTS_UPLOADS_BUCKET,
+    "prefix": INSIGHTS_UPLOADS_PREFIX,
 }
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
 MAX_FILES_PER_CHAT = 10
@@ -891,8 +901,8 @@ async def chat_completions_by_slug(slug: str, request: Request):
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
-    if slug in OPENWEBUI_SOURCE_PROFILES:
-        source_profile = OPENWEBUI_SOURCE_PROFILES[slug]
+    if slug == "insights":
+        source_profile = INSIGHTS_OPENWEBUI_SOURCE_PROFILE
         context = _extract_openwebui_context(request, body, source_profile)
         if isinstance(context, JSONResponse):
             return context
