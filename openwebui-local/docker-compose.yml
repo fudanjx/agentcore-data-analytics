@@ -1,0 +1,66 @@
+services:
+  openwebui:
+    image: ${OPENWEBUI_IMAGE}
+    container_name: agentcore-openwebui-test
+    restart: unless-stopped
+    ports:
+      - "${OPENWEBUI_PORT}:8080"
+    environment:
+      # Keep this local test deterministic: compose values win over settings
+      # persisted in OpenWebUI's SQLite database.
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_SIGNUP: "false"
+      ENABLE_LOGIN_FORM: "true"
+
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: ${AGENTCORE_BASE_URL}
+      OPENAI_API_KEYS: ${AGENTCORE_API_KEY}
+      OPENAI_API_CONFIGS: >-
+        {"0":{"enable":true,"prefix_id":"agentcore","model_ids":["harness"],"tags":["local-test"],"connection_type":"external"}}
+
+      # OpenWebUI is the file transport/UI rather than the RAG engine. The
+      # installed AgentCore filter forwards owner-scoped S3 metadata instead
+      # of extracted document contents.
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      RAG_FULL_CONTEXT: "true"
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_OPENAI_API_BASE_URL: ${AGENTCORE_BASE_URL}
+      RAG_OPENAI_API_KEY: ${AGENTCORE_API_KEY}
+
+      STORAGE_PROVIDER: s3
+      STORAGE_LOCAL_CACHE: "false"
+      S3_BUCKET_NAME: ${S3_BUCKET_NAME}
+      S3_REGION_NAME: ${AWS_REGION}
+      S3_KEY_PREFIX: ${S3_KEY_PREFIX}
+      S3_ENABLE_TAGGING: "true"
+
+      # Temporary credentials are exported by start.sh after assuming the
+      # bucket-scoped local-test role. They are never written to this repo.
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN}
+      AWS_REGION: ${AWS_REGION}
+      AWS_DEFAULT_REGION: ${AWS_REGION}
+
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      CORS_ALLOW_ORIGIN: http://localhost:${OPENWEBUI_PORT}
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+    volumes:
+      - openwebui-data:/app/backend/data
+      - ./functions:/opt/agentcore-openwebui/functions:ro
+      - ./install_filter.py:/opt/agentcore-openwebui/install_filter.py:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+
+volumes:
+  openwebui-data:
+    name: agentcore-openwebui-test-data

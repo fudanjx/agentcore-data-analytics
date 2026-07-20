@@ -60,6 +60,22 @@ S3-event data pipeline for the Iceberg backend
         │
         └── S3 ObjectCreated on s3://ah-data-analytics/Combined_*_encoded.parquet.gzip
               └── Lambda ah-analytics-s3tables-loader (container, PyIceberg) ─→ S3 Tables ah-analytics
+
+User-file upload pipeline (per-actor scoped)
+        │
+        ├── Client upload           →  Proxy /v1/files or /dify/{slug}/files/upload
+        │                                 │
+        │                                 ▼
+        │                             s3://agentcore-user-uploads-.../uploads/{actor_id}/{conv_id}/{filename}
+        │                             (24-h lifecycle; block public access)
+        │
+        └── Chat message w/ file id →  Proxy verifies actor prefix, injects S3 URI into user turn
+                                        │
+                                        ▼
+                                     Harness invokes AgentCore Code Interpreter
+                                     (SANDBOX network, pandas/pypdf/python-docx/pptx pre-installed)
+                                        │
+                                        └─→ downloads from S3 via CI execution role → returns analysis
 ```
 
 ---
@@ -99,7 +115,10 @@ S3-event data pipeline for the Iceberg backend
 
 OpenWebUI's backend→external-OpenAI-provider outbound request strips `chat_id` and `user_id` (only `{model, messages, stream}` reaches the proxy). Without a user identity, `app/memory.py` short-circuits both save and retrieve. Direct boto3 calls that pass `runtimeUserId` DO work end-to-end.
 
-**TODO:** either (a) add an OpenWebUI Function/Filter that injects `user_id`/`chat_id` into the outbound body, or (b) find/enable OpenWebUI's "Include User Info" toggle so it emits `X-OpenWebUI-User-Id` as a header, and have the proxy read that header. `/harness` and `/dify` are unaffected — AgentCore Harness's `invoke_harness` API accepts `actorId` natively and the proxy sets it from any available source.
+The local OpenWebUI `/harness` path is fixed: OpenWebUI forwards identity
+headers and the proxy derives a namespaced `actorId` plus a chat-scoped
+`runtimeSessionId`. `/poc` remains outside this POC filter and still has the
+limitation above.
 
 ---
 
@@ -114,9 +133,14 @@ POST /{slug}/v1/chat/completions
 
 Where `{slug}` is one of `poc`, `harness`, `dify`. Body is standard OpenAI: `{model, messages, stream}`. On `stream=true`, emits `text/event-stream` SSE with `data: {json}\n\n` chunks and terminating `data: [DONE]\n\n`.
 
-Session/user identity carried via body fields when available:
+Session/user identity is carried via body fields for legacy/runtime paths:
 - `chat_id` → `runtimeSessionId`
 - `model_item.info.user_id` → `actorId` (harness) / `runtimeUserId` (runtime)
+
+For local OpenWebUI `/harness`, both `X-OpenWebUI-User-Id` and
+`X-OpenWebUI-Chat-Id` are required:
+- `X-OpenWebUI-User-Id` → `actorId=openwebui:<user-id>`
+- both values → `runtimeSessionId=owui-<user-id>-<chat-id>`
 
 ### Dify App Chat API
 
@@ -141,6 +165,8 @@ Streaming (`response_mode: "streaming"`) emits Dify SSE events: `event: message`
 - **Shared memory:** `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia`
 - **Gateways:** `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `ah-analytics-s3tables-uhtyjdutj7`, `timesfm-gateway-w4fho4r9um`
 - **S3 Tables bucket (AH Iceberg backend):** `arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics`, namespace `ah_analytics`, Athena workgroup `ah-s3tables-wg`, federated Glue catalog `s3tablescatalog/ah-analytics`
+- **User uploads bucket:** `agentcore-user-uploads-964340114883` (`uploads/{actor_id}/{conversation_id}/{filename}`, 24-h lifecycle)
+- **Code Interpreter (uploads):** `agentcore_user_uploads_ci` — attached to both harnesses; SANDBOX network mode; pandas/openpyxl/pypdf/python-docx/python-pptx/matplotlib pre-installed
 - **Inference profile:** `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3`
 
 ### EKS Proxy
@@ -197,8 +223,12 @@ RDS credentials, DB name, and DB user are no longer container env vars — Gatew
 For Dify hitting `/harness` or `/poc` instead, swap the slug.
 
 ### Open WebUI
-- **Base URL:** `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/harness/v1`
-- Send `chat_id` and `model_item.info.user_id` — OpenWebUI does this automatically for its own body
+- **Local base URL:** `http://100.79.116.60:18080/harness/v1`
+- `ENABLE_FORWARD_USER_INFO_HEADERS=true`
+- The automatically installed global filter adds chat-wide, owner-scoped S3
+  file metadata only for the AgentCore harness model.
+- The proxy validates ownership tags and limits before placing approved S3 URIs
+  in system context for conditional Code Interpreter use.
 
 ### Direct Python (boto3)
 

@@ -25,6 +25,14 @@ spec:
           env:
             - name: AWS_DEFAULT_REGION
               value: ap-southeast-1
+            - name: OPENWEBUI_UPLOADS_BUCKET
+              value: agentcore-openwebui-test-964340114883
+            - name: OPENWEBUI_UPLOADS_PREFIX
+              value: openwebui-test/
+            - name: INSIGHTS_UPLOADS_BUCKET
+              value: agentcore-openwebui-insights-964340114883
+            - name: INSIGHTS_UPLOADS_PREFIX
+              value: openwebui-insights/
           resources:
             requests:
               cpu: 256m

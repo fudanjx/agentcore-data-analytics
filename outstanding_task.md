@@ -4,6 +4,68 @@ Rolling backlog of known limitations, deferred work, and follow-ups for this rep
 
 ---
 
+## OpenWebUI Insights files, identity, and Code Interpreter
+
+Shipped 2026-07-20. The isolated OpenWebUI v0.10.2-slim test service at
+`https://insights.bot-alex.com` runs alongside the legacy EC2 deployment with
+its own PostgreSQL database and Docker volume. Browser uploads are
+server-mediated: browser → OpenWebUI → the dedicated bucket
+`s3://agentcore-openwebui-insights-964340114883/openwebui-insights/`. The
+bucket has private access, SSE-S3, versioning, and a seven-day current-object
+lifecycle expiry.
+
+For the `insights` / `agentcore.insights` model only, the OpenWebUI filter
+checks chat ownership, builds a chat-wide manifest of the authenticated user's
+files, and removes raw OpenWebUI file metadata before the request leaves the
+application. The proxy validates each manifest entry's bucket, prefix, owner
+tags, type, and size; then it maps identity to
+`ActorID=openwebui-insights:<user UUID>` and
+`runtimeSessionId=owui-insights-<user UUID>-<chat UUID>`. `/insights/v1` is a
+separate proxy namespace but invokes the existing OpenWebUI harness
+`harness_e52fs-Du2DM0RxvF`.
+
+The harness receives the validated `s3_uri` manifest and, when analysis is
+needed, uses the AgentCore Code Interpreter sandbox to copy the named object
+with `aws s3 cp` before inspecting it. Verified end to end with an uploaded
+test file (`E2E_SUM=6`) and a real `.xls` analysis that correlated to a Code
+Interpreter session creation.
+
+Known gaps:
+
+- **Production identity hardening.** The POC uses plain identity headers only
+  on the private OpenWebUI-server → proxy path. Replace them with a signed,
+  short-lived JWT; verify issuer, audience, expiry, and replay protection;
+  derive `actorId` only from verified claims.
+
+- **Browser-direct S3 upload / absolute no-parse guarantee.** Uploads are
+  currently mediated by OpenWebUI, not browser-to-S3 presigned PUTs.
+  `BYPASS_EMBEDDING_AND_RETRIEVAL=true` skips OpenWebUI RAG/embedding, and the
+  end-to-end test uses `process=false`; verify or enforce that the UI always
+  sends `process=false` before treating local file parsing as universally off.
+
+- **Dify identity and native-S3 compatibility are deferred.** The Insights
+  actor/chat namespace and chat-wide S3 manifest filter currently apply only
+  to OpenWebUI. Design a Dify-specific trusted identity contract and file
+  manifest in the next phase.
+
+- **Code Interpreter has broad POC read access to the Insights prefix.** The
+  proxy enforces owner tags before disclosing a URI, but the shared Code
+  Interpreter execution role can read the Insights prefix. Replace this with
+  object-scoped temporary authorization for production.
+
+- **`runtimeSessionId` must be ≥ 33 chars.**
+  The Dify `/chat-messages` path forwards `conversation_id` verbatim as the harness session id, which AWS rejects if shorter than 33 chars. Dify's UI passes UUIDs so real users don't hit it; curl/scripted callers do.
+  → Pad or hash short `conversation_id`s in `proxy/server.py:_dify_parse` before assigning to `runtimeSessionId`.
+
+- **No S3 upload size streaming.**
+  Current handler calls `await file.read()` — loads the whole body into memory before writing to S3. Fine at 50 MB cap but wasteful; use `s3.upload_fileobj` with streaming for larger caps.
+
+- **CI sandbox lifecycle costs unmonitored.**
+  Every invocation spins a sandbox microVM billed per second. No dashboard tracks daily invocations or duration.
+  → CloudWatch metric filter on Code Interpreter session events → billing dashboard.
+
+---
+
 ## S3 Tables backend (`ah-analytics`)
 
 The Iceberg + Athena path shipped 2026-07-14. Source parquet uploads to `s3://ah-data-analytics/` auto-trigger the loader Lambda (`ah-analytics-s3tables-loader`) which full-overwrites the matching Iceberg table. Agent queries via MCP Gateway `ah-analytics-s3tables` → Athena. The following items are known gaps.

@@ -11,6 +11,7 @@ build/
 
 # Environment — contains secrets
 .env
+openwebui-local/.env
 
 # Docker build artifacts
 package/

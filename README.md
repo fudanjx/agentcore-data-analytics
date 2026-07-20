@@ -35,6 +35,66 @@ AgentCore Runtime / Harness      (ap-southeast-1, private VPC)
                                  Same gateway toolset as harness_e52fs
 ```
 
+## OpenWebUI Insights test frontend
+
+`https://insights.bot-alex.com` is an isolated OpenWebUI v0.10.2-slim test
+deployment on the existing EC2 host. It runs alongside the legacy OpenWebUI
+service, with a separate Docker volume and PostgreSQL database
+(`openwebui_insights`), so no user or configuration migration is required.
+
+Its model endpoint is the private NLB path `/insights/v1`:
+
+```
+Browser → ALB / insights.bot-alex.com → open-webui-insights
+        → private NLB /insights/v1 → agentcore-proxy
+        → harness_e52fs-Du2DM0RxvF → AgentCore Code Interpreter (when needed)
+```
+
+The endpoint is a separate identity/session namespace even though it reuses the
+same Harness as `/harness`: `ActorID` is
+`openwebui-insights:<OpenWebUI user UUID>` and `runtimeSessionId` is
+`owui-insights-<user UUID>-<chat UUID>`. This keeps AgentCore memory isolated
+by user and chat.
+
+### Insights file handoff
+
+OpenWebUI stores uploads in
+`s3://agentcore-openwebui-insights-964340114883/openwebui-insights/` using its
+S3 storage provider. Uploads are server-mediated (browser → OpenWebUI → S3),
+not presigned browser-direct PUTs. Local persistent file cache is disabled and
+`BYPASS_EMBEDDING_AND_RETRIEVAL=true` prevents the normal RAG/embedding path.
+
+The `agentcore_file_context` filter applies only to the `insights` models. It:
+
+1. requires an authenticated OpenWebUI user and owned chat;
+2. finds files already attached anywhere in that chat;
+3. retrieves each file through OpenWebUI's user-scoped lookup;
+4. replaces raw file metadata with a compact `agentcore_files` manifest
+   (`file_id`, `s3_uri`, filename, MIME type, size); and
+5. removes raw `files` fields so the proxy never trusts browser-supplied file
+   references.
+
+Before invoking AgentCore, the proxy rejects any manifest object outside the
+Insights bucket/prefix or whose S3 owner/file tags do not match the caller. It
+then gives the validated URI to the Harness. The Harness can invoke AgentCore
+Code Interpreter, which downloads it inside its sandbox, for example:
+
+```bash
+aws s3 cp "$S3_URI" "/tmp/$FILENAME" --region ap-southeast-1 --only-show-errors
+```
+
+The bucket is private, encrypted with SSE-S3, versioned, and expires current
+objects after seven days. The proxy-side checks prevent cross-user manifest
+sharing; the Code Interpreter role is still broadly scoped to the Insights
+prefix for this POC, so object-scoped temporary authorization is a production
+enhancement. Plain identity headers are likewise trusted only on the private
+OpenWebUI-server → proxy hop; replace them with signed short-lived JWTs before
+allowing untrusted callers on that path.
+
+`process=false` was used in the end-to-end validation. Confirm or enforce that
+the OpenWebUI browser flow always sets it before claiming a universal guarantee
+that OpenWebUI never parses an uploaded file locally.
+
 ## What's in this repo
 
 | Path | Purpose |
@@ -49,7 +109,10 @@ AgentCore Runtime / Harness      (ap-southeast-1, private VPC)
 | `timesfm_service/` | EKS pod running TimesFM 2.5-200m (CPU, model weights baked into image) |
 | `timesfm_mcp/handler.py` | Bridge Lambda: Gateway MCP → HTTP POST to TimesFM NLB |
 | `timesfm_mcp/deploy.py` | Provision the bridge Lambda + wire to `timesfm-gateway` + harness |
-| `proxy/server.py` | OpenAI-compatible FastAPI proxy — routes `/poc`, `/harness`, plus session/user mapping and SSE streaming |
+| `proxy/server.py` | OpenAI-compatible FastAPI proxy — routes `/poc`, `/harness`, `/insights`, and `/dify`, with session/user mapping, file-manifest validation, and SSE streaming |
+| `openwebui-insights/functions/agentcore_file_context.py` | OpenWebUI filter that creates the authenticated, chat-wide Insights S3 file manifest |
+| `infra/user_uploads_bootstrap.py` | Creates the Insights upload bucket/policies/lifecycle and related IAM permissions |
+| `infra/test_code_interpreter_s3.py` | Direct AgentCore Code Interpreter S3 download smoke test |
 | `proxy/k8s/` | Deployment, ClusterIP + internal NLB service, IRSA ServiceAccount |
 | `.claude/Skills/` | Agent Skills — data dictionary routing guide + per-table SQL guidance |
 | `him_scripts/DATA_DICTIONARY.md` | Column semantics, filter rules, and inclusion criteria from HIM scripts |
@@ -115,7 +178,7 @@ aws ecs run-task --cluster embedded-web-app --task-definition agentcore-ah-etl:1
 
 ## API Endpoints
 
-The proxy exposes **three backends × two API shapes** on the same service. Pick the slug that matches your backend, and the shape that matches your frontend.
+The proxy exposes **four backends × two API shapes** on the same service. Pick the slug that matches your backend, and the shape that matches your frontend.
 
 ### Slugs → backend
 
@@ -123,6 +186,7 @@ The proxy exposes **three backends × two API shapes** on the same service. Pick
 |------|---------|----------|
 | `/poc` | `agentcore_poc` runtime (Claude Agent SDK) | `invoke_agent_runtime` |
 | `/harness` | `harness_e52fs` (Strands Agent for OpenWebUI) | `invoke_harness` |
+| `/insights` | `harness_e52fs` with Insights identity/file validation | `invoke_harness` |
 | `/dify` | `harness_dify` (Strands Agent for DIFY) | `invoke_harness` |
 
 ### API shapes
@@ -138,6 +202,7 @@ For OpenAI-compatible clients the base is `http://<host>/{slug}/v1`. For the Dif
 |---------|-------------------------|
 | poc | `http://agentcore-proxy.agentcore.svc.cluster.local/poc/v1` |
 | harness | `http://agentcore-proxy.agentcore.svc.cluster.local/harness/v1` |
+| insights | `http://agentcore-proxy.agentcore.svc.cluster.local/insights/v1` |
 | dify | `http://agentcore-proxy.agentcore.svc.cluster.local/dify/v1` |
 
 ### From VPC / peered VPC (Open WebUI)
@@ -172,6 +237,10 @@ OpenWebUI model_item.info.user_id → actorId (harness) / runtimeUserId (runtime
 Dify conversation_id             → runtimeSessionId  (echoed back so client can reuse)
 Dify user                        → actorId / runtimeUserId
 ```
+
+For the Insights deployment, the OpenWebUI filter supplies the trusted user and
+chat values as private-hop headers, and the proxy deliberately namespaces both
+values as described in [OpenWebUI Insights test frontend](#openwebui-insights-test-frontend).
 
 AgentCore managed memory uses two strategies (configured on the harness):
 - **Semantic** — `/actors/{actorId}/facts/` — cross-session user facts. Extracted asynchronously (~30–60 s after the turn is saved).
@@ -245,6 +314,9 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 | ECR timesfm image | `964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/timesfm-service:latest` (amd64) |
 | IRSA role | `arn:aws:iam::964340114883:role/agentcore-proxy-irsa` |
 | Proxy internal NLB | `k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com` |
+| Insights public endpoint | `https://insights.bot-alex.com` |
+| Insights upload bucket | `s3://agentcore-openwebui-insights-964340114883/openwebui-insights/` |
+| Insights Code Interpreter | `agentcore_user_uploads_ci-iZOyjlk0GA` (SANDBOX) |
 | TimesFM internal NLB | `k8s-agentcor-timesfms-fb1729afc9-4eef87d9ac68417f.elb.ap-southeast-1.amazonaws.com` |
 | MCP Gateways | `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `timesfm-gateway-w4fho4r9um` |
 

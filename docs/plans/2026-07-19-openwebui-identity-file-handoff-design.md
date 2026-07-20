@@ -40,19 +40,29 @@ A versioned OpenWebUI global filter is installed automatically by
 For each request, the filter:
 
 1. Reads the authenticated OpenWebUI user and current chat ID.
-2. Rebuilds the file list from the current OpenWebUI chat/file records.
-3. Selects each file by both file ID and current user ID.
-4. Emits an `agentcore_files` field containing:
+2. Classifies OpenWebUI background-generation tasks separately from foreground
+   chat.
+3. For background work, emits a task marker and no file manifest. The proxy
+   assigns a fresh session and a separate `openwebui-task:` actor namespace.
+4. For foreground work, rebuilds the file list from the current OpenWebUI
+   chat/file records.
+5. Selects each file by both file ID and current user ID.
+6. Emits an `agentcore_files` field containing:
    - file ID
    - S3 URI
    - sanitized filename
    - MIME type
    - byte size
-5. Removes OpenWebUI's normal extracted-file/RAG context for this AgentCore
+7. Removes OpenWebUI's normal extracted-file/RAG context for this AgentCore
    request so file content is not duplicated into the prompt.
-6. Leaves all non-AgentCore model requests unchanged.
+8. Leaves all non-AgentCore model requests unchanged.
 
 The filter does not read, copy, or modify file contents.
+
+The Harness is stateful, so the proxy forwards only the newest foreground user
+turn plus current system context. It also serializes invocations for the same
+session in the single deployed proxy replica, preventing tool-use sequences
+from being interleaved.
 
 Files remain available on subsequent turns in the same chat. The manifest is
 rebuilt on every request, so removing or deleting a file takes effect on the

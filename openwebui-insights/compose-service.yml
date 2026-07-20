@@ -1,0 +1,69 @@
+services:
+  open-webui-insights:
+    image: ghcr.io/open-webui/open-webui:v0.10.2-slim@sha256:f03f7fcdaf5e3381b3d505c0e66f2bf4e82d1918082022b85dee7da1299b6efd
+    container_name: open-webui-insights
+    restart: always
+    ports:
+      - "3001:8080"
+    env_file:
+      - ./insights/.env
+    environment:
+      ENABLE_PERSISTENT_CONFIG: "false"
+      ENABLE_SIGNUP: "true"
+      DEFAULT_USER_ROLE: pending
+      ENABLE_LOGIN_FORM: "true"
+
+      ENABLE_OLLAMA_API: "false"
+      ENABLE_OPENAI_API: "true"
+      OPENAI_API_BASE_URLS: http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/insights/v1
+      OPENAI_API_KEYS: private-vpc-poc
+      OPENAI_API_CONFIGS: >-
+        {"0":{"enable":true,"prefix_id":"agentcore","model_ids":["insights"],"tags":["agentcore-test"],"connection_type":"external"}}
+
+      BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
+      RAG_FULL_CONTEXT: "true"
+      RAG_EMBEDDING_ENGINE: openai
+      RAG_OPENAI_API_BASE_URL: http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/insights/v1
+      RAG_OPENAI_API_KEY: private-vpc-poc
+
+      STORAGE_PROVIDER: s3
+      STORAGE_LOCAL_CACHE: "false"
+      S3_BUCKET_NAME: agentcore-openwebui-insights-964340114883
+      S3_REGION_NAME: ap-southeast-1
+      S3_KEY_PREFIX: openwebui-insights
+      S3_ENABLE_TAGGING: "true"
+      AWS_REGION: ap-southeast-1
+      AWS_DEFAULT_REGION: ap-southeast-1
+
+      ENABLE_FORWARD_USER_INFO_HEADERS: "true"
+      WEBUI_URL: https://insights.bot-alex.com
+      CORS_ALLOW_ORIGIN: https://insights.bot-alex.com
+      ENABLE_VERSION_UPDATE_CHECK: "false"
+      ANONYMIZED_TELEMETRY: "false"
+      DO_NOT_TRACK: "true"
+      SCARF_NO_ANALYTICS: "true"
+    volumes:
+      - open-webui-insights-data:/app/backend/data
+      - ./insights/functions:/opt/agentcore-openwebui/functions:ro
+      - ./insights/install_filter.py:/opt/agentcore-openwebui/install_filter.py:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health', timeout=3)"
+      interval: 15s
+      timeout: 5s
+      retries: 20
+      start_period: 90s
+    mem_limit: 900m
+    cpus: 1.0
+    labels:
+      - autoheal=true
+
+volumes:
+  open-webui-insights-data:
+    name: app_open-webui-insights-data

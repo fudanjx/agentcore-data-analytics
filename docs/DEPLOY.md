@@ -20,8 +20,10 @@ Plus AWS-console-managed infra (created once via console, referenced by the prox
 - S3 Skills bucket: `s3://ah-data-analytics/skills/` — synced by the poc container on startup
 - RDS PostgreSQL with two databases: `nuh-analytics`, `ah-analytics`
 - S3 Tables bucket: `ah-analytics` (Iceberg, 6 tables mirroring `ah-analytics` RDS) — queried via Athena workgroup `ah-s3tables-wg`, federated Glue catalog `s3tablescatalog/ah-analytics`
+- S3 Uploads bucket: `agentcore-user-uploads-964340114883` — per-actor prefix `uploads/{actor_id}/{conversation_id}/{filename}`, 24-h lifecycle, read by the shared Code Interpreter sandbox
+- Code Interpreter sandbox: `agentcore_user_uploads_ci` — attached to both harnesses; pandas/openpyxl/pypdf/python-docx/python-pptx/matplotlib pre-installed
 
-Proxy exposes three backend slugs — `/poc`, `/harness`, `/dify` — each in two shapes: OpenAI (`/{slug}/v1/chat/completions`) and Dify App (`/dify/{slug}/v1/chat-messages`).
+Proxy exposes three backend slugs — `/poc`, `/harness`, `/dify` — each in two shapes: OpenAI (`/{slug}/v1/chat/completions`) and Dify App (`/dify/{slug}/v1/chat-messages`). File uploads on both surfaces: OpenAI `POST /v1/files` and Dify `POST /dify/{slug}/files/upload`.
 
 ---
 
@@ -140,10 +142,19 @@ Base URL pattern is `<host>/<slug>/v1` where `<slug>` is one of `poc`, `harness`
 
 *(Optional)* If you want to embed us as a Dify **App** rather than as a model provider, hit `POST /dify/dify/v1/chat-messages` directly — that endpoint speaks Dify's App Chat API with `event: message` / `event: message_end` SSE frames.
 
-**Open WebUI** (EC2 in default VPC via peering):
-- Base URL: `http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/harness/v1`
-- Send `chat_id` and `model_item.info.user_id` in the request body (Open WebUI does this automatically)
-- Cross-chat memory works on the `/harness` and `/dify` backends. On `/poc`, memory recall from OpenWebUI is currently broken because OpenWebUI's backend strips user identity when calling external OpenAI providers — see REFLECTION.md finding 33 for the TODO.
+**Local OpenWebUI** (Docker Desktop through the EC2 Tailscale relay):
+- Base URL: `http://100.79.116.60:18080/harness/v1`
+- Enable `ENABLE_FORWARD_USER_INFO_HEADERS=true`.
+- `/harness` requires `X-OpenWebUI-User-Id` and `X-OpenWebUI-Chat-Id`; missing identity fails closed with `identity_context_required`.
+- Proxy mapping: `actorId=openwebui:<user-id>` and `runtimeSessionId=owui-<user-id>-<chat-id>`.
+- Foreground requests send only the latest user turn because Harness persists chat history. Calls sharing that session are serialized by the single proxy replica.
+- OpenWebUI background tasks use a fresh `owui-bg-*` session, `actorId=openwebui-task:<user-id>`, and no chat file manifest.
+- `openwebui-local/start.sh` idempotently installs the global `agentcore_file_context` filter. It modifies only the AgentCore harness model.
+- Caddy listens only on the EC2 Tailscale address and has request access logging disabled.
+
+If the proxy is scaled above one replica, replace the in-process per-session
+lock with distributed session coordination before accepting concurrent
+foreground calls.
 
 ---
 
@@ -256,6 +267,111 @@ aws athena start-query-execution \
   --query-execution-context Catalog=s3tablescatalog/ah-analytics,Database=ah_analytics \
   --region ap-southeast-1
 ```
+
+---
+
+## Part 4c — File uploads + Code Interpreter analysis
+
+Lets a user drag a supported file into Dify or local OpenWebUI and have the
+harness invoke Code Interpreter conditionally when the prompt requires file
+processing.
+
+### 4c.1 Bootstrap (one-off)
+
+```bash
+python3 infra/user_uploads_bootstrap.py
+```
+
+Creates / ensures:
+- S3 bucket `agentcore-user-uploads-964340114883` with layout `uploads/{actor_id}/{conversation_id}/{filename}`, 24-h lifecycle rule, block public access
+- IAM role `agentcore-code-interpreter-role` (S3 GetObject on `uploads/*`)
+- Code Interpreter sandbox `agentcore_user_uploads_ci` (`networkMode=SANDBOX` — S3 only, no public internet)
+- Adds `agentcore_code_interpreter` tool to both `harness_e52fs` and `harness_dify` (existing tools preserved)
+- Grants each harness execution role `bedrock-agentcore:StartCodeInterpreterSession / Invoke*` on the CI ARN
+- Grants `agentcore-proxy-irsa` `s3:PutObject` on the uploads bucket
+- Grants the proxy metadata/tag-only validation (prefix-restricted
+  `ListBucket`, plus `GetObjectTagging`) on
+  `s3://agentcore-openwebui-test-964340114883/openwebui-test/*`; the proxy has
+  no content-read permission on that prefix
+
+Idempotent — re-run safe.
+
+### 4c.2 Proxy endpoints
+
+- **OpenAI-compatible**: `POST /v1/files` — multipart `file` + `purpose` + `user` (actor id) + optional `conversation_id`. Returns `{id, object:"file", bytes, filename, purpose}` where `id` is the S3 key.
+- **Dify App API**: `POST /dify/{slug}/files/upload` — multipart `file` + `user`. Returns Dify's schema `{id, name, size, extension, mime_type, created_by, created_at}`.
+
+Both routes stream into `s3://agentcore-user-uploads-964340114883/uploads/{actor_id}/{conversation_id}/{filename}`. The proxy trusts `actor_id` (it authenticated the request) and inserts it into the S3 key.
+
+Allowed extensions: `csv, xlsx, xls, pdf, docx, pptx, txt, md, json`. Max size 50 MB. Bad extension → HTTP 400.
+
+### 4c.3 Message-injection hook
+
+When a chat request (OpenAI or Dify) contains a `files[]` array referencing an upload id, the proxy:
+
+1. **Verifies each file's S3-key prefix matches the requester's `actor_id`** — a mismatch is silently dropped and logged as `Rejected file access: actor=X tried to reference file owned by Y`. Prevents cross-actor data leaks even if a file id is guessed or forged.
+2. Prepends a system-visible line to the user message so the agent knows the S3 URI:
+   ```
+   [Uploaded file: s3://agentcore-user-uploads-.../uploads/{actor}/{conv}/{name}
+    (name: sales.xlsx, 24138 bytes, type: application/vnd.openxmlformats-...)]
+   <original user query>
+   ```
+
+The harness's Code Interpreter tool downloads from S3 with its own execution role, runs the analysis, and streams the answer back.
+
+### 4c.4 Local OpenWebUI S3 handoff and isolation
+
+Run `openwebui-local/start.sh`. Its global filter gathers file ids from the
+current chat, resolves each with OpenWebUI's owner-scoped database method, and
+sends `agentcore_files` metadata only for the AgentCore harness request. Native
+RAG fields are removed from that request.
+
+The proxy validates every manifest entry against the allowlisted S3
+bucket/prefix and the object tags `OpenWebUI-User-Id` and
+`OpenWebUI-File-Id`. It obtains authoritative object size/existence from the
+prefix-restricted S3 listing.
+Validation is all-or-nothing: any bad, missing, unowned, unsupported or
+over-limit object rejects the whole request before AgentCore invocation.
+
+Files remain available throughout the same chat while attached, with limits of
+50 MiB per file, 10 files, and 200 MiB combined. Another user—including a
+shared-chat viewer—cannot process the owner's files.
+
+The injected system context tells the harness to access only the validated
+URIs, treat file content as untrusted data, invoke Code Interpreter only when
+needed, and avoid echoing raw S3 URIs unless requested.
+
+This is trusted-frontend POC isolation. Production must replace the plain
+identity headers with a signed, short-lived JWT and narrow the Code Interpreter
+role to object-scoped access. Dify compatibility remains a separate phase.
+
+### 4c.5 Verification
+
+```bash
+# Health + upload round-trip
+kubectl -n agentcore port-forward svc/agentcore-proxy 8080:80 &
+curl -X POST http://localhost:8080/dify/harness/files/upload \
+  -F 'file=@sales.csv' -F 'user=alice-test'
+# → {"id":"uploads/alice-test/{uuid}/sales.csv", "name":..., "size":...}
+
+aws s3 ls s3://agentcore-user-uploads-964340114883/uploads/ --recursive
+# → 2026-07-18 11:47:21  63 uploads/alice-test/{uuid}/sales.csv
+
+# End-to-end analysis via the harness (Dify blocking mode)
+curl -X POST http://localhost:8080/dify/harness/v1/chat-messages \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query":"Use the Code Interpreter to load the uploaded CSV, count rows, sum revenue.",
+    "user":"alice-test",
+    "conversation_id":"conv-<uuid-must-be-33+chars>",
+    "response_mode":"blocking",
+    "files":[{"type":"document","transfer_method":"local_file","upload_file_id":"<id-from-upload>"}]
+  }'
+```
+
+Expected: agent returns row count + revenue sum, showing the S3 path it downloaded from.
+
+Note: `runtimeSessionId` (= `conversation_id`) must be ≥ 33 characters — Dify's UI passes UUIDs which meet this; direct curl callers need to pad.
 
 ---
 
@@ -492,6 +608,9 @@ All deploy scripts are idempotent.
 | Lambda (AH S3 Tables MCP) | `arn:aws:lambda:ap-southeast-1:964340114883:function:ah-analytics-s3tables-mcp` |
 | Lambda (AH S3 Tables loader) | `arn:aws:lambda:ap-southeast-1:964340114883:function:ah-analytics-s3tables-loader` |
 | Lambda (TimesFM MCP bridge) | `arn:aws:lambda:ap-southeast-1:964340114883:function:timesfm-mcp` |
+| S3 Uploads bucket | `agentcore-user-uploads-964340114883` (layout `uploads/{actor_id}/{conversation_id}/{filename}`) |
+| Code Interpreter (uploads) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:code-interpreter-custom/agentcore_user_uploads_ci-iZOyjlk0GA` |
+| Code Interpreter role | `arn:aws:iam::964340114883:role/agentcore-code-interpreter-role` |
 | S3 Tables bucket (AH) | `arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics` |
 | Athena workgroup (AH S3 Tables) | `ah-s3tables-wg` |
 | Federated Glue catalog (AH S3 Tables) | `s3tablescatalog/ah-analytics` |
