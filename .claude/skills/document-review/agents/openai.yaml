@@ -1,0 +1,4 @@
+interface:
+  display_name: "Document Review"
+  short_description: "Review and compare PDF or DOCX documents"
+  default_prompt: "Use $document-review to analyze these documents using only the text, comment metadata, or visual inspection needed for my request."

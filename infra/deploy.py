@@ -23,8 +23,8 @@ import time
 import boto3
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
-RUNTIME_NAME = "agentcore_poc"
-ENDPOINT_NAME = "agentcore_poc_endpoint"
+RUNTIME_NAME = "agentcore_dev"
+ENDPOINT_NAME = "agentcore_dev_endpoint"
 RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
 
 # VPC config — private subnets in bot-nuhs-vpc, same VPC as RDS
@@ -43,8 +43,8 @@ SKILLS_BUCKET = "ah-data-analytics"
 SKILLS_PREFIX = "skills/"
 
 # AgentCore Memory (shared with the harness for unified user facts across agents)
-MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
-
+# MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
+MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/memory_agentcore_dev-X9UlwN6fTM"
 iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
 sts = boto3.client("sts", region_name=REGION)
@@ -177,7 +177,6 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
     }
-
     existing_id = _find_existing_runtime()
 
     if existing_id:

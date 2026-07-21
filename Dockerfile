@@ -1,41 +1,38 @@
 # ── Stage 1: build ────────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 python:3.12-alpine AS builder
+FROM --platform=linux/arm64 python:3.12-slim AS builder
 
-RUN apk add --no-cache gcc musl-dev libffi-dev nodejs npm
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
-# Install claude CLI binary (required by claude-agent-sdk at runtime)
-RUN npm install -g @anthropic-ai/claude-code
-
-# Install Python packages
-RUN pip install --no-cache-dir --prefix=/install claude-agent-sdk
 COPY requirements.txt .
 RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
 
 
 # ── Stage 2: runtime ──────────────────────────────────────────────────────────
-FROM --platform=linux/arm64 python:3.12-alpine
+FROM --platform=linux/arm64 python:3.12-slim
 
-# Runtime deps: nodejs to run the claude CLI
-RUN apk add --no-cache nodejs
+# Runtime dependencies for TLS downloads and scientific Python.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
 # Copy compiled Python packages from builder
 COPY --from=builder /install /usr/local
 
-# Copy claude CLI from builder
-COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
-COPY --from=builder /usr/local/bin/claude /usr/local/bin/claude
-
 # Copy application code
 COPY app/ ./app/
 
-# Skills directory (populated at container startup from S3)
-RUN mkdir -p /app/skills && chown 1000:1000 /app/skills
+# Claude Agent SDK discovers project skills from /app/.claude/skills.
+COPY .claude/skills/ /app/.claude/skills/
 
-RUN adduser -D -u 1000 appuser
+# Skills directory (populated at container startup from S3)
+RUN useradd --create-home --uid 1000 appuser
+RUN chown -R 1000:1000 /app/.claude
 USER appuser
 
 EXPOSE 8080
