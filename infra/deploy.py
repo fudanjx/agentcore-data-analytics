@@ -1,7 +1,7 @@
 """Deploy AgentCore POC.
 
 Creates/updates:
-  1. IAM role for AgentCore Runtime — grants Bedrock invoke, Gateway invoke, S3 skills read
+  1. IAM role for AgentCore Runtime — grants Bedrock invoke, Gateway invoke, S3 document/skills read
   2. AgentCore Runtime  — hosts the agent container (ECR image) in VPC mode
   3. AgentCore Endpoint — named endpoint for the runtime
 
@@ -41,6 +41,10 @@ GATEWAY_ARNS = [
 # S3 skills bucket the agent reads on startup
 SKILLS_BUCKET = "ah-data-analytics"
 SKILLS_PREFIX = "skills/"
+
+# Dify-managed documents passed to the runtime as s3:// references.
+DOCUMENTS_BUCKET = "ah-dify"
+DOCUMENTS_PREFIX = "upload_files/"
 
 # AgentCore Memory (shared with the harness for unified user facts across agents)
 # MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
@@ -98,6 +102,12 @@ def ensure_runtime_role() -> str:
                     f"arn:aws:s3:::{SKILLS_BUCKET}",
                     f"arn:aws:s3:::{SKILLS_BUCKET}/{SKILLS_PREFIX}*",
                 ],
+            },
+            {
+                # Download only Dify's uploaded documents referenced by prompts.
+                "Effect": "Allow",
+                "Action": "s3:GetObject",
+                "Resource": f"arn:aws:s3:::{DOCUMENTS_BUCKET}/{DOCUMENTS_PREFIX}*",
             },
             {
                 # AgentCore Memory — retrieve prior context and save turns

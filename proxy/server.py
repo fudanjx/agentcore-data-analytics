@@ -902,6 +902,14 @@ async def chat_completions_by_slug(slug: str, request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+
+    if slug == "dev":
+        logger.info(
+            "OpenAI-compatible raw payload [%s]: %s",
+            slug,
+            json.dumps(body, ensure_ascii=False, default=str),
+        )
+
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})

@@ -23,6 +23,7 @@ memory.save_turn = lambda *args: None
 sys.modules.setdefault("app.gateway_proxy", gateway_proxy)
 sys.modules.setdefault("app.memory", memory)
 
+from app import agent
 from app.agent import (
     _extract_tagged_documents,
     _redact_document_references,
@@ -69,6 +70,79 @@ def test_accepts_one_document():
     assert _extract_tagged_documents(_messages(payload)) == [
         {"name": "report", "url": "https://example.com/report.xlsx"}
     ]
+
+
+def test_extracts_line_oriented_s3_document_input():
+    messages = _messages(
+        """Name: Clean_RLS.pdf, S3_URI: s3://ah-dify/upload_files/user/clean.pdf
+Name: Signoff_RLS.pdf, S3_URI: s3://ah-dify/upload_files/user/signoff.pdf"""
+    )
+
+    assert _extract_tagged_documents(messages) == [
+        {
+            "name": "Clean_RLS.pdf",
+            "url": "s3://ah-dify/upload_files/user/clean.pdf",
+        },
+        {
+            "name": "Signoff_RLS.pdf",
+            "url": "s3://ah-dify/upload_files/user/signoff.pdf",
+        },
+    ]
+
+
+def test_accepts_json_s3_uri_field():
+    payload = (
+        '{"documents": [{"name": "report", '
+        '"S3_URI": "s3://ah-dify/upload_files/user/report.pdf"}]}'
+    )
+    assert _extract_tagged_documents(_messages(payload)) == [
+        {
+            "name": "report",
+            "url": "s3://ah-dify/upload_files/user/report.pdf",
+        }
+    ]
+
+
+def test_downloads_s3_document_with_runtime_credentials(monkeypatch, tmp_path):
+    class FakeBody:
+        def __init__(self):
+            self.closed = False
+
+        def iter_chunks(self, chunk_size):
+            assert chunk_size == 64 * 1024
+            yield b"%PDF-test"
+
+        def close(self):
+            self.closed = True
+
+    body = FakeBody()
+
+    class FakeS3:
+        def get_object(self, **kwargs):
+            assert kwargs == {
+                "Bucket": "ah-dify",
+                "Key": "upload_files/user/report.pdf",
+            }
+            return {
+                "Body": body,
+                "ContentLength": 9,
+                "ContentType": "application/pdf",
+            }
+
+    monkeypatch.setattr(agent, "_s3_client", FakeS3())
+    local_path = agent._download_document(
+        "s3://ah-dify/upload_files/user/report.pdf", str(tmp_path), 1
+    )
+
+    assert local_path.endswith("document_001.pdf")
+    assert (tmp_path / "document_001.pdf").read_bytes() == b"%PDF-test"
+    assert body.closed
+
+
+def test_rejects_s3_document_outside_configured_location():
+    payload = "Name: secret, S3_URI: s3://another-bucket/upload_files/secret.pdf"
+    with pytest.raises(ValueError, match="must be under"):
+        _extract_tagged_documents(_messages(payload))
 
 
 @pytest.mark.parametrize(
