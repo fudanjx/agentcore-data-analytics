@@ -18,7 +18,7 @@ spec:
       serviceAccountName: agentcore-proxy
       containers:
         - name: proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.6
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.7
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
