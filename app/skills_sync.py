@@ -1,9 +1,9 @@
 """
-Sync agent skills from S3 → /app/skills/ at container startup.
+Sync agent skills from S3 into /app/.claude/skills/ at container startup.
 
 Bucket: s3://ah-data-analytics/skills/
-Every *.md file in that prefix is copied to /app/skills/<basename>.md,
-then Claude Agent SDK is pointed at those paths via skills=[...].
+The hierarchy below the prefix is preserved so structured skills can include
+SKILL.md entry points and references.
 """
 
 import logging
@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 BUCKET = "ah-data-analytics"
 PREFIX = "skills/"
-LOCAL_DIR = "/app/skills"
+LOCAL_DIR = "/app/.claude/skills"
 
 
 def sync_skills() -> list[str]:
@@ -34,11 +34,13 @@ def sync_skills() -> list[str]:
         key = obj["Key"]
         if key.endswith("/") or not key.endswith(".md"):
             continue
-        local = os.path.join(LOCAL_DIR, os.path.basename(key))
+        relative = key[len(PREFIX):]
+        local = os.path.join(LOCAL_DIR, *relative.split("/"))
+        os.makedirs(os.path.dirname(local), exist_ok=True)
         try:
             s3.download_file(BUCKET, key, local)
             paths.append(local)
-            logger.info("Loaded skill: %s (%d bytes)", os.path.basename(key), obj["Size"])
+            logger.info("Loaded skill: %s (%d bytes)", relative, obj["Size"])
         except Exception as e:
             logger.warning("Skills sync: failed to download %s — %s", key, e)
 

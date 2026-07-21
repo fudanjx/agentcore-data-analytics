@@ -119,6 +119,7 @@ _RUNTIME_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 # Runtimes invoked via invoke_agent_runtime
 RUNTIMES = {
     "poc": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m",
+    "dev": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_dev-CaLENLDE5V"
 }
 
 # Harnesses invoked via invoke_harness (managed runtimes cannot be called directly)
@@ -810,7 +811,8 @@ def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, us
     return kwargs
 
 
-def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, user_id: str = None):
+def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str,
+                           user_id: str = None):
     """Generator: yields text deltas from a streaming AgentCore Runtime response.
 
     The Phase 2 container emits text/event-stream with OpenAI-format chunks. We read
@@ -859,12 +861,14 @@ def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str, us
             raise
 
 
-def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str, user_id: str = None) -> str:
+def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str,
+                             user_id: str = None) -> str:
     """Non-streaming path: collect all deltas and return the concatenated string."""
     return "".join(_stream_runtime_events(messages, runtime_arn, session_id, user_id))
 
 
-async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id, model: str, completion_id: str):
+async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id,
+                              model: str, completion_id: str):
     """Async generator: yield OpenAI SSE chunks from live runtime stream events.
 
     Wraps the blocking `_stream_runtime_events` sync iterator via `iterate_in_threadpool`
@@ -1476,6 +1480,14 @@ async def chat_completions_by_slug(slug: str, request: Request):
         body = await request.json()
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+
+    if slug == "dev":
+        logger.info(
+            "OpenAI-compatible raw payload [%s]: %s",
+            slug,
+            json.dumps(body, ensure_ascii=False, default=str),
+        )
+
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
