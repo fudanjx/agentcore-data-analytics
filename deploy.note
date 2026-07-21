@@ -1,0 +1,29 @@
+
+
+
+### Upload document-review skill Markdown files to S3
+
+aws s3 sync .claude/skills/document-review s3://ah-data-analytics/skills/document-review --exclude "*" --include "*.md" --region ap-southeast-1
+
+### proxy
+
+# Bash
+export TAG=v0.0.2
+./proxy/build_and_push.sh
+
+kubectl set image deployment/agentcore-proxy \
+  proxy=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:${TAG} \
+  -n agentcore
+
+kubectl rollout status deployment/agentcore-proxy -n agentcore
+
+###agentcore
+
+# Bash
+export TAG=v0.0.2
+docker buildx build --platform linux/arm64 --push \
+  -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG} .
+
+export AWS_DEFAULT_REGION="ap-southeast-1"
+export ECR_IMAGE_URI="964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG}"
+python infra/deploy.py
