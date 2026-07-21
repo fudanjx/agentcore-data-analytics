@@ -30,6 +30,14 @@ Path-prefixed routes — OpenAI-compatible API:
                      ActorID and runtimeSessionId namespaces and validates the
                      Insights S3 file manifest.
 
+  /insights-office/v1/...
+                     OpenWebUI Insights Office → dedicated
+                     `harness_insights_office` (invoke_harness). It preserves
+                     the Insights trusted identity/session namespace and file
+                     validation, adds safe live tool-status markers, and
+                     validates generated Office artifacts before OpenWebUI
+                     registers user-owned download links.
+
   /dify/v1/...      Generic OpenAI-compatible client → `harness_dify`
                      (invoke_harness). Body `chat_id` and
                      `model_item.info.user_id` remain optional.
@@ -50,6 +58,7 @@ Additional route:
 The standalone POST /v1/files is the OpenAI-style proxy-managed upload API.
 """
 
+import base64
 import json
 import logging
 import mimetypes
@@ -91,6 +100,7 @@ INSIGHTS_OPENWEBUI_SOURCE_PROFILE = {
     "session_namespace": "owui-insights",
     "bucket": INSIGHTS_UPLOADS_BUCKET,
     "prefix": INSIGHTS_UPLOADS_PREFIX,
+    "output_prefix": f"{INSIGHTS_UPLOADS_PREFIX}outputs/",
 }
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
 MAX_FILES_PER_CHAT = 10
@@ -100,6 +110,9 @@ ALLOWED_EXTENSIONS = {
     "pdf", "docx", "pptx",          # documents
     "txt", "md", "json",            # text
 }
+OFFICE_OUTPUT_EXTENSIONS = {"csv", "docx", "xlsx", "pptx", "pdf"}
+MAX_OFFICE_ARTIFACTS_PER_RESPONSE = 10
+MAX_OFFICE_ARTIFACT_MARKER_BYTES = 64 * 1024
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _RUNTIME_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -114,6 +127,9 @@ HARNESSES = {
     "insights": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
     "dify": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E",
 }
+_insights_office_harness_arn = os.environ.get("INSIGHTS_OFFICE_HARNESS_ARN", "")
+if _insights_office_harness_arn:
+    HARNESSES["insights-office"] = _insights_office_harness_arn
 
 ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
 
@@ -446,6 +462,182 @@ def _validate_openwebui_file_manifest(
     return validated
 
 
+def _validate_openwebui_artifact_manifest(
+    artifacts,
+    raw_user_id: str,
+    chat_id: str,
+    source_profile: dict,
+) -> list[dict]:
+    """Validate generated Office files before they become downloadable.
+
+    The Agent/Harness is allowed to report only a candidate S3 URI.  This
+    trusted proxy independently verifies the exact user/chat output prefix,
+    ownership tags, object existence, extension, and size before OpenWebUI
+    creates an authenticated file record for the requester.
+    """
+    if not isinstance(artifacts, list) or not artifacts:
+        raise FileManifestError(
+            400, "invalid_artifact_manifest", "artifacts must be a non-empty list"
+        )
+    if len(artifacts) > MAX_OFFICE_ARTIFACTS_PER_RESPONSE:
+        raise FileManifestError(
+            400,
+            "too_many_artifacts",
+            f"At most {MAX_OFFICE_ARTIFACTS_PER_RESPONSE} generated files are allowed",
+        )
+
+    expected_prefix = (
+        f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
+    )
+    validated: list[dict] = []
+    seen_keys: set[str] = set()
+    for artifact in artifacts:
+        if not isinstance(artifact, dict):
+            raise FileManifestError(
+                400, "invalid_artifact_manifest", "Each artifact must be an object"
+            )
+        s3_uri = str(artifact.get("s3_uri") or "").strip()
+        filename = _sanitize_filename(str(artifact.get("filename") or ""))
+        if not s3_uri or not filename:
+            raise FileManifestError(
+                400,
+                "invalid_artifact_manifest",
+                "Each artifact requires s3_uri and filename",
+            )
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if extension not in OFFICE_OUTPUT_EXTENSIONS:
+            raise FileManifestError(
+                400,
+                "unsupported_artifact_type",
+                "Generated files must be DOCX, XLSX, PPTX, PDF, or CSV",
+            )
+
+        parsed = urlparse(s3_uri)
+        bucket = parsed.netloc
+        key = parsed.path.lstrip("/")
+        if (
+            parsed.scheme != "s3"
+            or bucket != source_profile["bucket"]
+            or not key.startswith(expected_prefix)
+            or key in seen_keys
+        ):
+            raise FileManifestError(
+                403,
+                "artifact_not_accessible",
+                "Generated file is unavailable",
+            )
+        seen_keys.add(key)
+
+        try:
+            listing = get_s3().list_objects_v2(
+                Bucket=bucket, Prefix=key, MaxKeys=1
+            )
+            tag_response = get_s3().get_object_tagging(Bucket=bucket, Key=key)
+        except botocore.exceptions.ClientError as error:
+            error_code = error.response.get("Error", {}).get("Code", "")
+            if error_code in {"404", "NoSuchKey", "NotFound"}:
+                raise FileManifestError(
+                    403, "artifact_not_accessible", "Generated file is unavailable"
+                ) from error
+            raise FileManifestError(
+                502, "artifact_validation_failed", "Could not validate generated file"
+            ) from error
+
+        exact_object = next(
+            (
+                item
+                for item in listing.get("Contents", [])
+                if isinstance(item, dict) and item.get("Key") == key
+            ),
+            None,
+        )
+        tags = {
+            item.get("Key"): item.get("Value")
+            for item in tag_response.get("TagSet", [])
+            if isinstance(item, dict)
+        }
+        object_size = exact_object.get("Size") if exact_object else None
+        if (
+            not exact_object
+            or not isinstance(object_size, int)
+            or object_size <= 0
+            or object_size > MAX_UPLOAD_BYTES
+            or tags.get("OpenWebUI-User-Id") != raw_user_id
+            or tags.get("OpenWebUI-Chat-Id") != chat_id
+            or tags.get("AgentCore-Artifact") != "generated"
+        ):
+            raise FileManifestError(
+                403, "artifact_not_accessible", "Generated file is unavailable"
+            )
+
+        mime_type, _ = mimetypes.guess_type(filename)
+        validated.append(
+            {
+                "s3_uri": s3_uri,
+                "filename": filename,
+                "mime_type": mime_type or "application/octet-stream",
+                "size": object_size,
+            }
+        )
+    return validated
+
+
+def _discover_openwebui_office_artifacts(
+    raw_user_id: str,
+    chat_id: str,
+    source_profile: dict,
+    request_started_at: float,
+) -> list[dict]:
+    """Find newly generated, owner-tagged Office outputs when a marker is absent.
+
+    The Harness marker is only a convenience hint.  S3 is the source of truth:
+    candidates must be created during this response, live below the current
+    user/chat prefix, and pass the same independent ownership validation used
+    by the registration endpoint.
+    """
+    prefix = f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
+    listing = get_s3().list_objects_v2(
+        Bucket=source_profile["bucket"],
+        Prefix=prefix,
+        MaxKeys=100,
+    )
+    # S3 LastModified has second precision in normal use. Allow a small clock
+    # tolerance, but never scan the whole chat's retained output history.
+    cutoff = request_started_at - 15
+    candidates: list[tuple[float, dict]] = []
+    for item in listing.get("Contents", []):
+        if not isinstance(item, dict):
+            continue
+        key = item.get("Key")
+        last_modified = item.get("LastModified")
+        if not isinstance(key, str) or not key.startswith(prefix):
+            continue
+        try:
+            modified_at = float(last_modified.timestamp())
+        except (AttributeError, TypeError, ValueError, OverflowError):
+            continue
+        filename = _sanitize_filename(key.rsplit("/", 1)[-1])
+        extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+        if modified_at < cutoff or extension not in OFFICE_OUTPUT_EXTENSIONS:
+            continue
+        candidates.append(
+            (
+                modified_at,
+                {
+                    "s3_uri": f"s3://{source_profile['bucket']}/{key}",
+                    "filename": filename,
+                },
+            )
+        )
+    candidates.sort(key=lambda entry: entry[0], reverse=True)
+    return _validate_openwebui_artifact_manifest(
+        [entry[1] for entry in candidates[:MAX_OFFICE_ARTIFACTS_PER_RESPONSE]],
+        raw_user_id,
+        chat_id,
+        source_profile,
+    ) if candidates else []
+
+
 def _inject_openwebui_file_context(messages: list, files_meta: list[dict]) -> list:
     if not files_meta:
         return messages
@@ -474,6 +666,41 @@ def _inject_openwebui_file_context(messages: list, files_meta: list[dict]) -> li
         *messages,
         {"role": "system", "content": "\n".join(lines)},
     ]
+
+
+def _inject_openwebui_office_artifact_context(
+    messages: list,
+    raw_user_id: str,
+    chat_id: str,
+    source_profile: dict,
+) -> list:
+    """Give the Office Harness its exact trusted output location and tags."""
+    output_prefix = (
+        f"s3://{source_profile['bucket']}/{source_profile['output_prefix']}"
+        f"{raw_user_id}/{chat_id}/"
+    )
+    tagging = (
+        f"OpenWebUI-User-Id={raw_user_id}&"
+        f"OpenWebUI-Chat-Id={chat_id}&AgentCore-Artifact=generated"
+    )
+    instruction = f"""## Generated Office files
+
+For this request only, create new files solely under:
+`{output_prefix}`
+
+Never overwrite input files. Use a newly generated, safe filename. Upload each
+output with `aws s3api put-object` (not `aws s3 cp`, which cannot set object
+tags) and the exact S3 object tags below. Use the bucket
+`{source_profile['bucket']}`, a key below the stated prefix, `--body` for the
+local file, an appropriate `--content-type`, and:
+`{tagging}`
+
+Use only these downloadable output formats: DOCX, XLSX, PPTX, PDF, and CSV.
+Before the final answer, confirm each upload completed. Then use the
+`<agentcore-artifacts>` JSON marker required by the system prompt; list only
+the S3 URI and the user-facing filename for each successful output.
+"""
+    return [*messages, {"role": "system", "content": instruction}]
 
 
 def _extract_session_context(body: dict):
@@ -763,6 +990,97 @@ def _stream_harness_events(messages: list, harness_arn: str, session_id: str, ac
                 raise
 
 
+def _safe_tool_status(tool_use: dict) -> str:
+    """Return a user-safe status without exposing tool inputs or result data."""
+    name = str(tool_use.get("name") or "").lower()
+    tool_type = str(tool_use.get("type") or "").lower()
+    server_name = str(tool_use.get("serverName") or "").lower()
+    identity = " ".join((name, tool_type, server_name))
+    if "code" in identity or "interpreter" in identity:
+        return "Running Code Interpreter"
+    if "timesfm" in identity or "forecast" in identity:
+        return "Generating forecast"
+    if "gateway" in identity or server_name:
+        return "Calling connected data tool"
+    return "Using analysis tool"
+
+
+def _stream_harness_events_with_progress(
+    messages: list,
+    harness_arn: str,
+    session_id: str,
+    actor_id: str = None,
+):
+    """Yield ``(kind, value)`` for Office-only text and safe tool lifecycle.
+
+    Existing Harness routes retain their text-only adapter.  This adapter never
+    exposes chain-of-thought, tool input, SQL, S3 keys, or tool results.
+    """
+    harness_messages, system_prompt = _normalize_messages(messages)
+    kwargs = dict(
+        harnessArn=harness_arn,
+        runtimeSessionId=session_id,
+        messages=harness_messages,
+    )
+    if system_prompt:
+        kwargs["systemPrompt"] = system_prompt
+    if actor_id:
+        kwargs["actorId"] = actor_id
+
+    with _serialized_harness_session(session_id):
+        for attempt in range(2):
+            first_text_sent = False
+            active_tools: dict[int, str] = {}
+            result_tools: dict[int, str] = {}
+            last_tool_status = "analysis tool"
+            try:
+                resp = get_client().invoke_harness(**kwargs)
+                for event in resp.get("stream", []):
+                    start = event.get("contentBlockStart", {}).get("start", {})
+                    block_index = event.get("contentBlockStart", {}).get(
+                        "contentBlockIndex"
+                    )
+                    if "toolUse" in start:
+                        last_tool_status = _safe_tool_status(start["toolUse"])
+                        if isinstance(block_index, int):
+                            active_tools[block_index] = last_tool_status
+                        yield "status", last_tool_status
+                    elif "toolResult" in start:
+                        result_status = active_tools.get(block_index, last_tool_status)
+                        if isinstance(block_index, int):
+                            result_tools[block_index] = result_status
+                        yield "status", "Processing tool result"
+
+                    delta = event.get("contentBlockDelta", {}).get("delta", {})
+                    if "text" in delta:
+                        first_text_sent = True
+                        yield "text", delta["text"]
+
+                    stop_index = event.get("contentBlockStop", {}).get(
+                        "contentBlockIndex"
+                    )
+                    if isinstance(stop_index, int) and stop_index in result_tools:
+                        yield "status", f"Completed {result_tools.pop(stop_index).lower()}"
+                    if "messageStop" in event:
+                        yield "status", "Preparing final answer"
+                return
+            except (
+                botocore.exceptions.ConnectionClosedError,
+                botocore.exceptions.EventStreamError,
+            ) as error:
+                if (
+                    attempt == 0
+                    and not first_text_sent
+                    and "connection" in str(error).lower()
+                ):
+                    logger.warning(
+                        "Office Harness cold-start disconnect (session=%s), retrying...",
+                        session_id,
+                    )
+                    continue
+                raise
+
+
 def _invoke_harness_buffered(messages: list, harness_arn: str, session_id: str, actor_id: str = None) -> str:
     """Blocking call: collect all harness stream events and return full text. Used for non-streaming."""
     return "".join(_stream_harness_events(messages, harness_arn, session_id, actor_id))
@@ -782,6 +1100,213 @@ def _sse_harness_stream(messages: list, harness_arn: str, session_id: str, actor
     except Exception as e:
         logger.error("Harness stream error (session=%s): %s", session_id, e)
         yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'stream_error'}})}\n\n"
+
+    final = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
+_OFFICE_ARTIFACT_START = "<agentcore-artifacts>"
+_OFFICE_ARTIFACT_END = "</agentcore-artifacts>"
+_OFFICE_ARTIFACT_ERROR_MARKER = "<!--agentcore-artifacts-error-->"
+
+
+def _office_status_marker(
+    description: str,
+    *,
+    done: bool = False,
+    hidden: bool = False,
+) -> str:
+    """A private marker consumed by the Office OpenWebUI stream filter."""
+    data = {"description": description[:120], "done": done, "hidden": hidden}
+    return f"<!--agentcore-status:{json.dumps(data, separators=(',', ':'))}-->"
+
+
+def _office_artifact_marker(artifacts: list) -> str:
+    """Encode an artifact manifest for the trusted OpenWebUI filter.
+
+    This is deliberately opaque rather than JSON-in-HTML: should a frontend
+    filter be unavailable, an internal S3 URI must still not be exposed in the
+    chat transcript.
+    """
+    payload = json.dumps(artifacts, separators=(",", ":")).encode("utf-8")
+    encoded = base64.urlsafe_b64encode(payload).decode("ascii")
+    return f"<!--agentcore-artifacts:{encoded}-->"
+
+
+class _OfficeArtifactStreamSanitizer:
+    """Replace a streamed AgentCore artifact block with an opaque marker.
+
+    A Harness may split either XML-like delimiter across arbitrary streaming
+    chunks. This small state machine holds only the control block until it is
+    complete; it never forwards its S3 URI or raw marker to the frontend.
+    """
+
+    def __init__(self):
+        self._pending = ""
+        self._collecting = False
+        self._discarding = False
+        self._artifact_json = ""
+        self.artifact_emitted = False
+        self.artifact_problem = False
+
+    def _begin_discarding(self) -> list[str]:
+        self._artifact_json = ""
+        self._collecting = False
+        self._discarding = True
+        self.artifact_problem = True
+        return []
+
+    def feed(self, text: str) -> list[str]:
+        if not isinstance(text, str) or not text:
+            return []
+
+        output: list[str] = []
+        remaining = self._pending + text
+        self._pending = ""
+        while remaining:
+            if self._discarding:
+                end_index = remaining.find(_OFFICE_ARTIFACT_END)
+                if end_index < 0:
+                    return output
+                self._discarding = False
+                remaining = remaining[end_index + len(_OFFICE_ARTIFACT_END):]
+                continue
+
+            if self._collecting:
+                end_index = remaining.find(_OFFICE_ARTIFACT_END)
+                if end_index < 0:
+                    self._artifact_json += remaining
+                    if len(self._artifact_json.encode("utf-8")) > MAX_OFFICE_ARTIFACT_MARKER_BYTES:
+                        output.extend(self._begin_discarding())
+                    return output
+
+                self._artifact_json += remaining[:end_index]
+                remaining = remaining[end_index + len(_OFFICE_ARTIFACT_END):]
+                raw_json = self._artifact_json
+                self._artifact_json = ""
+                self._collecting = False
+                try:
+                    if len(raw_json.encode("utf-8")) > MAX_OFFICE_ARTIFACT_MARKER_BYTES:
+                        raise ValueError("artifact payload exceeds marker limit")
+                    artifacts = json.loads(raw_json)
+                    if not isinstance(artifacts, list):
+                        raise ValueError("artifact payload must be a list")
+                    output.append(_office_artifact_marker(artifacts))
+                    self.artifact_emitted = True
+                except (ValueError, TypeError, json.JSONDecodeError):
+                    self.artifact_problem = True
+                continue
+
+            start_index = remaining.find(_OFFICE_ARTIFACT_START)
+            if start_index >= 0:
+                if start_index:
+                    output.append(remaining[:start_index])
+                remaining = remaining[start_index + len(_OFFICE_ARTIFACT_START):]
+                self._collecting = True
+                self._artifact_json = ""
+                continue
+
+            # Keep only a possible split start delimiter for the next delta.
+            pending_length = 0
+            max_length = min(len(remaining), len(_OFFICE_ARTIFACT_START) - 1)
+            for length in range(max_length, 0, -1):
+                if _OFFICE_ARTIFACT_START.startswith(remaining[-length:]):
+                    pending_length = length
+                    break
+            if pending_length:
+                output.append(remaining[:-pending_length])
+                self._pending = remaining[-pending_length:]
+            else:
+                output.append(remaining)
+            return output
+        return output
+
+    def finish(self) -> list[str]:
+        """Flush ordinary text or safely suppress an incomplete control block."""
+        if self._collecting or self._discarding:
+            self._collecting = False
+            self._discarding = False
+            self._artifact_json = ""
+            self._pending = ""
+            self.artifact_problem = True
+            return []
+        if self._pending:
+            # `_pending` is only a possible leading prefix of the marker.
+            self._pending = ""
+            self.artifact_problem = True
+            return []
+        return []
+
+
+def _sse_harness_office_stream(
+    messages: list,
+    harness_arn: str,
+    session_id: str,
+    actor_id: str,
+    model: str,
+    completion_id: str,
+    artifact_context: tuple[str, str, dict] | None = None,
+):
+    """Office stream adapter: safe statuses and opaque artifact control markers."""
+    artifact_sanitizer = _OfficeArtifactStreamSanitizer()
+    request_started_at = time.time()
+
+    def stream_chunk(content: str):
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"content": content}, "finish_reason": None}
+            ],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
+    try:
+        for kind, value in _stream_harness_events_with_progress(
+            messages, harness_arn, session_id, actor_id
+        ):
+            if kind == "status":
+                yield stream_chunk(_office_status_marker(value))
+                continue
+            for content in artifact_sanitizer.feed(value):
+                if content:
+                    yield stream_chunk(content)
+    except Exception as error:
+        logger.error("Office Harness stream error (session=%s): %s", session_id, error)
+        yield f"data: {json.dumps({'error': {'message': str(error), 'type': 'stream_error'}})}\n\n"
+
+    for content in artifact_sanitizer.finish():
+        yield stream_chunk(content)
+    if not artifact_sanitizer.artifact_emitted and artifact_context:
+        raw_user_id, chat_id, source_profile = artifact_context
+        try:
+            discovered = _discover_openwebui_office_artifacts(
+                raw_user_id,
+                chat_id,
+                source_profile,
+                request_started_at,
+            )
+            if discovered:
+                yield stream_chunk(_office_artifact_marker(discovered))
+                artifact_sanitizer.artifact_emitted = True
+        except Exception as error:
+            logger.warning(
+                "Office artifact fallback discovery failed (session=%s): %s",
+                session_id,
+                error,
+            )
+    if artifact_sanitizer.artifact_problem and not artifact_sanitizer.artifact_emitted:
+        yield stream_chunk(_OFFICE_ARTIFACT_ERROR_MARKER)
+    # OpenWebUI status events are independent of the OpenAI stop chunk. Close
+    # the last live status explicitly so the UI cannot stay on its final label.
+    yield stream_chunk(_office_status_marker("", done=True, hidden=True))
 
     final = {
         "id": completion_id,
@@ -822,6 +1347,7 @@ async def _build_completion(
     stream: bool,
     session_id: str,
     user_id: str = None,
+    office_artifact_context: tuple[str, str, dict] | None = None,
 ):
     logger.info(
         "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
@@ -832,9 +1358,17 @@ async def _build_completion(
     if slug in HARNESSES:
         arn = HARNESSES[slug]
         if stream:
+            stream_adapter = (
+                _sse_harness_office_stream
+                if slug == "insights-office"
+                else _sse_harness_stream
+            )
+            stream_args = (messages, arn, session_id, user_id, model, completion_id)
+            if slug == "insights-office":
+                stream_args = (*stream_args, office_artifact_context)
             # Pipe harness token deltas directly to SSE — no buffering.
             return StreamingResponse(
-                _sse_harness_stream(messages, arn, session_id, user_id, model, completion_id),
+                stream_adapter(*stream_args),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
@@ -890,6 +1424,50 @@ def models_by_slug(slug: str):
     }
 
 
+@app.post("/insights-office/v1/artifacts/register")
+async def register_insights_office_artifacts(request: Request):
+    """Validate Office output metadata before OpenWebUI creates download rows.
+
+    This endpoint is callable only from the private OpenWebUI server path in
+    the POC. Browser clients never receive S3 credentials or a raw S3 URL.
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
+    context = _extract_openwebui_context(
+        request, body, INSIGHTS_OPENWEBUI_SOURCE_PROFILE
+    )
+    if isinstance(context, JSONResponse):
+        return context
+    _session_id, _actor_id, raw_user_id, request_kind = context
+    if request_kind != "chat":
+        return JSONResponse(
+            status_code=400,
+            content={"error": {"code": "invalid_artifact_context", "message": "chat context is required"}},
+        )
+    chat_id = (request.headers.get("x-openwebui-chat-id") or "").strip()
+    try:
+        artifacts = _validate_openwebui_artifact_manifest(
+            body.get("artifacts"),
+            raw_user_id,
+            chat_id,
+            INSIGHTS_OPENWEBUI_SOURCE_PROFILE,
+        )
+    except FileManifestError as error:
+        return JSONResponse(
+            status_code=error.status_code,
+            content={"error": {"code": error.code, "message": error.message}},
+        )
+    logger.info(
+        "Validated Office artifacts: actor=%s chat=%s count=%d",
+        raw_user_id,
+        chat_id,
+        len(artifacts),
+    )
+    return {"artifacts": artifacts}
+
+
 @app.post("/{slug}/v1/chat/completions")
 async def chat_completions_by_slug(slug: str, request: Request):
     if slug not in ALL_SLUGS:
@@ -901,7 +1479,8 @@ async def chat_completions_by_slug(slug: str, request: Request):
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
-    if slug == "insights":
+    office_artifact_context = None
+    if slug in {"insights", "insights-office"}:
         source_profile = INSIGHTS_OPENWEBUI_SOURCE_PROFILE
         context = _extract_openwebui_context(request, body, source_profile)
         if isinstance(context, JSONResponse):
@@ -948,6 +1527,20 @@ async def chat_completions_by_slug(slug: str, request: Request):
         )
         messages = _prepare_openwebui_messages(messages, request_kind)
         messages = _inject_openwebui_file_context(messages, openwebui_files)
+        if slug == "insights-office":
+            chat_id = (request.headers.get("x-openwebui-chat-id") or "").strip()
+            messages = _inject_openwebui_office_artifact_context(
+                messages,
+                raw_user_id,
+                chat_id,
+                source_profile,
+            )
+            if request_kind == "chat":
+                office_artifact_context = (
+                    raw_user_id,
+                    chat_id,
+                    source_profile,
+                )
     else:
         session_id, user_id = _extract_session_context(body)
 
@@ -960,7 +1553,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
     try:
         return await _build_completion(
             messages, slug, body.get("model", slug), body.get("stream", False),
-            session_id, user_id,
+            session_id, user_id, office_artifact_context,
         )
     except Exception as e:
         logger.error("AgentCore error [%s]: %s", slug, e)

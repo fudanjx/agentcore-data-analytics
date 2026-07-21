@@ -39,10 +39,12 @@ services:
 
       ENABLE_OLLAMA_API: "false"
       ENABLE_OPENAI_API: "true"
-      OPENAI_API_BASE_URLS: http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/insights/v1
-      OPENAI_API_KEYS: private-vpc-poc
+      OPENAI_API_BASE_URLS: >-
+        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/insights/v1;
+        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/insights-office/v1
+      OPENAI_API_KEYS: private-vpc-poc;private-vpc-poc
       OPENAI_API_CONFIGS: >-
-        {"0":{"enable":true,"prefix_id":"agentcore","model_ids":["insights"],"tags":["agentcore-test"],"connection_type":"external"}}
+        {"0":{"enable":true,"prefix_id":"agentcore","model_ids":["insights"],"tags":["agentcore-test"],"connection_type":"external"},"1":{"enable":true,"prefix_id":"agentcore-office","model_ids":["insights-office"],"tags":["agentcore-office"],"connection_type":"external"}}
 
       BYPASS_EMBEDDING_AND_RETRIEVAL: "true"
       RAG_FULL_CONTEXT: "true"

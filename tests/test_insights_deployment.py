@@ -1,4 +1,5 @@
 import importlib.util
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -6,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).parents[1]
 DEPLOY_PATH = ROOT / "openwebui-insights" / "deploy_compose.py"
 FRAGMENT_PATH = ROOT / "openwebui-insights" / "compose-service.yml"
+OFFICE_DEPLOY_PATH = ROOT / "openwebui-insights" / "deploy_office_provider.py"
 
 
 def load_deploy_module():
@@ -52,6 +54,8 @@ volumes:
         self.assertIn("DEFAULT_USER_ROLE: pending", fragment)
         self.assertIn("mem_limit: 900m", fragment)
         self.assertIn("openwebui-insights-964340114883", fragment)
+        self.assertIn("/insights-office/v1", fragment)
+        self.assertIn('"insights-office"', fragment)
 
     def test_existing_insights_service_is_migrated_behind_upload_proxy(self):
         module = load_deploy_module()
@@ -91,6 +95,43 @@ volumes:
         self.assertIn("--token-file", smoke_test)
         self.assertIn("/api/v1/files/?process=true", smoke_test)
         self.assertIn("upload_processing=not_started", smoke_test)
+
+    def test_office_provider_update_is_idempotent(self):
+        spec = importlib.util.spec_from_file_location(
+            "insights_office_deploy_test", OFFICE_DEPLOY_PATH
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        original = (
+            "services:\n"
+            "  open-webui-insights:\n"
+            "    environment:\n"
+            + module.OLD_BASE_URL
+            + module.OLD_KEYS
+            + "      OPENAI_API_CONFIGS: >-\n"
+            + module.OLD_CONFIG
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            compose = Path(directory) / "docker-compose.yml"
+            compose.write_text(original)
+            # Exercise pure replacement logic here; Docker validation belongs
+            # to the EC2 deployment smoke path.
+            updated = module.replace_once_or_verify(
+                compose.read_text(), module.OLD_BASE_URL, module.NEW_BASE_URL, "base"
+            )
+            updated = module.replace_once_or_verify(
+                updated, module.OLD_KEYS, module.NEW_KEYS, "key"
+            )
+            updated = module.replace_once_or_verify(
+                updated, module.OLD_CONFIG, module.NEW_CONFIG, "config"
+            )
+            self.assertIn("/insights-office/v1", updated)
+            self.assertEqual(
+                module.replace_once_or_verify(
+                    updated, module.OLD_BASE_URL, module.NEW_BASE_URL, "base"
+                ),
+                updated,
+            )
 
 
 if __name__ == "__main__":

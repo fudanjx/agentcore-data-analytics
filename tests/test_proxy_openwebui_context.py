@@ -1,4 +1,5 @@
 import concurrent.futures
+import json
 import threading
 import time
 import unittest
@@ -20,6 +21,10 @@ INSIGHTS_FILE_URI = (
 NON_INSIGHTS_FILE_URI = (
     "s3://agentcore-openwebui-test-964340114883/"
     f"openwebui-test/{FILE_ID}_costs.csv"
+)
+OFFICE_ARTIFACT_URI = (
+    "s3://agentcore-openwebui-insights-964340114883/"
+    f"openwebui-insights/outputs/{USER_ID}/{CHAT_ID}/report.xlsx"
 )
 
 
@@ -69,6 +74,17 @@ class DynamicFakeS3(FakeS3):
             "TagSet": [
                 {"Key": "OpenWebUI-User-Id", "Value": self.owner},
                 {"Key": "OpenWebUI-File-Id", "Value": file_id},
+            ]
+        }
+
+
+class OfficeArtifactS3(FakeS3):
+    def get_object_tagging(self, **kwargs):
+        return {
+            "TagSet": [
+                {"Key": "OpenWebUI-User-Id", "Value": USER_ID},
+                {"Key": "OpenWebUI-Chat-Id", "Value": CHAT_ID},
+                {"Key": "AgentCore-Artifact", "Value": "generated"},
             ]
         }
 
@@ -185,6 +201,130 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         args = completion.await_args.args
         self.assertEqual(args[4], f"owui-insights-{USER_ID}-{CHAT_ID}")
         self.assertEqual(args[5], f"openwebui-insights:{USER_ID}")
+
+    def test_office_route_keeps_the_insights_actor_and_session_namespace(self):
+        context = server._extract_openwebui_context(
+            type("Request", (), {"headers": {k.lower(): v for k, v in self.headers.items()}})(),
+            {},
+            server.INSIGHTS_OPENWEBUI_SOURCE_PROFILE,
+        )
+        self.assertEqual(context[0], f"owui-insights-{USER_ID}-{CHAT_ID}")
+        self.assertEqual(context[1], f"openwebui-insights:{USER_ID}")
+
+    def test_office_artifact_registration_accepts_only_tagged_user_chat_output(self):
+        with patch.object(server, "get_s3", return_value=OfficeArtifactS3(size=120)):
+            response = self.client.post(
+                "/insights-office/v1/artifacts/register",
+                json={
+                    "artifacts": [
+                        {"s3_uri": OFFICE_ARTIFACT_URI, "filename": "report.xlsx"}
+                    ]
+                },
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 200)
+        artifact = response.json()["artifacts"][0]
+        self.assertEqual(artifact["s3_uri"], OFFICE_ARTIFACT_URI)
+        self.assertEqual(artifact["filename"], "report.xlsx")
+
+    def test_office_artifact_registration_rejects_another_chat_prefix(self):
+        wrong_chat_uri = OFFICE_ARTIFACT_URI.replace(CHAT_ID, "another-chat")
+        with patch.object(server, "get_s3", return_value=OfficeArtifactS3(size=120)):
+            response = self.client.post(
+                "/insights-office/v1/artifacts/register",
+                json={
+                    "artifacts": [
+                        {"s3_uri": wrong_chat_uri, "filename": "report.xlsx"}
+                    ]
+                },
+                headers=self.headers,
+            )
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "artifact_not_accessible")
+
+    def test_office_progress_statuses_never_expose_tool_details(self):
+        self.assertEqual(
+            server._safe_tool_status(
+                {"name": "agentcore_code_interpreter", "serverName": "private"}
+            ),
+            "Running Code Interpreter",
+        )
+        self.assertEqual(
+            server._safe_tool_status({"name": "execute_sql", "serverName": "db"}),
+            "Calling connected data tool",
+        )
+
+    def test_office_artifact_stream_sanitizer_hides_raw_marker_and_s3_uri(self):
+        sanitizer = server._OfficeArtifactStreamSanitizer()
+        pieces = []
+        pieces.extend(sanitizer.feed("Report created.\n<agentcore-art"))
+        pieces.extend(
+            sanitizer.feed(
+                "ifacts>\n[{\"s3_uri\":\"%s\",\"filename\":\"report.xlsx\"}]"
+                "\n</agentcore-artifacts>"
+                % OFFICE_ARTIFACT_URI
+            )
+        )
+        pieces.extend(sanitizer.finish())
+
+        output = "".join(pieces)
+        self.assertIn("Report created.", output)
+        self.assertIn("<!--agentcore-artifacts:", output)
+        self.assertNotIn("<agentcore-artifacts>", output)
+        self.assertNotIn(OFFICE_ARTIFACT_URI, output)
+
+    def test_office_stream_discovers_new_output_when_agent_marker_is_unusable(self):
+        with (
+            patch.object(
+                server,
+                "_stream_harness_events_with_progress",
+                return_value=iter(
+                    [
+                        ("text", "Workbook created.\n<agentcore-artifacts>not-json"),
+                        ("text", "</agentcore-artifacts>"),
+                    ]
+                ),
+            ),
+            patch.object(
+                server,
+                "_discover_openwebui_office_artifacts",
+                return_value=[
+                    {
+                        "s3_uri": OFFICE_ARTIFACT_URI,
+                        "filename": "report.xlsx",
+                    }
+                ],
+            ) as discover,
+        ):
+            chunks = list(
+                server._sse_harness_office_stream(
+                    [],
+                    "harness-arn",
+                    "session-id",
+                    "actor-id",
+                    "insights-office",
+                    "completion-id",
+                    artifact_context=(
+                        USER_ID,
+                        CHAT_ID,
+                        server.INSIGHTS_OPENWEBUI_SOURCE_PROFILE,
+                    ),
+                )
+            )
+
+        contents = []
+        for chunk in chunks:
+            if not chunk.startswith("data: {"):
+                continue
+            payload = json.loads(chunk[6:])
+            contents.append(
+                ((payload.get("choices") or [{}])[0].get("delta") or {}).get("content")
+            )
+        combined = "".join(item or "" for item in contents)
+        discover.assert_called_once()
+        self.assertIn("Workbook created.", combined)
+        self.assertIn("<!--agentcore-artifacts:", combined)
+        self.assertNotIn("Generated file could not be made available", combined)
 
     def test_insights_accepts_only_its_dedicated_s3_bucket_and_prefix(self):
         completion = AsyncMock(return_value={"ok": True})

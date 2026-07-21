@@ -18,8 +18,8 @@ spec:
       serviceAccountName: agentcore-proxy
       containers:
         - name: proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:latest
-          imagePullPolicy: Always
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.6
+          imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
           env:
@@ -33,6 +33,8 @@ spec:
               value: agentcore-openwebui-insights-964340114883
             - name: INSIGHTS_UPLOADS_PREFIX
               value: openwebui-insights/
+            - name: INSIGHTS_OFFICE_HARNESS_ARN
+              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U
           resources:
             requests:
               cpu: 256m

@@ -42,19 +42,23 @@ deployment on the existing EC2 host. It runs alongside the legacy OpenWebUI
 service, with a separate Docker volume and PostgreSQL database
 (`openwebui_insights`), so no user or configuration migration is required.
 
-Its model endpoint is the private NLB path `/insights/v1`:
+It has two private NLB provider routes:
 
 ```
 Browser → ALB / insights.bot-alex.com → open-webui-insights
         → private NLB /insights/v1 → agentcore-proxy
         → harness_e52fs-Du2DM0RxvF → AgentCore Code Interpreter (when needed)
+
+Browser → ALB / insights.bot-alex.com → open-webui-insights
+        → private NLB /insights-office/v1 → agentcore-proxy
+        → harness_insights_office-NXyYkHT02U → Office Code Interpreter
 ```
 
-The endpoint is a separate identity/session namespace even though it reuses the
-same Harness as `/harness`: `ActorID` is
+Both routes deliberately use the same identity/session mapping: `ActorID` is
 `openwebui-insights:<OpenWebUI user UUID>` and `runtimeSessionId` is
-`owui-insights-<user UUID>-<chat UUID>`. This keeps AgentCore memory isolated
-by user and chat.
+`owui-insights-<user UUID>-<chat UUID>`. Both Harnesses attach to the same
+explicit AgentCore Memory resource, so this gives a user continuous memory
+across either model while isolating every other user.
 
 ### Insights file handoff
 
@@ -64,7 +68,8 @@ S3 storage provider. Uploads are server-mediated (browser → OpenWebUI → S3),
 not presigned browser-direct PUTs. Local persistent file cache is disabled and
 `BYPASS_EMBEDDING_AND_RETRIEVAL=true` prevents the normal RAG/embedding path.
 
-The `agentcore_file_context` filter applies only to the `insights` models. It:
+The `agentcore_file_context` filter applies only to the Insights and Office
+models. It:
 
 1. requires an authenticated OpenWebUI user and owned chat;
 2. finds files already attached anywhere in that chat;
@@ -91,6 +96,26 @@ enhancement. Plain identity headers are likewise trusted only on the private
 OpenWebUI-server → proxy hop; replace them with signed short-lived JWTs before
 allowing untrusted callers on that path.
 
+### Office outputs, authenticated downloads, and work status
+
+The Office model uses the additive `/insights-office/v1` route and a dedicated
+`agentcore_insights_office_ci` SANDBOX role. It may read Insights uploads but
+can write only tagged DOCX, XLSX, PPTX, PDF, and CSV outputs under
+`openwebui-insights/outputs/<user UUID>/<chat UUID>/`; input uploads are never
+overwritten.
+
+The proxy validates the exact output prefix, S3 tags, extension, and size. The
+OpenWebUI filter then registers each valid object as a File owned by the
+requesting user and saves an authenticated
+`/api/v1/files/<id>/content?attachment=true` download link in the chat. It
+does not expose a raw S3 URL or browser AWS credentials. Links work while the
+seven-day object lifecycle retains the file.
+
+Only the Office stream converts Harness tool lifecycle into simple native
+statuses such as “Running Code Interpreter” and “Calling connected data tool.”
+It excludes tool input, SQL, S3 keys, tool output, and model reasoning.
+`/insights/v1` remains unchanged.
+
 The OpenWebUI browser normally asks for `process=true`; the Insights Caddy
 sidecar rewrites only `POST /api/v1/files[/]` to `process=false`. This enforces
 the no-local-extraction behavior without changing the browser UI or any other
@@ -110,8 +135,10 @@ OpenWebUI endpoint.
 | `timesfm_service/` | EKS pod running TimesFM 2.5-200m (CPU, model weights baked into image) |
 | `timesfm_mcp/handler.py` | Bridge Lambda: Gateway MCP → HTTP POST to TimesFM NLB |
 | `timesfm_mcp/deploy.py` | Provision the bridge Lambda + wire to `timesfm-gateway` + harness |
-| `proxy/server.py` | OpenAI-compatible FastAPI proxy — routes `/poc`, `/harness`, `/insights`, and `/dify`, with session/user mapping, file-manifest validation, and SSE streaming |
-| `openwebui-insights/functions/agentcore_file_context.py` | OpenWebUI filter that creates the authenticated, chat-wide Insights S3 file manifest |
+| `proxy/server.py` | OpenAI-compatible FastAPI proxy — routes `/poc`, `/harness`, `/insights`, `/insights-office`, and `/dify`, with identity, artifact, and SSE handling |
+| `openwebui-insights/functions/agentcore_file_context.py` | OpenWebUI filter for owned Insights file manifests, Office statuses, and authenticated download links |
+| `infra/insights_office_bootstrap.py` | Converts the current Harness memory to shared BYO Memory and creates the Office Harness/sandbox |
+| `infra/test_code_interpreter_office_output.py` | Direct tagged Office Code Interpreter output smoke test |
 | `infra/user_uploads_bootstrap.py` | Creates the Insights upload bucket/policies/lifecycle and related IAM permissions |
 | `infra/test_code_interpreter_s3.py` | Direct AgentCore Code Interpreter S3 download smoke test |
 | `proxy/k8s/` | Deployment, ClusterIP + internal NLB service, IRSA ServiceAccount |
@@ -305,6 +332,7 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 |----------|-------|
 | AgentCore poc runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m` |
 | AgentCore harness (OpenWebUI) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
+| AgentCore harness (Insights Office) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U` |
 | AgentCore harness (DIFY) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E` |
 | Harness memory | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia` |
 | Inference profile | `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3` |
@@ -318,6 +346,7 @@ Strands SDK deduplicates tool names by prefixing with target name, so `ah-analyt
 | Insights public endpoint | `https://insights.bot-alex.com` |
 | Insights upload bucket | `s3://agentcore-openwebui-insights-964340114883/openwebui-insights/` |
 | Insights Code Interpreter | `agentcore_user_uploads_ci-iZOyjlk0GA` (SANDBOX) |
+| Insights Office Code Interpreter | `agentcore_insights_office_ci-wNOyRxcsEC` (SANDBOX) |
 | TimesFM internal NLB | `k8s-agentcor-timesfms-fb1729afc9-4eef87d9ac68417f.elb.ap-southeast-1.amazonaws.com` |
 | MCP Gateways | `nuh-analytics-db-fhbzdmtdta`, `ah-analytics-db-gszih4adsx`, `timesfm-gateway-w4fho4r9um` |
 

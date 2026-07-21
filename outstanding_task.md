@@ -14,7 +14,7 @@ server-mediated: browser → OpenWebUI → the dedicated bucket
 bucket has private access, SSE-S3, versioning, and a seven-day current-object
 lifecycle expiry.
 
-For the `insights` / `agentcore.insights` model only, the OpenWebUI filter
+For the `insights` / `agentcore.insights` and Office models, the OpenWebUI filter
 checks chat ownership, builds a chat-wide manifest of the authenticated user's
 files, and removes raw OpenWebUI file metadata before the request leaves the
 application. The proxy validates each manifest entry's bucket, prefix, owner
@@ -22,13 +22,25 @@ tags, type, and size; then it maps identity to
 `ActorID=openwebui-insights:<user UUID>` and
 `runtimeSessionId=owui-insights-<user UUID>-<chat UUID>`. `/insights/v1` is a
 separate proxy namespace but invokes the existing OpenWebUI harness
-`harness_e52fs-Du2DM0RxvF`.
+`harness_e52fs-Du2DM0RxvF`. The additive `/insights-office/v1` route invokes
+`harness_insights_office-NXyYkHT02U`. Both Harnesses attach the same converted
+BYO Memory resource, so the same user/chat has continuous memory through
+either model while actor IDs keep users isolated.
 
 The harness receives the validated `s3_uri` manifest and, when analysis is
 needed, uses the AgentCore Code Interpreter sandbox to copy the named object
 with `aws s3 cp` before inspecting it. Verified end to end with an uploaded
 test file (`E2E_SUM=6`) and a real `.xls` analysis that correlated to a Code
 Interpreter session creation.
+
+The Office Harness uses a distinct SANDBOX Code Interpreter and
+`AgentCoreCodeInterpreterS3Role`. It can read Insights files and may write only
+tagged generated DOCX/XLSX/PPTX/PDF/CSV objects under
+`openwebui-insights/outputs/<user>/<chat>/`. The proxy validates that exact
+user/chat prefix and tags before the OpenWebUI filter registers a native,
+owner-scoped download link. Generated objects and their links follow the same
+seven-day lifecycle. Office-only stream markers show simple tool progress and
+exclude tool inputs, SQL, S3 URIs, tool results, and reasoning.
 
 Known gaps:
 
@@ -51,6 +63,13 @@ Known gaps:
   proxy enforces owner tags before disclosing a URI, but the shared Code
   Interpreter execution role can read the Insights prefix. Replace this with
   object-scoped temporary authorization for production.
+
+- **Office output writes remain trusted-frontend isolation.** The dedicated
+  sandbox role is output-prefix-scoped, not dynamically object-scoped per
+  user. The private proxy, required S3 tags, exact user/chat validation, and
+  OpenWebUI owner check control exposure today. Use a credential broker or
+  short-lived object-scoped credentials before treating the agent/tool as an
+  untrusted security boundary.
 
 - **`runtimeSessionId` must be ≥ 33 chars.**
   The Dify `/chat-messages` path forwards `conversation_id` verbatim as the harness session id, which AWS rejects if shorter than 33 chars. Dify's UI passes UUIDs so real users don't hit it; curl/scripted callers do.

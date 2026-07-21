@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import importlib.util
 import sys
 import types
@@ -45,6 +46,25 @@ class FakeFiles:
         if record and record.user_id == user_id:
             return record
         return None
+
+    async def get_file_by_id(self, file_id):
+        return self.records.get(file_id)
+
+    async def insert_new_file(self, user_id, form):
+        record = SimpleNamespace(
+            id=form.id,
+            user_id=user_id,
+            filename=form.filename,
+            path=form.path,
+            meta=form.meta,
+        )
+        self.records[form.id] = record
+        return record
+
+
+class FakeFileForm:
+    def __init__(self, **kwargs):
+        self.__dict__.update(kwargs)
 
 
 def load_filter_module(path=FILTER_PATH):
@@ -93,6 +113,7 @@ class OpenWebUIFilterTests(unittest.TestCase):
         chats_module.Chats = chats
         files_module = types.ModuleType("open_webui.models.files")
         files_module.Files = files
+        files_module.FileForm = FakeFileForm
         return {
             "open_webui": types.ModuleType("open_webui"),
             "open_webui.models": types.ModuleType("open_webui.models"),
@@ -230,6 +251,131 @@ class OpenWebUIFilterTests(unittest.TestCase):
             [item["file_id"] for item in result["agentcore_files"]],
             ["file-1", "file-2"],
         )
+
+    def test_office_model_uses_the_same_owned_file_manifest(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        chats = FakeChats(self.chat)
+        files = FakeFiles(self.records)
+        body = {
+            "model": "agentcore-office.insights-office",
+            "messages": [{"role": "user", "content": "Create a workbook"}],
+        }
+
+        with patch.dict(
+            sys.modules,
+            self.install_fake_openwebui_modules(chats, files),
+        ):
+            result = asyncio.run(
+                module.Filter().inlet(
+                    body,
+                    __user__={"id": USER_ID},
+                    __metadata__={},
+                    __chat_id__=CHAT_ID,
+                )
+            )
+
+        self.assertEqual(result["agentcore_request_context"], {"kind": "chat"})
+        self.assertEqual(
+            [item["file_id"] for item in result["agentcore_files"]],
+            ["file-1", "file-2"],
+        )
+
+    def test_office_status_marker_becomes_a_native_status_event(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        emitted = []
+
+        async def emit(event):
+            emitted.append(event)
+
+        event = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": (
+                            '<!--agentcore-status:{"description":"Running Code '
+                            'Interpreter","done":false}-->'
+                        )
+                    }
+                }
+            ]
+        }
+        result = asyncio.run(
+            module.Filter().stream(
+                event,
+                __event_emitter__=emit,
+                __body__={"model": "agentcore-office.insights-office"},
+            )
+        )
+        self.assertEqual(result["choices"][0]["delta"]["content"], "")
+        self.assertEqual(emitted[0]["type"], "status")
+        self.assertEqual(
+            emitted[0]["data"]["description"], "Running Code Interpreter"
+        )
+
+    def test_office_stream_artifact_marker_becomes_owned_download_link(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        files = FakeFiles(self.records)
+        artifact = {
+            "s3_uri": "s3://agentcore-openwebui-insights-964340114883/"
+            "openwebui-insights/outputs/user-1/chat-1/report.xlsx",
+            "filename": "report.xlsx",
+            "mime_type": "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet",
+            "size": 120,
+        }
+        event = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": "<!--agentcore-artifacts:%s-->"
+                        % base64.urlsafe_b64encode(
+                            __import__("json")
+                            .dumps([artifact], separators=(",", ":"))
+                            .encode("utf-8")
+                        ).decode("ascii")
+                    },
+                    "finish_reason": None,
+                }
+            ]
+        }
+        with (
+            patch.dict(sys.modules, self.install_fake_openwebui_modules(FakeChats(self.chat), files)),
+            patch.object(module, "_validate_artifacts_with_proxy", return_value=[artifact]),
+        ):
+            result = asyncio.run(
+                module.Filter().stream(
+                    event,
+                    __body__={"model": "agentcore-office.insights-office"},
+                    __user__={"id": USER_ID},
+                    __metadata__={"chat_id": CHAT_ID},
+                )
+            )
+
+        content = result["choices"][0]["delta"]["content"]
+        self.assertIn("[Download report.xlsx]", content)
+        self.assertIn("/api/v1/files/", content)
+        self.assertNotIn("s3://", content)
+        self.assertEqual(len(files.records), 3)
+
+    def test_office_final_chunk_closes_native_status(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        emitted = []
+
+        async def emit(event):
+            emitted.append(event)
+
+        event = {"choices": [{"delta": {}, "finish_reason": "stop"}]}
+        result = asyncio.run(
+            module.Filter().stream(
+                event,
+                __event_emitter__=emit,
+                __body__={"model": "agentcore-office.insights-office"},
+            )
+        )
+        self.assertIs(result, event)
+        self.assertEqual(emitted, [{"type": "status", "data": {
+            "description": "", "done": True, "hidden": True,
+        }}])
 
     def test_unowned_chat_file_is_rejected(self):
         module = load_filter_module()
