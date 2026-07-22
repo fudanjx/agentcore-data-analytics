@@ -68,6 +68,7 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3
@@ -717,13 +718,13 @@ def _extract_session_context(body: dict):
     return session_id, user_id
 
 
-def _extract_dify_session_context(request_body: dict) -> tuple[str, str]:
+def _extract_dify_session_context(request_body: dict) -> tuple[str, str, dict[str, Any]]:
     """
     Extract mapped user UUID from request body when request is from Dify.
     Conversation ID not sent from Dify -> Plugin and not sent from Plugin -> Provider.
     Retrieve ID via regex inserted via system prompt.
     """
-    DIFY_CONV_ID_PATTERN = r"<C_ID>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<C_ID>"
+    DIFY_CONV_ID_PATTERN = r"\s*<C_ID>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<C_ID>\s*"
     try:
         user_id = uuid.UUID(request_body.get("user"))
     except ValueError:
@@ -743,9 +744,11 @@ def _extract_dify_session_context(request_body: dict) -> tuple[str, str]:
             raise ValueError("messages is not of list/array type.")
         
         system_prompt = ""
-        for message in messages:
+        system_prompt_index = -1
+        for index, message in enumerate(messages):
             if message.get("role") == "system":
                 system_prompt = message.get("content")
+                system_prompt_index = index
                 break
         
         if not system_prompt:
@@ -754,7 +757,7 @@ def _extract_dify_session_context(request_body: dict) -> tuple[str, str]:
         session_id = re.search(DIFY_CONV_ID_PATTERN, system_prompt)
         if not session_id:
             raise ValueError("No conversation id matching C_ID tag pattern found.")
-    
+        
     except ValueError as e:
         raise HTTPException(
                     status_code=422,
@@ -765,8 +768,15 @@ def _extract_dify_session_context(request_body: dict) -> tuple[str, str]:
                         }
                     },
                 )
+    
+    # Remove conversation_id from system prompt if found and return new body object
+    if system_prompt_index >= 0:
+        system_prompt_dict: dict[str, str] = messages[system_prompt_index]
+        system_prompt_dict["content"] = system_prompt_dict["content"].replace(session_id.group(0), "", 1)
+        messages[system_prompt_index] = system_prompt_dict
+        request_body["messages"] = messages
         
-    return session_id.group(1), str(user_id)
+    return session_id.group(1), str(user_id), request_body
 
 
 def _extract_openwebui_context(
@@ -1607,7 +1617,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
                     source_profile,
                 )
     elif slug in ("harness", "dify"):
-        session_id, user_id = _extract_dify_session_context(request_body=body)
+        session_id, user_id, body = _extract_dify_session_context(request_body=body)
         
     else:
         session_id, user_id = _extract_session_context(body)
