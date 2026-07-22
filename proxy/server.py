@@ -114,6 +114,7 @@ DIFY_OFFICE_ARTIFACTS_PREFIX = (
 DIFY_OFFICE_SOURCE_PROFILE = {
     "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
     "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
+    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
 }
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
 MAX_FILES_PER_CHAT = 10
@@ -503,6 +504,9 @@ def _validate_openwebui_artifact_manifest(
             f"At most {MAX_OFFICE_ARTIFACTS_PER_RESPONSE} generated files are allowed",
         )
 
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
     expected_prefix = (
         f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
     )
@@ -522,11 +526,14 @@ def _validate_openwebui_artifact_manifest(
                 "Each artifact requires s3_uri and filename",
             )
         extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if extension not in OFFICE_OUTPUT_EXTENSIONS:
+        if extension not in output_extensions:
+            allowed_formats = ", ".join(
+                extension.upper() for extension in sorted(output_extensions)
+            )
             raise FileManifestError(
                 400,
                 "unsupported_artifact_type",
-                "Generated files must be DOCX, XLSX, PPTX, PDF, or CSV",
+                f"Generated files must be one of: {allowed_formats}",
             )
 
         parsed = urlparse(s3_uri)
@@ -642,6 +649,9 @@ def _discover_openwebui_office_artifacts(
     user/chat prefix, and pass the same independent ownership validation used
     by the registration endpoint.
     """
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
     prefix = f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
     listing = get_s3().list_objects_v2(
         Bucket=source_profile["bucket"],
@@ -665,7 +675,7 @@ def _discover_openwebui_office_artifacts(
             continue
         filename = _sanitize_filename(key.rsplit("/", 1)[-1])
         extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if modified_at < cutoff or extension not in OFFICE_OUTPUT_EXTENSIONS:
+        if modified_at < cutoff or extension not in output_extensions:
             continue
         candidates.append(
             (
@@ -740,6 +750,12 @@ prose. Report successful outputs only inside the `<agentcore-artifacts>` marker.
 The trusted proxy will validate ownership and generate short-lived download
 links for the caller.
 """
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
+    allowed_formats = ", ".join(
+        extension.upper() for extension in sorted(output_extensions)
+    )
     instruction = f"""## Generated Office files
 
 For this request only, create new files solely under:
@@ -752,7 +768,7 @@ tags) and the exact S3 object tags below. Use the bucket
 local file, an appropriate `--content-type`, and:
 `{tagging}`
 
-Use only these downloadable output formats: DOCX, XLSX, PPTX, PDF, and CSV.
+Use only these downloadable output formats: {allowed_formats}.
 Before the final answer, confirm each upload completed. Then use the
 `<agentcore-artifacts>` JSON marker required by the system prompt; list only
 the S3 URI and the user-facing filename for each successful output.
@@ -1449,6 +1465,13 @@ _DIFY_ARTIFACT_ERROR_TEXT = (
 )
 
 
+def _dify_artifact_error_label(error: Exception) -> str:
+    """Return a useful validation code without logging artifact locations."""
+    if isinstance(error, FileManifestError):
+        return f"{type(error).__name__}:{error.code}"
+    return type(error).__name__
+
+
 def _resolve_dify_presigned_artifacts(
     artifact_sanitizer: _OfficeArtifactStreamSanitizer,
     artifact_context: tuple[str, str, dict],
@@ -1488,7 +1511,10 @@ def _render_dify_presigned_artifacts(
             request_started_at,
         )
     except Exception as error:
-        logger.warning("Dify artifact delivery failed: %s", type(error).__name__)
+        logger.warning(
+            "Dify artifact delivery failed: %s",
+            _dify_artifact_error_label(error),
+        )
         return clean_text + _DIFY_ARTIFACT_ERROR_TEXT
     if artifacts:
         return clean_text + "\n" + _format_presigned_artifact_links(artifacts)
@@ -1549,7 +1575,7 @@ def _sse_harness_dify_artifact_stream(
         logger.warning(
             "Dify artifact stream delivery failed (session=%s): %s",
             session_id,
-            type(error).__name__,
+            _dify_artifact_error_label(error),
         )
         yield stream_chunk(_DIFY_ARTIFACT_ERROR_TEXT)
 
