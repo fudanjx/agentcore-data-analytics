@@ -127,6 +127,7 @@ HARNESSES = {
     "harness": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
     "insights": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
     "dify": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E",
+    "dify-eks":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dev-m4cvZIUAYw"
 }
 _insights_office_harness_arn = os.environ.get("INSIGHTS_OFFICE_HARNESS_ARN", "")
 if _insights_office_harness_arn:
@@ -1481,12 +1482,12 @@ async def chat_completions_by_slug(slug: str, request: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
 
-    if slug == "dev":
-        logger.info(
-            "OpenAI-compatible raw payload [%s]: %s",
-            slug,
-            json.dumps(body, ensure_ascii=False, default=str),
-        )
+    
+    logger.info(
+        "Raw payload [%s]: %s",
+        slug,
+        json.dumps(body, ensure_ascii=False, default=str),
+    )
 
     messages = body.get("messages", [])
     if not messages:
