@@ -68,12 +68,13 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3
 import botocore.exceptions
 from botocore.config import Config
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
@@ -134,6 +135,7 @@ if _insights_office_harness_arn:
     HARNESSES["insights-office"] = _insights_office_harness_arn
 
 ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
+
 
 app = FastAPI(title="AgentCore Proxy", version="3.0.0")
 _client = None
@@ -715,6 +717,67 @@ def _extract_session_context(body: dict):
     session_id = body.get("chat_id") or str(uuid.uuid4())
     user_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
     return session_id, user_id
+
+
+def _extract_dify_session_context(request_body: dict) -> tuple[str, str, dict[str, Any]]:
+    """
+    Extract mapped user UUID from request body when request is from Dify.
+    Conversation ID not sent from Dify -> Plugin and not sent from Plugin -> Provider.
+    Retrieve ID via regex inserted via system prompt.
+    """
+    DIFY_CONV_ID_PATTERN = r"\s*<C_ID>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<C_ID>\s*"
+    try:
+        user_id = uuid.UUID(request_body.get("user"))
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "code": "identity_context_required",
+                    "message": "Missing user input in UUID format.",
+                }
+            },
+        )
+    
+    try:
+        messages = request_body.get("messages", [])
+        if not isinstance(messages, list):
+            raise ValueError("messages is not of list/array type.")
+        
+        system_prompt = ""
+        system_prompt_index = -1
+        for index, message in enumerate(messages):
+            if message.get("role") == "system":
+                system_prompt = message.get("content")
+                system_prompt_index = index
+                break
+        
+        if not system_prompt:
+            raise ValueError("System prompt must be included for tracking of conversation id.")
+        
+        session_id = re.search(DIFY_CONV_ID_PATTERN, system_prompt)
+        if not session_id:
+            raise ValueError("No conversation id matching C_ID tag pattern found.")
+        
+    except ValueError as e:
+        raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": {
+                            "code": "identity_context_required",
+                            "message": f"{str(e)}",
+                        }
+                    },
+                )
+    
+    # Remove conversation_id from system prompt if found and return new body object
+    if system_prompt_index >= 0:
+        system_prompt_dict: dict[str, str] = messages[system_prompt_index]
+        system_prompt_dict["content"] = system_prompt_dict["content"].replace(session_id.group(0), "", 1)
+        messages[system_prompt_index] = system_prompt_dict
+        request_body["messages"] = messages
+        
+    return session_id.group(1), str(user_id), request_body
 
 
 def _extract_openwebui_context(
@@ -1554,6 +1617,9 @@ async def chat_completions_by_slug(slug: str, request: Request):
                     chat_id,
                     source_profile,
                 )
+    elif slug in ("harness", "dify"):
+        session_id, user_id, body = _extract_dify_session_context(request_body=body)
+        
     else:
         session_id, user_id = _extract_session_context(body)
 
