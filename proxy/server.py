@@ -103,6 +103,18 @@ INSIGHTS_OPENWEBUI_SOURCE_PROFILE = {
     "prefix": INSIGHTS_UPLOADS_PREFIX,
     "output_prefix": f"{INSIGHTS_UPLOADS_PREFIX}outputs/",
 }
+DIFY_OFFICE_ARTIFACTS_BUCKET = os.environ.get(
+    "DIFY_OFFICE_ARTIFACTS_BUCKET",
+    "ah-dify",
+)
+DIFY_OFFICE_ARTIFACTS_PREFIX = (
+    os.environ.get("DIFY_OFFICE_ARTIFACTS_PREFIX", "harness_dev/").strip("/")
+    + "/"
+)
+DIFY_OFFICE_SOURCE_PROFILE = {
+    "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
+    "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
+}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
 MAX_FILES_PER_CHAT = 10
 MAX_CHAT_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -1617,8 +1629,14 @@ async def chat_completions_by_slug(slug: str, request: Request):
                     chat_id,
                     source_profile,
                 )
-    elif slug in ("harness", "dify"):
+    elif slug in ("harness", "dify", "dify-eks"):
         session_id, user_id, body = _extract_dify_session_context(request_body=body)
+        messages = _inject_openwebui_office_artifact_context(
+            messages,
+            user_id,
+            session_id,
+            DIFY_OFFICE_SOURCE_PROFILE,
+        )
         
     else:
         session_id, user_id = _extract_session_context(body)
