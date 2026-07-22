@@ -38,6 +38,8 @@ UPLOADS_BUCKET = f"agentcore-user-uploads-{ACCOUNT_ID}"
 UPLOADS_PREFIX = "uploads/"
 OPENWEBUI_UPLOADS_BUCKET = f"agentcore-openwebui-test-{ACCOUNT_ID}"
 OPENWEBUI_UPLOADS_PREFIX = "openwebui-test/"
+DIFY_ARTIFACTS_BUCKET = "ah-dify"
+DIFY_ARTIFACTS_PREFIX = "harness_dev/"
 LIFECYCLE_DAYS = 1  # delete after 24h
 
 CI_NAME = "agentcore_user_uploads_ci"  # sandbox names: alnum + underscore only
@@ -273,7 +275,7 @@ def grant_harness_invoke_ci(role_arn: str, ci_arn: str, name_hint: str):
 # ---------------------------------------------------------------------------
 
 def grant_proxy_upload():
-    """Grant upload writes and metadata-only validation of OpenWebUI objects."""
+    """Grant uploads, artifact validation, and Dify download signing access."""
     policy = {
         "Version": "2012-10-17",
         "Statement": [
@@ -313,6 +315,26 @@ def grant_proxy_upload():
                     f"{OPENWEBUI_UPLOADS_PREFIX}*"
                 ),
             },
+            {
+                "Sid": "ListDifyOfficeArtifacts",
+                "Effect": "Allow",
+                "Action": "s3:ListBucket",
+                "Resource": f"arn:aws:s3:::{DIFY_ARTIFACTS_BUCKET}",
+                "Condition": {
+                    "StringLike": {
+                        "s3:prefix": f"{DIFY_ARTIFACTS_PREFIX}*"
+                    }
+                },
+            },
+            {
+                "Sid": "ValidateAndSignDifyOfficeArtifacts",
+                "Effect": "Allow",
+                "Action": ["s3:GetObject", "s3:GetObjectTagging"],
+                "Resource": (
+                    f"arn:aws:s3:::{DIFY_ARTIFACTS_BUCKET}/"
+                    f"{DIFY_ARTIFACTS_PREFIX}*"
+                ),
+            },
         ],
     }
     iam.put_role_policy(
@@ -324,6 +346,10 @@ def grant_proxy_upload():
     print(
         "  Proxy role granted metadata/tag validation on "
         f"{OPENWEBUI_UPLOADS_BUCKET}/{OPENWEBUI_UPLOADS_PREFIX}*"
+    )
+    print(
+        "  Proxy role granted validation/signing access on "
+        f"{DIFY_ARTIFACTS_BUCKET}/{DIFY_ARTIFACTS_PREFIX}*"
     )
 
 

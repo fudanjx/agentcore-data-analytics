@@ -33,6 +33,10 @@ spec:
               value: agentcore-openwebui-insights-964340114883
             - name: INSIGHTS_UPLOADS_PREFIX
               value: openwebui-insights/
+            - name: DIFY_OFFICE_ARTIFACTS_BUCKET
+              value: ah-dify
+            - name: DIFY_OFFICE_ARTIFACTS_PREFIX
+              value: harness_dev/
             - name: INSIGHTS_OFFICE_HARNESS_ARN
               value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U
           resources:
