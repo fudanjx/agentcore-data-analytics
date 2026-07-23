@@ -71,10 +71,6 @@ DIFY_OFFICE_SOURCE_PROFILE = {
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 MAX_ARTIFACTS_PER_RESPONSE = 10
 MAX_ARTIFACT_MARKER_BYTES = 64 * 1024
-DIFY_ARTIFACT_URL_TTL_SECONDS = int(
-    os.environ.get("DIFY_ARTIFACT_URL_TTL_SECONDS", str(24 * 60 * 60))
-)
-
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _DIFY_CONVERSATION_ID_RE = re.compile(
     r"\s*<C_ID>"
@@ -248,8 +244,9 @@ outputs only inside an `<agentcore-artifacts>` JSON marker, listing the S3 URI
 and user-facing filename for each output.
 
 Do not generate a presigned URL and do not expose an S3 URI in user-visible
-prose. The trusted proxy validates ownership and generates short-lived download
-links for the caller.
+prose. The trusted proxy validates ownership and returns the filename and S3 URI
+to the frontend inside an `<agentcore-generated-files>` JSON envelope. The
+frontend obtains a download URL from its artifact backend only when needed.
 For html, just return the html artifact in the chat response don't upload it to s3.
 """
     return [*messages, {"role": "system", "content": instruction}]
@@ -608,25 +605,6 @@ def _discover_dify_artifacts(
     )
 
 
-def _presign_artifacts(artifacts: list[dict]) -> list[dict]:
-    signed: list[dict] = []
-    for artifact in artifacts:
-        parsed = urlparse(artifact["s3_uri"])
-        filename = _sanitize_filename(artifact["filename"])
-        url = get_s3_client().generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": parsed.netloc,
-                "Key": parsed.path.lstrip("/"),
-                "ResponseContentDisposition": f'attachment; filename="{filename}"',
-                "ResponseContentType": artifact["mime_type"],
-            },
-            ExpiresIn=DIFY_ARTIFACT_URL_TTL_SECONDS,
-        )
-        signed.append({**artifact, "download_url": url})
-    return signed
-
-
 def _resolve_artifacts(
     sanitizer: _ArtifactStreamSanitizer,
     artifact_context: tuple[str, str, dict],
@@ -647,19 +625,25 @@ def _resolve_artifacts(
             source_profile,
             request_started_at,
         )
-    return _presign_artifacts(validated) if validated else []
+    return validated if validated else []
 
 
-def _format_artifact_links(artifacts: list[dict]) -> str:
-    lines = ["", "Generated files:"]
-    lines.extend(
-        f"- [{artifact['filename']}]({artifact['download_url']})"
-        for artifact in artifacts
+def _format_artifact_references(artifacts: list[dict]) -> str:
+    """Render a machine-readable artifact handoff for the frontend."""
+    payload = {
+        "files": [
+            {
+                "filename": artifact["filename"],
+                "s3_uri": artifact["s3_uri"],
+            }
+            for artifact in artifacts
+        ]
+    }
+    return (
+        "\n<agentcore-generated-files>"
+        f"{json.dumps(payload, separators=(',', ':'))}"
+        "</agentcore-generated-files>"
     )
-    lines.append(
-        f"Links expire in {DIFY_ARTIFACT_URL_TTL_SECONDS // 60} minutes."
-    )
-    return "\n".join(lines)
 
 
 def _artifact_error_label(error: Exception) -> str:
@@ -689,7 +673,7 @@ def _render_buffered_result(
         )
         return clean_text + _ARTIFACT_ERROR_TEXT
     if artifacts:
-        return clean_text + "\n" + _format_artifact_links(artifacts)
+        return clean_text + "\n" + _format_artifact_references(artifacts)
     if sanitizer.artifact_problem:
         return clean_text + _ARTIFACT_ERROR_TEXT
     return clean_text
@@ -750,7 +734,7 @@ def _sse_stream(
             request_started_at,
         )
         if artifacts:
-            yield stream_chunk("\n" + _format_artifact_links(artifacts))
+            yield stream_chunk("\n" + _format_artifact_references(artifacts))
         elif sanitizer.artifact_problem:
             yield stream_chunk(_ARTIFACT_ERROR_TEXT)
     except Exception as error:
