@@ -5,11 +5,12 @@ Only the OpenAI-compatible endpoints used by Dify are exposed:
     GET  /{slug}/v1/models
     POST /{slug}/v1/chat/completions
 
-Dify may send ``user`` and a system-message
+Dify may send ``user`` and a message containing a
 ``<C_ID>{conversation UUID}<C_ID>`` marker to preserve actor and conversation
 identity. OpenAI-compatible provider probes omit them, so the proxy supplies
 request-scoped identifiers when absent. Non-UUID user strings are mapped to a
-stable UUID. Any conversation marker is removed before invoking AgentCore.
+stable UUID. An assistant message carrying the marker is removed completely
+before invoking AgentCore, because the model does not support assistant prefill.
 Generated Office artifacts are independently validated in S3 and replaced with
 short-lived download links. This file intentionally contains no OpenWebUI,
 native Dify App API, generic Runtime, or file-upload proxy routes.
@@ -87,7 +88,7 @@ _ARTIFACT_ERROR_TEXT = (
     "\n\nGenerated file could not be made available. Please try again."
 )
 
-app = FastAPI(title="AgentCore Dify Proxy", version="1.0.1")
+app = FastAPI(title="AgentCore Dify Proxy", version="1.0.2")
 
 _agentcore_client = None
 _s3_client = None
@@ -141,11 +142,12 @@ class DifyArtifactError(Exception):
 def _extract_dify_session_context(
     request_body: dict,
 ) -> tuple[str, str, list[dict]]:
-    """Resolve optional Dify identity and remove an injected C_ID marker.
+    """Resolve optional Dify identity and remove an injected C_ID carrier.
 
     Normal chat requests can supply stable identifiers. Dify's
     OpenAI-compatible credentials probe does not, so missing identity must not
-    make provider validation fail.
+    make provider validation fail. Assistant marker messages are dropped
+    entirely so they cannot become an unsupported assistant prefill.
     """
     raw_user = request_body.get("user")
     if raw_user is None or not str(raw_user).strip():
@@ -186,18 +188,18 @@ def _extract_dify_session_context(
     cleaned_messages = [dict(message) for message in messages]
     session_id = None
     for index, message in enumerate(cleaned_messages):
-        if message.get("role") != "system":
+        content = message.get("content")
+        if not isinstance(content, str):
             continue
-        system_content = message.get("content")
-        if not isinstance(system_content, str):
-            continue
-        match = _DIFY_CONVERSATION_ID_RE.search(system_content)
+        match = _DIFY_CONVERSATION_ID_RE.search(content)
         if not match:
             continue
         session_id = str(uuid.UUID(match.group(1)))
-        cleaned_messages[index]["content"] = (
-            system_content[: match.start()] + system_content[match.end() :]
-        )
+        cleaned_content = content[: match.start()] + content[match.end() :]
+        if message.get("role") == "assistant" or not cleaned_content.strip():
+            del cleaned_messages[index]
+        else:
+            cleaned_messages[index]["content"] = cleaned_content
         break
 
     if session_id is None:
