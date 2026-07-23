@@ -65,7 +65,7 @@ DIFY_OFFICE_ARTIFACTS_PREFIX = (
 DIFY_OFFICE_SOURCE_PROFILE = {
     "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
     "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
-    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
+    "output_extensions": {"csv", "docx", "xlsx", "pptx", "pdf"},
 }
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
@@ -235,7 +235,6 @@ def _inject_dify_artifact_context(
 
 For this request only, create new files solely under:
 `{output_prefix}`
-
 Never overwrite input files. Use a newly generated, safe filename. Upload each
 output with `aws s3api put-object` (not `aws s3 cp`, which cannot set object
 tags) and the exact S3 object tags below. Use the bucket
@@ -251,6 +250,7 @@ and user-facing filename for each output.
 Do not generate a presigned URL and do not expose an S3 URI in user-visible
 prose. The trusted proxy validates ownership and generates short-lived download
 links for the caller.
+For html, just return the html artifact in the chat response don't upload it to s3.
 """
     return [*messages, {"role": "system", "content": instruction}]
 
