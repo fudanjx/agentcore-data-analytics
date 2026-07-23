@@ -17,6 +17,21 @@ kubectl set image deployment/agentcore-proxy \
 
 kubectl rollout status deployment/agentcore-proxy -n agentcore
 
+### Dify-only proxy
+
+# Builds and pushes the image, applies the Kubernetes manifests, updates the
+# Deployment image, waits for rollout, and displays the ClusterIP/internal NLB.
+export TAG=v0.0.2
+bash dify-proxy/deploy.sh
+
+# In-cluster Dify model-provider base URL:
+# http://agentcore-dify-proxy.agentcore.svc.cluster.local/dify/v1
+
+# Show the internal NLB hostname after AWS finishes provisioning it:
+kubectl get svc agentcore-dify-proxy-internal \
+  -n agentcore \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+
 ###agentcore
 
 # Bash

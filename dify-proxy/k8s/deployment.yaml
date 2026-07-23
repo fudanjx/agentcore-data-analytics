@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agentcore-dify-proxy
+  namespace: agentcore
+  labels:
+    app: agentcore-dify-proxy
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agentcore-dify-proxy
+  template:
+    metadata:
+      labels:
+        app: agentcore-dify-proxy
+    spec:
+      serviceAccountName: agentcore-proxy
+      containers:
+        - name: dify-proxy
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.2
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8080
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: ap-southeast-1
+            - name: DIFY_HARNESS_ARN
+              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E
+            - name: DIFY_EKS_HARNESS_ARN
+              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dev-m4cvZIUAYw
+            - name: DIFY_OFFICE_ARTIFACTS_BUCKET
+              value: ah-dify
+            - name: DIFY_OFFICE_ARTIFACTS_PREFIX
+              value: harness_dev/
+          resources:
+            requests:
+              cpu: 256m
+              memory: 512Mi
+            limits:
+              cpu: 512m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8080
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3

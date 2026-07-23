@@ -1,0 +1,32 @@
+# ClusterIP service for Dify workloads in the EKS cluster.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentcore-dify-proxy
+  namespace: agentcore
+spec:
+  selector:
+    app: agentcore-dify-proxy
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: ClusterIP
+
+---
+# Internal NLB for clients that can route into the VPC.
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentcore-dify-proxy-internal
+  namespace: agentcore
+  annotations:
+    service.beta.kubernetes.io/aws-load-balancer-type: "external"
+    service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: "ip"
+    service.beta.kubernetes.io/aws-load-balancer-scheme: "internal"
+spec:
+  selector:
+    app: agentcore-dify-proxy
+  ports:
+    - port: 80
+      targetPort: 8080
+  type: LoadBalancer
