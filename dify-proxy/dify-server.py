@@ -40,19 +40,17 @@ logger = logging.getLogger("agentcore-dify-proxy")
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 
-# Dify Harness backends. Override an ARN without editing this file.
-DIFY_HARNESSES = {
-    "dify": os.environ.get(
-        "DIFY_HARNESS_ARN",
-        "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
-        "harness/harness_dify-LViqrsm86E",
-    ),
-    "dify-eks": os.environ.get(
-        "DIFY_EKS_HARNESS_ARN",
-        "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
-        "harness/harness_dev-m4cvZIUAYw",
-    ),
-}
+# READY harnesses discovered through the AgentCore control plane, keyed by
+# harnessName for use as the endpoint slug.
+DIFY_HARNESSES: dict[str, str] = {}
+DIFY_HARNESS_DISCOVERY_ENABLED = os.environ.get(
+    "DIFY_HARNESS_DISCOVERY_ENABLED",
+    "true",
+).lower() not in {"0", "false", "no", "off"}
+DIFY_HARNESS_DISCOVERY_TTL_SECONDS = max(
+    1,
+    int(os.environ.get("DIFY_HARNESS_DISCOVERY_TTL_SECONDS", "300")),
+)
 
 DIFY_OFFICE_ARTIFACTS_BUCKET = os.environ.get(
     "DIFY_OFFICE_ARTIFACTS_BUCKET",
@@ -87,7 +85,11 @@ _ARTIFACT_ERROR_TEXT = (
 app = FastAPI(title="AgentCore Dify Proxy", version="1.0.2")
 
 _agentcore_client = None
+_agentcore_control_client = None
 _s3_client = None
+_harness_discovery_lock = threading.Lock()
+_harness_discovery_attempted = False
+_harness_discovery_refreshed_at = 0.0
 _session_locks: dict[str, tuple[threading.Lock, int]] = {}
 _session_locks_guard = threading.Lock()
 
@@ -105,6 +107,81 @@ def get_agentcore_client():
             ),
         )
     return _agentcore_client
+
+
+def get_agentcore_control_client():
+    global _agentcore_control_client
+    if _agentcore_control_client is None:
+        _agentcore_control_client = boto3.client(
+            "bedrock-agentcore-control",
+            region_name=REGION,
+            config=Config(
+                read_timeout=10,
+                connect_timeout=5,
+                retries={"mode": "standard", "max_attempts": 2},
+            ),
+        )
+    return _agentcore_control_client
+
+
+def refresh_dify_harnesses(force: bool = False) -> dict[str, str]:
+    """Discover READY harnesses, retaining the last successful result on failure."""
+    global _harness_discovery_attempted
+    global _harness_discovery_refreshed_at
+
+    if not DIFY_HARNESS_DISCOVERY_ENABLED:
+        return dict(DIFY_HARNESSES)
+
+    with _harness_discovery_lock:
+        now = time.monotonic()
+        cache_is_fresh = (
+            _harness_discovery_attempted
+            and now - _harness_discovery_refreshed_at
+            < DIFY_HARNESS_DISCOVERY_TTL_SECONDS
+        )
+        if not force and cache_is_fresh:
+            return dict(DIFY_HARNESSES)
+
+        _harness_discovery_attempted = True
+        _harness_discovery_refreshed_at = now
+        try:
+            discovered = {}
+            paginator = get_agentcore_control_client().get_paginator(
+                "list_harnesses"
+            )
+            for page in paginator.paginate():
+                for harness in page.get("harnesses", []):
+                    name = harness.get("harnessName")
+                    arn = harness.get("arn")
+                    if (
+                        harness.get("status") == "READY"
+                        and isinstance(name, str)
+                        and name
+                        and isinstance(arn, str)
+                        and arn
+                    ):
+                        discovered[name] = arn
+        except Exception as error:
+            logger.warning(
+                "Unable to discover AgentCore harnesses; retaining the last "
+                "successful discovery result: %s",
+                error,
+            )
+            return dict(DIFY_HARNESSES)
+
+        DIFY_HARNESSES.clear()
+        DIFY_HARNESSES.update(discovered)
+        logger.info(
+            "Available Dify harness backends: %s",
+            ", ".join(sorted(DIFY_HARNESSES)),
+        )
+        return dict(DIFY_HARNESSES)
+
+
+def get_dify_harness_arn(slug: str) -> str | None:
+    """Return a cached harness ARN, refreshing discovery when its TTL expires."""
+    harnesses = refresh_dify_harnesses()
+    return harnesses.get(slug)
 
 
 def get_s3_client():
@@ -757,6 +834,7 @@ def _sse_stream(
 
 async def _build_completion(
     messages: list[dict],
+    harness_arn: str,
     slug: str,
     model: str,
     stream: bool,
@@ -770,7 +848,6 @@ async def _build_completion(
         DIFY_OFFICE_SOURCE_PROFILE,
     )
     request_started_at = time.time()
-    harness_arn = DIFY_HARNESSES[slug]
 
     logger.info(
         "Dify request [%s]: model=%s turns=%d stream=%s session=%s actor=%s",
@@ -839,7 +916,7 @@ def health():
 
 @app.get("/{slug}/v1/models")
 def models_by_slug(slug: str):
-    if slug not in DIFY_HARNESSES:
+    if get_dify_harness_arn(slug) is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
     return {
         "object": "list",
@@ -849,7 +926,8 @@ def models_by_slug(slug: str):
 
 @app.post("/{slug}/v1/chat/completions")
 async def chat_completions_by_slug(slug: str, request: Request):
-    if slug not in DIFY_HARNESSES:
+    harness_arn = await run_in_threadpool(get_dify_harness_arn, slug)
+    if harness_arn is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
 
     try:
@@ -874,6 +952,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
     try:
         return await _build_completion(
             messages=messages,
+            harness_arn=harness_arn,
             slug=slug,
             model=body.get("model", slug),
             stream=bool(body.get("stream", False)),

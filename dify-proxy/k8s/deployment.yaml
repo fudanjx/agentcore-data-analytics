@@ -25,10 +25,6 @@ spec:
           env:
             - name: AWS_DEFAULT_REGION
               value: ap-southeast-1
-            - name: DIFY_HARNESS_ARN
-              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E
-            - name: DIFY_EKS_HARNESS_ARN
-              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dev-m4cvZIUAYw
             - name: DIFY_OFFICE_ARTIFACTS_BUCKET
               value: ah-dify
             - name: DIFY_OFFICE_ARTIFACTS_PREFIX

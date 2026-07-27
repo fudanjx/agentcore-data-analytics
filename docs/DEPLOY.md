@@ -82,7 +82,7 @@ The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore runtimes/harne
 
 ### Step 1 — Prep IRSA (one-time)
 
-Already created as `agentcore-proxy-irsa`. Trust policy uses OIDC provider on the cluster. Inline policy: `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeForUser`, `InvokeHarness`, plus S3/SecretsManager for ETL jobs. Use `Resource: "*"` — the IAM check uses endpoint ARN not runtime ARN.
+The role is `agentcore-proxy-irsa`; its trust policy uses the cluster's OIDC provider. Ensure its inline policy includes `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeForUser`, `InvokeHarness`, and `ListHarnesses`, plus S3/SecretsManager for ETL jobs. `ListHarnesses` lets the Dify proxy dynamically expose each READY harness at `/{harnessName}/v1`; it requires `Resource: "*"`. Use `Resource: "*"` for invocation as well — the IAM check uses endpoint ARN not runtime ARN.
 
 If recreating:
 ```bash
