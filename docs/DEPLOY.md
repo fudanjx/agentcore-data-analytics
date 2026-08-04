@@ -68,6 +68,14 @@ role manages Code Interpreter sessions; the custom Code Interpreter's own
 execution role must grant `s3:GetObject` for uploaded-file prefixes and
 `s3:PutObject` for generated-artifact prefixes.
 
+The Runtime also receives the AgentCore Memory ID and generated semantic,
+preference, and summary strategy IDs. On every request it loads recent raw
+events for the current actor/session as short-term memory, then searches those
+strategy namespaces for relevant cross-session long-term memory. Summary
+records are stored below session-specific namespaces and are retrieved using
+their actor-level namespace prefix. The proxy must therefore pass a stable user
+ID and conversation UUID.
+
 ### Step 2 — Verify
 
 AWS Console → Bedrock → AgentCore → `agentcore_poc` → Test with a prompt.

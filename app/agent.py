@@ -146,6 +146,14 @@ def _build_prompt(messages: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def _latest_user_text(messages: list[dict]) -> str:
+    """Return only the current user turn for short-term memory persistence."""
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return str(message.get("content", ""))
+    return ""
+
+
 def _build_mcp_servers() -> dict:
     """Return McpHttpServerConfig dicts pointing at the local SigV4 proxy."""
     urls = gateway_proxy.mcp_urls()
@@ -200,13 +208,35 @@ async def stream(
     if not prompt:
         yield "Please provide a question."
         return
+    current_user_text = _latest_user_text(non_system_msgs) or prompt
 
-    # Inject prior-conversation context from AgentCore Memory
+    # Reconstruct current-session events and retrieve relevant cross-session
+    # records from AgentCore Memory. Raw conversation history belongs in the
+    # user prompt; only extracted long-term context is appended to the system
+    # prompt. Keep the blocking AWS calls off the event loop.
     if actor_id:
-        mem_context = memory.retrieve_context(actor_id, session_id or "", prompt)
-        if mem_context:
-            system_prompt += mem_context
-            logger.info("Memory: %d chars of context injected", len(mem_context))
+        short_term_context, long_term_context = await asyncio.gather(
+            asyncio.to_thread(
+                memory.retrieve_short_term_context,
+                actor_id,
+                session_id or "",
+            ),
+            asyncio.to_thread(
+                memory.retrieve_long_term_context,
+                actor_id,
+                prompt,
+            ),
+        )
+        if short_term_context:
+            prompt = short_term_context + "\n\n---\n\n## Current request\n\n" + prompt
+        if long_term_context:
+            system_prompt += long_term_context
+        if short_term_context or long_term_context:
+            logger.info(
+                "Memory: injected short_term_chars=%d long_term_chars=%d",
+                len(short_term_context),
+                len(long_term_context),
+            )
 
     code_interpreter_session_id = await code_interpreter.start_session(session_id)
     try:
@@ -271,4 +301,10 @@ async def stream(
     # we don't delay the SSE response completion.
     if actor_id and session_id and assistant_buffer:
         final_text = "".join(assistant_buffer)
-        await asyncio.to_thread(memory.save_turn, actor_id, session_id, prompt, final_text)
+        await asyncio.to_thread(
+            memory.save_turn,
+            actor_id,
+            session_id,
+            current_user_text,
+            final_text,
+        )

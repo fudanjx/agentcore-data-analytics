@@ -32,12 +32,23 @@ sys.modules.setdefault("claude_agent_sdk.types", sdk_types)
 gateway_proxy = types.ModuleType("app.gateway_proxy")
 gateway_proxy.mcp_urls = lambda: {}
 memory = types.ModuleType("app.memory")
-memory.retrieve_context = lambda *args: ""
+memory.retrieve_short_term_context = lambda *args: ""
+memory.retrieve_long_term_context = lambda *args: ""
 memory.save_turn = lambda *args: None
 sys.modules.setdefault("app.gateway_proxy", gateway_proxy)
 sys.modules.setdefault("app.memory", memory)
 
 from app import agent
+
+
+def test_latest_user_text_excludes_flattened_history():
+    assert agent._latest_user_text(
+        [
+            {"role": "user", "content": "first question"},
+            {"role": "assistant", "content": "first answer"},
+            {"role": "user", "content": "current question"},
+        ]
+    ) == "current question"
 
 
 def test_document_input_reaches_agent_unchanged(monkeypatch):
