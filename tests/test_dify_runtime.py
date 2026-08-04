@@ -51,6 +51,15 @@ class FakeControlClient:
         return FakePaginator(self.pages)
 
 
+class FakePresignS3:
+    def __init__(self):
+        self.calls = []
+
+    def generate_presigned_url(self, operation, **kwargs):
+        self.calls.append((operation, kwargs))
+        return "https://downloads.example/report.xlsx?signature=test"
+
+
 class FakeRequest:
     def __init__(self, body):
         self.body = body
@@ -265,6 +274,131 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(call["messages"][:-1], body["messages"])
         self.assertEqual(call["messages"][-1]["role"], "system")
         self.assertIn("Generated Office files", call["messages"][-1]["content"])
+        self.assertFalse(call["output_urls"])
+
+    def test_runtime_chat_passes_output_url_setting(self):
+        conversation_id = "f48bbf06-2c37-4e5a-90ac-12a3be6d8fe1"
+        body = {
+            "user": "832757e8-7a25-4e75-8401-8b4a51bfe638",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"<C_ID>{conversation_id}<C_ID>\n"
+                        "<output_url>True</output_url>"
+                    ),
+                },
+                {"role": "user", "content": "Create a workbook"},
+            ],
+        }
+
+        with (
+            patch.object(
+                dify_server,
+                "get_dify_backend",
+                return_value=("runtime", "arn:runtime"),
+            ),
+            patch.object(
+                dify_server,
+                "_build_completion",
+                new=AsyncMock(return_value={"id": "chatcmpl-test"}),
+            ) as build_completion,
+        ):
+            asyncio.run(
+                dify_server.chat_completions_by_slug("dev", FakeRequest(body))
+            )
+
+        call = build_completion.await_args.kwargs
+        self.assertTrue(call["output_urls"])
+        self.assertNotIn("<output_url>", json.dumps(call["messages"]))
+
+    def test_assistant_output_url_flag_is_removed_and_enabled(self):
+        conversation_id = "f48bbf06-2c37-4e5a-90ac-12a3be6d8fe1"
+        body = {
+            "user": "user-id",
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": (
+                        f"<C_ID>{conversation_id}<C_ID>\n"
+                        "<output_url>True<output_url>"
+                    ),
+                },
+                {"role": "user", "content": "Create a workbook"},
+            ],
+        }
+
+        session_id, _, messages, output_urls = (
+            dify_server._extract_dify_session_context(body)
+        )
+
+        self.assertEqual(session_id, conversation_id)
+        self.assertTrue(output_urls)
+        self.assertEqual(
+            messages,
+            [{"role": "user", "content": "Create a workbook"}],
+        )
+
+    def test_buffered_artifact_uses_presigned_url_when_enabled(self):
+        artifacts = [
+            {
+                "filename": "report.xlsx",
+                "s3_uri": "s3://bucket/path/report.xlsx",
+                "mime_type": (
+                    "application/vnd.openxmlformats-officedocument."
+                    "spreadsheetml.sheet"
+                ),
+                "size": 120,
+            }
+        ]
+        s3 = FakePresignS3()
+
+        with (
+            patch.object(dify_server, "_resolve_artifacts", return_value=artifacts),
+            patch.object(dify_server, "get_s3_client", return_value=s3),
+        ):
+            content = dify_server._render_buffered_result(
+                "Workbook created.",
+                ("user-id", "session-id", {}),
+                time.time(),
+                output_urls=True,
+            )
+
+        self.assertIn("https://downloads.example/report.xlsx?signature=test", content)
+        self.assertIn("Links expire in 60 minutes.", content)
+        self.assertNotIn("<agentcore-generated-files>", content)
+        self.assertEqual(s3.calls[0][0], "get_object")
+        self.assertEqual(s3.calls[0][1]["ExpiresIn"], 3600)
+
+    def test_streaming_artifact_uses_presigned_url_when_enabled(self):
+        artifacts = [
+            {
+                "filename": "report.xlsx",
+                "s3_uri": "s3://bucket/path/report.xlsx",
+                "mime_type": "application/octet-stream",
+                "size": 120,
+            }
+        ]
+        s3 = FakePresignS3()
+
+        with (
+            patch.object(dify_server, "_resolve_artifacts", return_value=artifacts),
+            patch.object(dify_server, "get_s3_client", return_value=s3),
+        ):
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    iter(["Workbook created."]),
+                    "runtime",
+                    "session-id",
+                    "dev",
+                    "chatcmpl-test",
+                    ("user-id", "session-id", {}),
+                    output_urls=True,
+                )
+            )
+
+        self.assertIn("https://downloads.example/report.xlsx?signature=test", response)
+        self.assertNotIn("<agentcore-generated-files>", response)
 
     def test_artifact_stream_sanitizes_runtime_output(self):
         events = iter(

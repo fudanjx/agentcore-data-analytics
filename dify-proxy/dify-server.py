@@ -83,11 +83,16 @@ DIFY_OFFICE_SOURCE_PROFILE = {
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 MAX_ARTIFACTS_PER_RESPONSE = 10
 MAX_ARTIFACT_MARKER_BYTES = 64 * 1024
+DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _DIFY_CONVERSATION_ID_RE = re.compile(
     r"\s*<C_ID>"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
     r"<C_ID>\s*",
+    re.IGNORECASE,
+)
+_OUTPUT_URL_RE = re.compile(
+    r"\s*<output_url>\s*(true|false)\s*<(?:/)?output_url>\s*",
     re.IGNORECASE,
 )
 _ARTIFACT_START = "<agentcore-artifacts>"
@@ -313,7 +318,7 @@ class DifyArtifactError(Exception):
 
 def _extract_dify_session_context(
     request_body: dict,
-) -> tuple[str, str, list[dict]]:
+) -> tuple[str, str, list[dict], bool]:
     """Resolve optional Dify identity and remove an injected C_ID carrier.
 
     Normal chat requests can supply stable identifiers. Dify's
@@ -358,6 +363,24 @@ def _extract_dify_session_context(
         )
 
     cleaned_messages = [dict(message) for message in messages]
+    output_urls = False
+    for index in range(len(cleaned_messages) - 1, -1, -1):
+        message = cleaned_messages[index]
+        content = message.get("content")
+        if message.get("role") != "assistant" or not isinstance(content, str):
+            continue
+        matches = list(_OUTPUT_URL_RE.finditer(content))
+        if not matches:
+            continue
+        output_urls = output_urls or any(
+            match.group(1).lower() == "true" for match in matches
+        )
+        cleaned_content = _OUTPUT_URL_RE.sub("", content)
+        if cleaned_content.strip():
+            message["content"] = cleaned_content
+        else:
+            del cleaned_messages[index]
+
     session_id = None
     for index, message in enumerate(cleaned_messages):
         content = message.get("content")
@@ -381,7 +404,7 @@ def _extract_dify_session_context(
             "OpenAI-compatible provider validation"
         )
 
-    return session_id, user_id, cleaned_messages
+    return session_id, user_id, cleaned_messages, output_urls
 
 
 def _inject_dify_artifact_context(
@@ -420,9 +443,9 @@ outputs only inside an `<agentcore-artifacts>` JSON marker, listing the S3 URI
 and user-facing filename for each output.
 
 Do not generate a presigned URL and do not expose an S3 URI in user-visible
-prose. The trusted proxy validates ownership and returns the filename and S3 URI
-to the frontend inside an `<agentcore-generated-files>` JSON envelope. The
-frontend obtains a download URL from its artifact backend only when needed.
+prose. The trusted proxy validates ownership and returns either its normal
+`<agentcore-generated-files>` JSON envelope or short-lived download links,
+according to the request's trusted output setting.
 For html, just return the html artifact in the chat response don't upload it to s3.
 """
     return [*messages, {"role": "system", "content": instruction}]
@@ -900,6 +923,44 @@ def _format_artifact_references(artifacts: list[dict]) -> str:
     )
 
 
+def _presign_validated_artifacts(artifacts: list[dict]) -> list[dict]:
+    """Create short-lived download URLs only for already validated artifacts."""
+    signed: list[dict] = []
+    for artifact in artifacts:
+        parsed = urlparse(artifact["s3_uri"])
+        filename = _sanitize_filename(artifact["filename"])
+        url = get_s3_client().generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": parsed.netloc,
+                "Key": parsed.path.lstrip("/"),
+                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                "ResponseContentType": artifact["mime_type"],
+            },
+            ExpiresIn=DIFY_ARTIFACT_URL_TTL_SECONDS,
+        )
+        signed.append({**artifact, "download_url": url})
+    return signed
+
+
+def _format_presigned_artifact_links(artifacts: list[dict]) -> str:
+    lines = ["", "Generated files:"]
+    for artifact in artifacts:
+        lines.append(f"- [{artifact['filename']}]({artifact['download_url']})")
+    lines.append(
+        f"Links expire in {DIFY_ARTIFACT_URL_TTL_SECONDS // 60} minutes."
+    )
+    return "\n".join(lines)
+
+
+def _format_artifacts(artifacts: list[dict], output_urls: bool) -> str:
+    if output_urls:
+        return _format_presigned_artifact_links(
+            _presign_validated_artifacts(artifacts)
+        )
+    return _format_artifact_references(artifacts)
+
+
 def _artifact_error_label(error: Exception) -> str:
     if isinstance(error, DifyArtifactError):
         return f"{type(error).__name__}:{error.code}"
@@ -910,6 +971,7 @@ def _render_buffered_result(
     result_text: str,
     artifact_context: tuple[str, str, dict],
     request_started_at: float,
+    output_urls: bool = False,
 ) -> str:
     sanitizer = _ArtifactStreamSanitizer()
     clean_text = "".join(sanitizer.feed(result_text))
@@ -927,7 +989,14 @@ def _render_buffered_result(
         )
         return clean_text + _ARTIFACT_ERROR_TEXT
     if artifacts:
-        return clean_text + "\n" + _format_artifact_references(artifacts)
+        try:
+            return clean_text + "\n" + _format_artifacts(artifacts, output_urls)
+        except Exception as error:
+            logger.warning(
+                "Dify artifact delivery failed: %s",
+                _artifact_error_label(error),
+            )
+            return clean_text + _ARTIFACT_ERROR_TEXT
     if sanitizer.artifact_problem:
         return clean_text + _ARTIFACT_ERROR_TEXT
     return clean_text
@@ -940,6 +1009,7 @@ def _sse_artifact_stream(
     model: str,
     completion_id: str,
     artifact_context: tuple[str, str, dict],
+    output_urls: bool = False,
 ):
     sanitizer = _ArtifactStreamSanitizer()
     request_started_at = time.time()
@@ -987,7 +1057,7 @@ def _sse_artifact_stream(
             request_started_at,
         )
         if artifacts:
-            yield stream_chunk("\n" + _format_artifact_references(artifacts))
+            yield stream_chunk("\n" + _format_artifacts(artifacts, output_urls))
         elif sanitizer.artifact_problem:
             yield stream_chunk(_ARTIFACT_ERROR_TEXT)
     except Exception as error:
@@ -1017,6 +1087,7 @@ async def _build_completion(
     stream: bool,
     session_id: str,
     user_id: str,
+    output_urls: bool = False,
 ):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     logger.info(
@@ -1051,6 +1122,7 @@ async def _build_completion(
                     model,
                     completion_id,
                     artifact_context,
+                    output_urls,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -1077,6 +1149,7 @@ async def _build_completion(
                     model,
                     completion_id,
                     artifact_context,
+                    output_urls,
                 ),
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
@@ -1097,6 +1170,7 @@ async def _build_completion(
         result_text,
         artifact_context,
         request_started_at,
+        output_urls,
     )
     return {
         "id": completion_id,
@@ -1147,7 +1221,9 @@ async def chat_completions_by_slug(slug: str, request: Request):
         return _error(400, "invalid_request", "JSON body must be an object")
 
     try:
-        session_id, user_id, messages = _extract_dify_session_context(body)
+        session_id, user_id, messages, output_urls = (
+            _extract_dify_session_context(body)
+        )
     except HTTPException as error:
         return JSONResponse(status_code=error.status_code, content=error.detail)
 
@@ -1168,6 +1244,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
             stream=bool(body.get("stream", False)),
             session_id=session_id,
             user_id=user_id,
+            output_urls=output_urls,
         )
     except Exception as error:
         logger.error("AgentCore error [%s]: %s", slug, error)
