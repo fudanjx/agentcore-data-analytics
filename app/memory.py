@@ -19,7 +19,7 @@ import boto3
 logger = logging.getLogger(__name__)
 
 REGION = "ap-southeast-1"
-MEMORY_ID = "memory_agentcore_dev-X9UlwN6fTM"
+MEMORY_ID = "memory_runtime_dev-QNTwTS3Onp"
 
 _client = None
 

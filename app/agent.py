@@ -14,10 +14,10 @@ import logging
 import os
 from typing import AsyncIterator
 
-from claude_agent_sdk import ClaudeAgentOptions, ResultMessage, query
+from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 from claude_agent_sdk.types import AssistantMessage, StreamEvent, TextBlock
 
-from app import gateway_proxy, memory
+from app import code_interpreter, gateway_proxy, memory
 
 logger = logging.getLogger(__name__)
 
@@ -155,6 +155,31 @@ def _build_mcp_servers() -> dict:
     }
 
 
+def _build_agent_options(system_prompt: str, mcp_servers: dict) -> ClaudeAgentOptions:
+    bedrock_env = {
+        "CLAUDE_CODE_USE_BEDROCK": "1",
+        "AWS_REGION": "us-east-1",
+        "AWS_DEFAULT_REGION": "us-east-1",
+    }
+    return ClaudeAgentOptions(
+        model=INFERENCE_PROFILE_ARN,
+        cwd="/app",
+        setting_sources=["project"],
+        system_prompt=system_prompt,
+        mcp_servers=mcp_servers,
+        allowed_tools=[
+            "mcp__code_interpreter__execute_code",
+            "mcp__code_interpreter__execute_command",
+        ],
+        skills="all",
+        permission_mode="bypassPermissions",
+        max_turns=50,
+        max_buffer_size=MAX_SDK_BUFFER_BYTES,
+        include_partial_messages=True,
+        env=bedrock_env,
+    )
+
+
 async def stream(
     messages: list[dict],
     actor_id: str | None = None,
@@ -183,67 +208,64 @@ async def stream(
             system_prompt += mem_context
             logger.info("Memory: %d chars of context injected", len(mem_context))
 
-    mcp_servers = _build_mcp_servers()
+    code_interpreter_session_id = await code_interpreter.start_session(session_id)
+    try:
+        mcp_servers = _build_mcp_servers()
+        mcp_servers["code_interpreter"] = code_interpreter.build_mcp_server(
+            code_interpreter_session_id
+        )
+        options = _build_agent_options(system_prompt, mcp_servers)
+    except BaseException:
+        await code_interpreter.stop_session(code_interpreter_session_id)
+        raise
 
     logger.info(
         "Agent invoke: prompt_chars=%d, mcp_servers=%s, actor=%s, session=%s",
         len(prompt), list(mcp_servers.keys()), actor_id, session_id,
     )
 
-    bedrock_env = {
-        "CLAUDE_CODE_USE_BEDROCK": "1",
-        "AWS_REGION": "us-east-1",
-        "AWS_DEFAULT_REGION": "us-east-1",
-    }
-
-    options = ClaudeAgentOptions(
-        model=INFERENCE_PROFILE_ARN,
-        cwd="/app",
-        setting_sources=["project"],
-        system_prompt=system_prompt,
-        mcp_servers=mcp_servers,
-        skills="all",
-        permission_mode="bypassPermissions",
-        max_turns=50,
-        max_buffer_size=MAX_SDK_BUFFER_BYTES,
-        include_partial_messages=True,
-        env=bedrock_env,
-    )
-
     any_text = False
     assistant_buffer: list[str] = []  # accumulated final text for memory.save_turn
-    async for message in query(prompt=prompt, options=options):
-        if isinstance(message, StreamEvent):
-            # Anthropic raw stream events — token-level deltas. This is the path
-            # that gives real streaming to the client.
-            evt = message.event or {}
-            if evt.get("type") == "content_block_delta":
-                delta = evt.get("delta") or {}
-                if delta.get("type") == "text_delta":
-                    text = delta.get("text")
-                    if text:
-                        any_text = True
-                        assistant_buffer.append(text)
-                        yield text
-        elif isinstance(message, AssistantMessage):
-            # Emitted after the full assistant turn. Only yield if StreamEvent
-            # didn't already deliver the text (defensive fallback).
-            if not any_text:
-                for block in message.content:
-                    if isinstance(block, TextBlock) and block.text:
-                        any_text = True
-                        assistant_buffer.append(block.text)
-                        yield block.text
-        elif isinstance(message, ResultMessage):
-            logger.info(
-                "Agent done: is_error=%s stop=%s turns=%d streamed=%s",
-                message.is_error, message.stop_reason, message.num_turns, any_text,
-            )
-            if not any_text and message.result:
-                assistant_buffer.append(message.result)
-                yield message.result
-            elif message.is_error and message.result:
-                yield f"\n\n[error] {message.result}"
+    try:
+        async with ClaudeSDKClient(options=options) as client:
+            await client.query(prompt)
+            async for message in client.receive_response():
+                if isinstance(message, StreamEvent):
+                    # Anthropic raw stream events — token-level deltas. This is the path
+                    # that gives real streaming to the client.
+                    evt = message.event or {}
+                    if evt.get("type") == "content_block_delta":
+                        delta = evt.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text")
+                            if text:
+                                any_text = True
+                                assistant_buffer.append(text)
+                                yield text
+                elif isinstance(message, AssistantMessage):
+                    # Emitted after the full assistant turn. Only yield if StreamEvent
+                    # didn't already deliver the text (defensive fallback).
+                    if not any_text:
+                        for block in message.content:
+                            if isinstance(block, TextBlock) and block.text:
+                                any_text = True
+                                assistant_buffer.append(block.text)
+                                yield block.text
+                elif isinstance(message, ResultMessage):
+                    logger.info(
+                        "Agent done: is_error=%s stop=%s turns=%d streamed=%s",
+                        message.is_error,
+                        message.stop_reason,
+                        message.num_turns,
+                        any_text,
+                    )
+                    if not any_text and message.result:
+                        assistant_buffer.append(message.result)
+                        yield message.result
+                    elif message.is_error and message.result:
+                        yield f"\n\n[error] {message.result}"
+    finally:
+        await code_interpreter.stop_session(code_interpreter_session_id)
 
     # Persist this turn to AgentCore Memory. Fire-and-forget in a thread so
     # we don't delay the SSE response completion.

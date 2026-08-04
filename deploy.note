@@ -35,7 +35,7 @@ kubectl get svc agentcore-dify-proxy-internal \
 ###agentcore
 
 # Bash
-export TAG=v0.0.2
+export TAG=v0.0.3
 docker buildx build --platform linux/arm64 --push \
   -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG} .
 

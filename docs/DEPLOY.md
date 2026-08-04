@@ -56,10 +56,17 @@ python3 infra/deploy.py            # creates IAM role + Runtime + Endpoint (idem
 The IAM role provisioned by `infra/deploy.py` includes:
 - `bedrock:InvokeModel*` on the inference profile
 - `bedrock-agentcore:InvokeGateway` on the three gateway ARNs (nuh, ah, timesfm)
+- `bedrock-agentcore:StartCodeInterpreterSession`/`InvokeCodeInterpreter`/
+  `StopCodeInterpreterSession` on the configured custom Code Interpreter
 - `s3:GetObject`/`ListBucket` on the Skills bucket
 - `bedrock-agentcore:CreateEvent`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
 - `ec2:CreateNetworkInterface`/... for VPC mode
 - No RDS or Secrets Manager access — this container no longer needs it
+
+The Runtime receives `CODE_INTERPRETER_ID` from `infra/deploy.py`. The Runtime
+role manages Code Interpreter sessions; the custom Code Interpreter's own
+execution role must grant `s3:GetObject` for uploaded-file prefixes and
+`s3:PutObject` for generated-artifact prefixes.
 
 ### Step 2 — Verify
 

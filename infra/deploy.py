@@ -1,7 +1,8 @@
 """Deploy AgentCore POC.
 
 Creates/updates:
-  1. IAM role for AgentCore Runtime — grants Bedrock invoke, Gateway invoke, S3 document/skills read
+  1. IAM role for AgentCore Runtime — grants Bedrock, Gateway, Code Interpreter,
+     Memory, and S3 Skills access
   2. AgentCore Runtime  — hosts the agent container (ECR image) in VPC mode
   3. AgentCore Endpoint — named endpoint for the runtime
 
@@ -42,13 +43,17 @@ GATEWAY_ARNS = [
 SKILLS_BUCKET = "ah-data-analytics"
 SKILLS_PREFIX = "skills/"
 
-# Dify-managed documents passed to the runtime as s3:// references.
-DOCUMENTS_BUCKET = "ah-dify"
-DOCUMENTS_PREFIX = "upload_files/"
+# Managed Code Interpreter exposed to the Claude Agent SDK as an MCP tool.
+CODE_INTERPRETER_ID = os.environ.get(
+    "CODE_INTERPRETER_ID",
+    "code_interpreter_runtime_dev-PEpoCecsBL",
+)
 
-# AgentCore Memory (shared with the harness for unified user facts across agents)
-# MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia"
-MEMORY_ARN = "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/memory_agentcore_dev-X9UlwN6fTM"
+# AgentCore Memory used by app/memory.py.
+MEMORY_ARN = (
+    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
+    "memory/memory_runtime_dev-QNTwTS3Onp"
+)
 iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
 sts = boto3.client("sts", region_name=REGION)
@@ -64,6 +69,10 @@ def get_account_id() -> str:
 
 def ensure_runtime_role() -> str:
     """Create or update the AgentCore Runtime IAM role. Returns ARN."""
+    code_interpreter_arn = (
+        f"arn:aws:bedrock-agentcore:{REGION}:{get_account_id()}:"
+        f"code-interpreter-custom/{CODE_INTERPRETER_ID}"
+    )
     trust = {
         "Version": "2012-10-17",
         "Statement": [{
@@ -95,6 +104,20 @@ def ensure_runtime_role() -> str:
                 "Resource": GATEWAY_ARNS,
             },
             {
+                # The runtime owns the agent loop, so it must explicitly manage
+                # request-scoped sessions for its configured Code Interpreter.
+                "Effect": "Allow",
+                "Action": [
+                    "bedrock-agentcore:StartCodeInterpreterSession",
+                    "bedrock-agentcore:InvokeCodeInterpreter",
+                    "bedrock-agentcore:StopCodeInterpreterSession",
+                ],
+                "Resource": [
+                    code_interpreter_arn,
+                    f"{code_interpreter_arn}/*",
+                ],
+            },
+            {
                 # Read Agent Skills from S3 at container startup
                 "Effect": "Allow",
                 "Action": ["s3:GetObject", "s3:ListBucket"],
@@ -102,12 +125,6 @@ def ensure_runtime_role() -> str:
                     f"arn:aws:s3:::{SKILLS_BUCKET}",
                     f"arn:aws:s3:::{SKILLS_BUCKET}/{SKILLS_PREFIX}*",
                 ],
-            },
-            {
-                # Download only Dify's uploaded documents referenced by prompts.
-                "Effect": "Allow",
-                "Action": "s3:GetObject",
-                "Resource": f"arn:aws:s3:::{DOCUMENTS_BUCKET}/{DOCUMENTS_PREFIX}*",
             },
             {
                 # AgentCore Memory — retrieve prior context and save turns
@@ -184,6 +201,8 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
     """Create or update the AgentCore Runtime. Returns runtime ID."""
     env_vars = {
         "AWS_DEFAULT_REGION": REGION,
+        "CODE_INTERPRETER_ID": CODE_INTERPRETER_ID,
+        "CODE_INTERPRETER_REGION": REGION,
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
     }

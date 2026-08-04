@@ -8,11 +8,20 @@ class FakeClaudeAgentOptions:
         self.__dict__.update(kwargs)
 
 
+def fake_tool(*_args, **_kwargs):
+    def decorate(function):
+        return function
+
+    return decorate
+
+
 # The local test environment does not need the container-only Claude SDK.
 sdk = types.ModuleType("claude_agent_sdk")
 sdk.ClaudeAgentOptions = FakeClaudeAgentOptions
+sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
 sdk.ResultMessage = type("ResultMessage", (), {})
-sdk.query = lambda **kwargs: None
+sdk.create_sdk_mcp_server = lambda **kwargs: kwargs
+sdk.tool = fake_tool
 sdk_types = types.ModuleType("claude_agent_sdk.types")
 sdk_types.AssistantMessage = type("AssistantMessage", (), {})
 sdk_types.StreamEvent = type("StreamEvent", (), {})
@@ -38,14 +47,48 @@ def test_document_input_reaches_agent_unchanged(monkeypatch):
         "</DOCUMENT_INPUT>"
     )
     captured = {}
+    stopped_sessions = []
 
-    async def fake_query(*, prompt, options):
-        captured["prompt"] = prompt
-        captured["options"] = options
-        if False:
-            yield None
+    class FakeClaudeSDKClient:
+        def __init__(self, *, options):
+            captured["options"] = options
 
-    monkeypatch.setattr(agent, "query", fake_query)
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def query(self, prompt):
+            captured["prompt"] = prompt
+
+        async def receive_response(self):
+            if False:
+                yield None
+
+    async def fake_start_session(runtime_session_id):
+        captured["runtime_session_id"] = runtime_session_id
+        return "code-interpreter-session-id"
+
+    async def fake_stop_session(code_interpreter_session_id):
+        stopped_sessions.append(code_interpreter_session_id)
+
+    monkeypatch.setattr(agent, "ClaudeSDKClient", FakeClaudeSDKClient)
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "start_session",
+        fake_start_session,
+    )
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "stop_session",
+        fake_stop_session,
+    )
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "build_mcp_server",
+        lambda session_id: {"session_id": session_id},
+    )
 
     async def invoke():
         return [
@@ -61,6 +104,12 @@ def test_document_input_reaches_agent_unchanged(monkeypatch):
     assert asyncio.run(invoke()) == []
     assert document_input in captured["options"].system_prompt
     assert captured["prompt"] == "Analyze the uploaded file."
+    assert captured["runtime_session_id"] is None
+    assert captured["options"].mcp_servers["code_interpreter"] == {
+        "session_id": "code-interpreter-session-id"
+    }
+    assert "mcp__code_interpreter__execute_code" in captured["options"].allowed_tools
+    assert stopped_sessions == ["code-interpreter-session-id"]
     assert "downloaded by application" not in captured["options"].system_prompt
     assert not hasattr(agent, "_document_payload_from_s3_uris")
     assert not hasattr(agent, "_download_document")
