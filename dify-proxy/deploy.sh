@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${AWS_DEFAULT_REGION:-ap-southeast-1}"
-TAG="${TAG:-v0.0.2}"
+TAG="${TAG:-v0.0.3}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 IMAGE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentcore-dify-proxy:${TAG}"
 
@@ -18,6 +18,10 @@ kubectl apply -f "${SCRIPT_DIR}/k8s/"
 echo "==> Deploying ${IMAGE}"
 kubectl set image deployment/agentcore-dify-proxy \
     dify-proxy="${IMAGE}" \
+    --namespace agentcore
+
+echo "==> Restarting Deployment to pull the rebuilt tag"
+kubectl rollout restart deployment/agentcore-dify-proxy \
     --namespace agentcore
 
 echo "==> Waiting for rollout"

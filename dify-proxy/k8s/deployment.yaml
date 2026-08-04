@@ -18,8 +18,8 @@ spec:
       serviceAccountName: agentcore-proxy
       containers:
         - name: dify-proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.2
-          imagePullPolicy: IfNotPresent
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.3
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:

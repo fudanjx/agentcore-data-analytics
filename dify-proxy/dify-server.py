@@ -1,4 +1,4 @@
-"""Dify model-provider proxy for Amazon Bedrock AgentCore Harnesses.
+"""Dify model-provider proxy for Amazon Bedrock AgentCore backends.
 
 Only the OpenAI-compatible endpoints used by Dify are exposed:
 
@@ -11,9 +11,10 @@ identity. OpenAI-compatible provider probes omit them, so the proxy supplies
 request-scoped identifiers when absent. Non-UUID user strings are mapped to a
 stable UUID. An assistant message carrying the marker is removed completely
 before invoking AgentCore, because the model does not support assistant prefill.
-Generated Office artifacts are independently validated in S3 and replaced with
-short-lived download links. This file intentionally contains no OpenWebUI,
-native Dify App API, generic Runtime, or file-upload proxy routes.
+Generated Office artifacts from Harnesses are independently validated in S3.
+Runtime backends use the Runtime's native OpenAI-compatible SSE response. This
+file intentionally contains no OpenWebUI, native Dify App API, or file-upload
+proxy routes.
 """
 
 import json
@@ -39,6 +40,19 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
+
+# READY runtimes discovered through the AgentCore control plane, keyed by
+# agentRuntimeName. Names beginning with ``agentcore_`` also receive a short
+# alias, so ``agentcore_dev`` remains available through the ``dev`` slug.
+DIFY_RUNTIMES: dict[str, str] = {}
+DIFY_RUNTIME_DISCOVERY_ENABLED = os.environ.get(
+    "DIFY_RUNTIME_DISCOVERY_ENABLED",
+    "true",
+).lower() not in {"0", "false", "no", "off"}
+DIFY_RUNTIME_DISCOVERY_TTL_SECONDS = max(
+    1,
+    int(os.environ.get("DIFY_RUNTIME_DISCOVERY_TTL_SECONDS", "300")),
+)
 
 # READY harnesses discovered through the AgentCore control plane, keyed by
 # harnessName for use as the endpoint slug.
@@ -82,11 +96,14 @@ _ARTIFACT_ERROR_TEXT = (
     "\n\nGenerated file could not be made available. Please try again."
 )
 
-app = FastAPI(title="AgentCore Dify Proxy", version="1.0.2")
+app = FastAPI(title="AgentCore Dify Proxy", version="1.1.0")
 
 _agentcore_client = None
 _agentcore_control_client = None
 _s3_client = None
+_runtime_discovery_lock = threading.Lock()
+_runtime_discovery_attempted = False
+_runtime_discovery_refreshed_at = 0.0
 _harness_discovery_lock = threading.Lock()
 _harness_discovery_attempted = False
 _harness_discovery_refreshed_at = 0.0
@@ -122,6 +139,76 @@ def get_agentcore_control_client():
             ),
         )
     return _agentcore_control_client
+
+
+def _runtime_slugs(name: str) -> tuple[str, ...]:
+    """Return the canonical runtime name and its optional friendly alias."""
+    if name.startswith("agentcore_") and len(name) > len("agentcore_"):
+        return name, name[len("agentcore_") :]
+    return (name,)
+
+
+def refresh_dify_runtimes(force: bool = False) -> dict[str, str]:
+    """Discover READY runtimes, retaining the last successful result on failure."""
+    global _runtime_discovery_attempted
+    global _runtime_discovery_refreshed_at
+
+    if not DIFY_RUNTIME_DISCOVERY_ENABLED:
+        return dict(DIFY_RUNTIMES)
+
+    with _runtime_discovery_lock:
+        now = time.monotonic()
+        cache_is_fresh = (
+            _runtime_discovery_attempted
+            and now - _runtime_discovery_refreshed_at
+            < DIFY_RUNTIME_DISCOVERY_TTL_SECONDS
+        )
+        if not force and cache_is_fresh:
+            return dict(DIFY_RUNTIMES)
+
+        _runtime_discovery_attempted = True
+        _runtime_discovery_refreshed_at = now
+        try:
+            discovered = {}
+            paginator = get_agentcore_control_client().get_paginator(
+                "list_agent_runtimes"
+            )
+            for page in paginator.paginate():
+                for runtime in page.get("agentRuntimes", []):
+                    name = runtime.get("agentRuntimeName")
+                    arn = runtime.get("agentRuntimeArn")
+                    if (
+                        runtime.get("status") == "READY"
+                        and isinstance(name, str)
+                        and name
+                        and isinstance(arn, str)
+                        and arn
+                    ):
+                        discovered[name] = arn
+            for name, arn in list(discovered.items()):
+                for alias in _runtime_slugs(name)[1:]:
+                    discovered.setdefault(alias, arn)
+        except Exception as error:
+            logger.warning(
+                "Unable to discover AgentCore runtimes; retaining the last "
+                "successful discovery result: %s",
+                error,
+            )
+            return dict(DIFY_RUNTIMES)
+
+        DIFY_RUNTIMES.clear()
+        DIFY_RUNTIMES.update(discovered)
+        logger.info(
+            "Available Dify runtime backends: %s",
+            ", ".join(sorted(DIFY_RUNTIMES)),
+        )
+        return dict(DIFY_RUNTIMES)
+
+
+def get_dify_runtime_arn(slug: str) -> str | None:
+    """Return a cached runtime ARN, refreshing discovery when its TTL expires."""
+    runtimes = refresh_dify_runtimes()
+    return runtimes.get(slug)
 
 
 def refresh_dify_harnesses(force: bool = False) -> dict[str, str]:
@@ -182,6 +269,18 @@ def get_dify_harness_arn(slug: str) -> str | None:
     """Return a cached harness ARN, refreshing discovery when its TTL expires."""
     harnesses = refresh_dify_harnesses()
     return harnesses.get(slug)
+
+
+def get_dify_backend(slug: str) -> tuple[str, str] | None:
+    """Resolve a slug to (backend type, ARN), preferring READY runtimes."""
+    runtime_arn = get_dify_runtime_arn(slug)
+    if runtime_arn:
+        return "runtime", runtime_arn
+
+    harness_arn = get_dify_harness_arn(slug)
+    if harness_arn:
+        return "harness", harness_arn
+    return None
 
 
 def get_s3_client():
@@ -409,6 +508,84 @@ def _stream_harness_events(
                     )
                     continue
                 raise
+
+
+def _runtime_kwargs(
+    messages: list[dict],
+    runtime_arn: str,
+    session_id: str,
+    user_id: str,
+) -> dict:
+    """Build the request expected by an AgentCore Runtime backend."""
+    payload = {
+        "messages": messages,
+        "chat_id": session_id,
+        "model_item": {"info": {"user_id": user_id}},
+    }
+    return {
+        "agentRuntimeArn": runtime_arn,
+        "contentType": "application/json",
+        "accept": "text/event-stream",
+        "payload": json.dumps(payload).encode(),
+        "runtimeSessionId": session_id,
+        "runtimeUserId": user_id,
+    }
+
+
+def _stream_runtime_events(
+    messages: list[dict],
+    runtime_arn: str,
+    session_id: str,
+    user_id: str,
+):
+    """Yield text deltas from a Runtime's OpenAI-compatible SSE response."""
+    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
+
+    for attempt in range(2):
+        first_token_sent = False
+        try:
+            response = get_agentcore_client().invoke_agent_runtime(**kwargs)
+            for raw_line in response["response"].iter_lines():
+                if not raw_line:
+                    continue
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                if not line.startswith("data: "):
+                    continue
+                payload = line[6:]
+                if payload == "[DONE]":
+                    return
+                try:
+                    event = json.loads(payload)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                choices = event.get("choices") or []
+                if not choices:
+                    continue
+                text = (choices[0].get("delta") or {}).get("content")
+                if text:
+                    first_token_sent = True
+                    yield text
+            return
+        except botocore.exceptions.ConnectionClosedError:
+            if attempt == 0 and not first_token_sent:
+                logger.warning(
+                    "Runtime cold-start disconnect (session=%s), retrying",
+                    session_id,
+                )
+                continue
+            raise
+
+
+def _invoke_runtime_buffered(
+    messages: list[dict],
+    runtime_arn: str,
+    session_id: str,
+    user_id: str,
+) -> str:
+    """Collect a Runtime SSE response for an OpenAI non-streaming request."""
+    return "".join(
+        _stream_runtime_events(messages, runtime_arn, session_id, user_id)
+    )
 
 
 class _ArtifactStreamSanitizer:
@@ -756,11 +933,10 @@ def _render_buffered_result(
     return clean_text
 
 
-def _sse_stream(
-    messages: list[dict],
-    harness_arn: str,
+def _sse_artifact_stream(
+    events,
+    backend_type: str,
     session_id: str,
-    actor_id: str,
     model: str,
     completion_id: str,
     artifact_context: tuple[str, str, dict],
@@ -784,17 +960,17 @@ def _sse_stream(
         return f"data: {json.dumps(chunk)}\n\n"
 
     try:
-        for text in _stream_harness_events(
-            messages,
-            harness_arn,
-            session_id,
-            actor_id,
-        ):
+        for text in events:
             for content in sanitizer.feed(text):
                 if content:
                     yield stream_chunk(content)
     except Exception as error:
-        logger.error("Dify Harness stream error (session=%s): %s", session_id, error)
+        logger.error(
+            "Dify %s stream error (session=%s): %s",
+            backend_type,
+            session_id,
+            error,
+        )
         yield (
             "data: "
             + json.dumps(
@@ -834,7 +1010,8 @@ def _sse_stream(
 
 async def _build_completion(
     messages: list[dict],
-    harness_arn: str,
+    backend_type: str,
+    backend_arn: str,
     slug: str,
     model: str,
     stream: bool,
@@ -842,15 +1019,9 @@ async def _build_completion(
     user_id: str,
 ):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    artifact_context = (
-        user_id,
-        session_id,
-        DIFY_OFFICE_SOURCE_PROFILE,
-    )
-    request_started_at = time.time()
-
     logger.info(
-        "Dify request [%s]: model=%s turns=%d stream=%s session=%s actor=%s",
+        "Dify request [%s/%s]: model=%s turns=%d stream=%s session=%s actor=%s",
+        backend_type,
         slug,
         model,
         len(messages),
@@ -859,31 +1030,68 @@ async def _build_completion(
         user_id,
     )
 
-    if stream:
-        return StreamingResponse(
-            _sse_stream(
-                messages,
-                harness_arn,
-                session_id,
-                user_id,
-                model,
-                completion_id,
-                artifact_context,
-            ),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    artifact_context = (
+        user_id,
+        session_id,
+        DIFY_OFFICE_SOURCE_PROFILE,
+    )
+    request_started_at = time.time()
+    if backend_type == "runtime":
+        if stream:
+            return StreamingResponse(
+                _sse_artifact_stream(
+                    _stream_runtime_events(
+                        messages,
+                        backend_arn,
+                        session_id,
+                        user_id,
+                    ),
+                    backend_type,
+                    session_id,
+                    model,
+                    completion_id,
+                    artifact_context,
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
+        result_text = await run_in_threadpool(
+            _invoke_runtime_buffered,
+            messages,
+            backend_arn,
+            session_id,
+            user_id,
         )
+    else:
+        if stream:
+            return StreamingResponse(
+                _sse_artifact_stream(
+                    _stream_harness_events(
+                        messages,
+                        backend_arn,
+                        session_id,
+                        user_id,
+                    ),
+                    backend_type,
+                    session_id,
+                    model,
+                    completion_id,
+                    artifact_context,
+                ),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+            )
 
-    result_text = await run_in_threadpool(
-        lambda: "".join(
-            _stream_harness_events(
-                messages,
-                harness_arn,
-                session_id,
-                user_id,
+        result_text = await run_in_threadpool(
+            lambda: "".join(
+                _stream_harness_events(
+                    messages,
+                    backend_arn,
+                    session_id,
+                    user_id,
+                )
             )
         )
-    )
     result_text = await run_in_threadpool(
         _render_buffered_result,
         result_text,
@@ -916,7 +1124,7 @@ def health():
 
 @app.get("/{slug}/v1/models")
 def models_by_slug(slug: str):
-    if get_dify_harness_arn(slug) is None:
+    if get_dify_backend(slug) is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
     return {
         "object": "list",
@@ -926,9 +1134,10 @@ def models_by_slug(slug: str):
 
 @app.post("/{slug}/v1/chat/completions")
 async def chat_completions_by_slug(slug: str, request: Request):
-    harness_arn = await run_in_threadpool(get_dify_harness_arn, slug)
-    if harness_arn is None:
+    backend = await run_in_threadpool(get_dify_backend, slug)
+    if backend is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
+    backend_type, backend_arn = backend
 
     try:
         body = await request.json()
@@ -952,7 +1161,8 @@ async def chat_completions_by_slug(slug: str, request: Request):
     try:
         return await _build_completion(
             messages=messages,
-            harness_arn=harness_arn,
+            backend_type=backend_type,
+            backend_arn=backend_arn,
             slug=slug,
             model=body.get("model", slug),
             stream=bool(body.get("stream", False)),
