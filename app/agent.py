@@ -224,6 +224,7 @@ def _build_agent_options(system_prompt: str, mcp_servers: dict) -> ClaudeAgentOp
         "CLAUDE_CODE_USE_BEDROCK": "1",
         "AWS_REGION": "us-east-1",
         "AWS_DEFAULT_REGION": "us-east-1",
+        "ENABLE_PROMPT_CACHING_1H": "1"
     }
     return ClaudeAgentOptions(
         model=INFERENCE_PROFILE_ARN,
