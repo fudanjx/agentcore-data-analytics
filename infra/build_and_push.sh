@@ -2,7 +2,7 @@
 set -euo pipefail
 
 REPO=agentcore-poc
-REGION=${AWS_DEFAULT_REGION:-us-east-1}
+REGION=ap-southeast-1
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}"
 
