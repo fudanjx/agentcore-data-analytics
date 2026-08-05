@@ -71,16 +71,51 @@ class FakeMemoryClient:
         }
 
 
+class FakeMemoryControlClient:
+    def __init__(self):
+        self.get_calls = []
+
+    def get_memory(self, **kwargs):
+        self.get_calls.append(kwargs)
+        return {
+            "memory": {
+                "strategies": [
+                    {
+                        "strategyId": "preference-id",
+                        "type": "USER_PREFERENCE",
+                        "status": "ACTIVE",
+                    },
+                    {
+                        "strategyId": "inactive-semantic-id",
+                        "type": "SEMANTIC",
+                        "status": "CREATING",
+                    },
+                    {
+                        "strategyId": "summary-id",
+                        "type": "SUMMARIZATION",
+                        "status": "ACTIVE",
+                    },
+                    {
+                        "strategyId": "semantic-id",
+                        "type": "SEMANTIC",
+                        "status": "ACTIVE",
+                    },
+                ]
+            }
+        }
+
+
 def test_retrieves_short_and_long_term_memory(monkeypatch):
     client = FakeMemoryClient()
+    control_client = FakeMemoryControlClient()
     monkeypatch.setattr(memory, "_client", client)
+    monkeypatch.setattr(memory, "_control_client", control_client)
+    monkeypatch.setattr(memory, "_strategy_ids", None)
     monkeypatch.setattr(memory, "MEMORY_ID", "memory-id")
-    monkeypatch.setattr(memory, "SEMANTIC_STRATEGY_ID", "semantic-id")
-    monkeypatch.setattr(memory, "PREFERENCE_STRATEGY_ID", "preference-id")
-    monkeypatch.setattr(memory, "SUMMARY_STRATEGY_ID", "summary-id")
 
     short_term = memory.retrieve_short_term_context("actor-id", "session-id")
     long_term = memory.retrieve_long_term_context("actor-id", "hi")
+    memory._get_strategy_ids()
 
     assert short_term.index("USER: Hello") < short_term.index("USER: What did I say?")
     assert "ASSISTANT: Hi there." in short_term
@@ -96,6 +131,7 @@ def test_retrieves_short_and_long_term_memory(monkeypatch):
             "maxResults": memory.MAX_SHORT_TERM_EVENTS,
         }
     ]
+    assert control_client.get_calls == [{"memoryId": "memory-id"}]
     assert [call["namespace"] for call in client.retrieve_calls] == [
         "/strategies/semantic-id/actors/actor-id/",
         "/strategies/preference-id/actors/actor-id/",
@@ -115,7 +151,13 @@ def test_missing_memory_is_non_fatal(monkeypatch):
         def retrieve_memory_records(self, **_kwargs):
             raise RuntimeError("long-term unavailable")
 
+    class FailingControlClient:
+        def get_memory(self, **_kwargs):
+            raise RuntimeError("strategy discovery unavailable")
+
     monkeypatch.setattr(memory, "_client", FailingClient())
+    monkeypatch.setattr(memory, "_control_client", FailingControlClient())
+    monkeypatch.setattr(memory, "_strategy_ids", None)
 
     assert memory.retrieve_short_term_context("actor-id", "session-id") == ""
     assert memory.retrieve_long_term_context("actor-id", "question") == ""

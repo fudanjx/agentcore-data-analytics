@@ -49,20 +49,8 @@ CODE_INTERPRETER_ID = os.environ.get(
     "code_interpreter_runtime_dev-PEpoCecsBL",
 )
 
-# AgentCore Memory and its generated long-term strategy IDs.
+# AgentCore Memory. The Runtime discovers its active long-term strategy IDs.
 MEMORY_ID = os.environ.get("MEMORY_ID", "memory_runtime_dev-QNTwTS3Onp")
-MEMORY_SEMANTIC_STRATEGY_ID = os.environ.get(
-    "MEMORY_SEMANTIC_STRATEGY_ID",
-    "semantic_builtin_8v5qp-vuvXBMFd6q",
-)
-MEMORY_PREFERENCE_STRATEGY_ID = os.environ.get(
-    "MEMORY_PREFERENCE_STRATEGY_ID",
-    "preference_builtin_8v5qp-YXpdmYG70z",
-)
-MEMORY_SUMMARY_STRATEGY_ID = os.environ.get(
-    "MEMORY_SUMMARY_STRATEGY_ID",
-    "summary_builtin_8v5qp-qRrGiHGRMt",
-)
 MEMORY_ARN = f"arn:aws:bedrock-agentcore:{REGION}:964340114883:memory/{MEMORY_ID}"
 iam = boto3.client("iam")
 agentcore_control = boto3.client("bedrock-agentcore-control", region_name=REGION)
@@ -141,6 +129,7 @@ def ensure_runtime_role() -> str:
                 "Effect": "Allow",
                 "Action": [
                     "bedrock-agentcore:CreateEvent",
+                    "bedrock-agentcore:GetMemory",
                     "bedrock-agentcore:RetrieveMemoryRecords",
                     "bedrock-agentcore:ListEvents",
                     "bedrock-agentcore:GetMemoryRecord",
@@ -215,9 +204,6 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
         "CODE_INTERPRETER_REGION": REGION,
         "MEMORY_ID": MEMORY_ID,
         "MEMORY_REGION": REGION,
-        "MEMORY_SEMANTIC_STRATEGY_ID": MEMORY_SEMANTIC_STRATEGY_ID,
-        "MEMORY_PREFERENCE_STRATEGY_ID": MEMORY_PREFERENCE_STRATEGY_ID,
-        "MEMORY_SUMMARY_STRATEGY_ID": MEMORY_SUMMARY_STRATEGY_ID,
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
         "CLAUDE_CODE_USE_BEDROCK": "1",
     }

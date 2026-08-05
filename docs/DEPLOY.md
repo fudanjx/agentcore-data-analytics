@@ -59,7 +59,7 @@ The IAM role provisioned by `infra/deploy.py` includes:
 - `bedrock-agentcore:StartCodeInterpreterSession`/`InvokeCodeInterpreter`/
   `StopCodeInterpreterSession` on the configured custom Code Interpreter
 - `s3:GetObject`/`ListBucket` on the Skills bucket
-- `bedrock-agentcore:CreateEvent`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
+- `bedrock-agentcore:CreateEvent`/`GetMemory`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
 - `ec2:CreateNetworkInterface`/... for VPC mode
 - No RDS or Secrets Manager access — this container no longer needs it
 
@@ -68,13 +68,37 @@ role manages Code Interpreter sessions; the custom Code Interpreter's own
 execution role must grant `s3:GetObject` for uploaded-file prefixes and
 `s3:PutObject` for generated-artifact prefixes.
 
-The Runtime also receives the AgentCore Memory ID and generated semantic,
-preference, and summary strategy IDs. On every request it loads recent raw
-events for the current actor/session as short-term memory, then searches those
-strategy namespaces for relevant cross-session long-term memory. Summary
-records are stored below session-specific namespaces and are retrieved using
-their actor-level namespace prefix. The proxy must therefore pass a stable user
-ID and conversation UUID.
+The Runtime receives the AgentCore Memory ID and uses `GetMemory` to discover
+and cache its active semantic, preference, and summary strategies. On every
+request it loads recent raw events for the current actor/session as short-term
+memory, then searches those strategy namespaces for relevant cross-session
+long-term memory. Summary records are stored below session-specific namespaces
+and are retrieved using their actor-level namespace prefix. The proxy must
+therefore pass a stable user ID and conversation UUID.
+
+To inventory long-term records without changing them:
+
+```bash
+python infra/clear_long_term_memory.py \
+  --memory-id memory_runtime_dev-QNTwTS3Onp
+```
+
+The script is dry-run by default and does not display record content. Clearing
+all long-term records requires both explicit execution and an exact target-ID
+confirmation:
+
+```bash
+python infra/clear_long_term_memory.py \
+  --memory-id memory_runtime_dev-QNTwTS3Onp \
+  --execute \
+  --confirm-memory-id memory_runtime_dev-QNTwTS3Onp
+```
+
+The caller needs `bedrock-agentcore:ListMemoryRecords` and
+`bedrock-agentcore:BatchDeleteMemoryRecords` on the Memory ARN. This operation
+does not delete short-term events, strategies, or the Memory resource. Pause
+new traffic first if the memory must remain empty, because new turns or
+in-flight extraction jobs can create records during or after maintenance.
 
 ### Step 2 — Verify
 
