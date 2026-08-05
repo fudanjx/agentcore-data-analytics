@@ -222,8 +222,8 @@ def _build_mcp_servers() -> dict:
 def _build_agent_options(system_prompt: str, mcp_servers: dict) -> ClaudeAgentOptions:
     bedrock_env = {
         "CLAUDE_CODE_USE_BEDROCK": "1",
-        "AWS_REGION": "us-east-1",
-        "AWS_DEFAULT_REGION": "us-east-1",
+        "AWS_REGION": "ap-southeast-1",
+        "AWS_DEFAULT_REGION": "ap-southeast-1",
         "ENABLE_PROMPT_CACHING_1H": "1"
     }
     return ClaudeAgentOptions(
