@@ -41,12 +41,6 @@ class AgentStep:
 
 
 _STEP_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
-_MCP_SERVER_LABELS = {
-    "ah": "AH",
-    "nuh": "NUH",
-    "fm": "TimesFM",
-    "code_interpreter": "Code Interpreter",
-}
 
 
 def _safe_step_name(value: object, fallback: str) -> str:
@@ -69,7 +63,7 @@ def _tool_step(block: ToolUseBlock) -> AgentStep:
     if raw_name.startswith("mcp__"):
         parts = raw_name.split("__", 2)
         if len(parts) == 3:
-            server = _MCP_SERVER_LABELS.get(parts[1], parts[1].replace("_", " ").title())
+            server = gateway_proxy.mcp_label(parts[1])
             operation = parts[2].replace("_", " ")
             display_name = f"{server}: {operation}"
         else:

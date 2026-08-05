@@ -73,6 +73,11 @@ sys.modules.setdefault("claude_agent_sdk.types", sdk_types)
 
 gateway_proxy = types.ModuleType("app.gateway_proxy")
 gateway_proxy.mcp_urls = lambda: {}
+gateway_proxy.mcp_label = lambda slug: {
+    "nuh": "NUH",
+    "ah": "AH",
+    "fm": "TimesFM",
+}.get(slug, slug.replace("_", " ").title())
 memory = types.ModuleType("app.memory")
 memory.retrieve_short_term_context = lambda *args: ""
 memory.retrieve_long_term_context = lambda *args: ""

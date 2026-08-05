@@ -47,6 +47,23 @@ The poc container no longer talks to RDS directly. It uses the three AgentCore G
 
 ### Step 1 — Build and deploy
 
+Configure the runtime gateways with one JSON environment variable. Each key is
+the MCP server slug used in tool names; `label` is the user-visible tool-status
+name. The URL and ARN must describe the same AgentCore Gateway. The ARN also
+determines the SigV4 signing region and the Runtime role's `InvokeGateway`
+resources.
+
+```bash
+export AGENTCORE_GATEWAYS_JSON='{"nuh":{"label":"NUH","url":"https://nuh-analytics-db-fhbzdmtdta.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/nuh-analytics-db-fhbzdmtdta"},"ah":{"label":"AH","url":"https://ah-analytics-db-gszih4adsx.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-db-gszih4adsx"},"fm":{"label":"TimesFM","url":"https://timesfm-gateway-w4fho4r9um.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/timesfm-gateway-w4fho4r9um"}}'
+```
+
+The current mapping is also shown in `.env.example`. If the variable is
+omitted, the application uses that current three-gateway mapping for backward
+compatibility. `infra/deploy.py` validates the mapping, updates the Runtime IAM
+policy from its ARNs, and passes the canonical JSON into the Runtime container.
+Changing a gateway therefore requires updating this variable and redeploying;
+there is no separate label dictionary to edit.
+
 ```bash
 bash infra/build_and_push.sh       # linux/arm64 → ECR
 export ECR_IMAGE_URI=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
@@ -55,7 +72,7 @@ python3 infra/deploy.py            # creates IAM role + Runtime + Endpoint (idem
 
 The IAM role provisioned by `infra/deploy.py` includes:
 - `bedrock:InvokeModel*` on the inference profile
-- `bedrock-agentcore:InvokeGateway` on the three gateway ARNs (nuh, ah, timesfm)
+- `bedrock-agentcore:InvokeGateway` on the configured gateway ARNs
 - `bedrock-agentcore:StartCodeInterpreterSession`/`InvokeCodeInterpreter`/
   `StopCodeInterpreterSession` on the configured custom Code Interpreter
 - `s3:GetObject`/`ListBucket` on the Skills bucket

@@ -20,8 +20,13 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 
 import boto3
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from app.gateway_config import load_gateway_configs, serialize_gateway_configs
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 RUNTIME_NAME = "agentcore_dev"
@@ -32,12 +37,10 @@ RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
 VPC_SUBNETS = ["subnet-061205c705e0f41d4", "subnet-0466b6e1fbb8a49f3"]
 VPC_SECURITY_GROUPS = ["sg-07258677b7e691e48"]  # agentcore-poc-runtime-sg
 
-# Gateway ARNs the runtime is allowed to invoke via the localhost SigV4 proxy
-GATEWAY_ARNS = [
-    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/nuh-analytics-db-fhbzdmtdta",
-    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-db-gszih4adsx",
-    "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/timesfm-gateway-w4fho4r9um",
-]
+# One configuration drives runtime endpoints/labels and deployment IAM access.
+GATEWAY_CONFIGS = load_gateway_configs()
+GATEWAY_ARNS = [config.arn for config in GATEWAY_CONFIGS.values()]
+AGENTCORE_GATEWAYS_JSON = serialize_gateway_configs(GATEWAY_CONFIGS)
 
 # S3 skills bucket the agent reads on startup
 SKILLS_BUCKET = "ah-data-analytics"
@@ -200,6 +203,7 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
     """Create or update the AgentCore Runtime. Returns runtime ID."""
     env_vars = {
         "AWS_DEFAULT_REGION": REGION,
+        "AGENTCORE_GATEWAYS_JSON": AGENTCORE_GATEWAYS_JSON,
         "CODE_INTERPRETER_ID": CODE_INTERPRETER_ID,
         "CODE_INTERPRETER_REGION": REGION,
         "MEMORY_ID": MEMORY_ID,

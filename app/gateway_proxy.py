@@ -7,8 +7,7 @@ This proxy runs on 127.0.0.1:9000 inside the container and rewrites requests:
 
     Claude SDK  →  http://localhost:9000/<slug>/mcp  →  signed HTTPS  →  Gateway
 
-Slugs map to gateway URLs in GATEWAYS below. Add or edit entries there to
-expose more gateways to the agent.
+Slugs, URLs, display labels, and IAM ARNs come from AGENTCORE_GATEWAYS_JSON.
 
 The proxy loops in a background thread started by main.py's lifespan.
 """
@@ -26,17 +25,15 @@ from botocore.awsrequest import AWSRequest
 from fastapi import FastAPI, Request
 from fastapi.responses import Response
 
+from app.gateway_config import load_gateway_configs
+
 logger = logging.getLogger(__name__)
 
-REGION = "ap-southeast-1"
 SERVICE = "bedrock-agentcore"
 LISTEN_PORT = 9000
 
-GATEWAYS = {
-    "nuh": "https://nuh-analytics-db-fhbzdmtdta.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com",
-    "ah":  "https://ah-analytics-db-gszih4adsx.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com",
-    "fm":  "https://timesfm-gateway-w4fho4r9um.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com",
-}
+GATEWAY_CONFIGS = load_gateway_configs()
+GATEWAYS = {slug: config.url for slug, config in GATEWAY_CONFIGS.items()}
 
 _session = boto3.Session()
 _httpx_client: Optional[httpx.AsyncClient] = None
@@ -49,7 +46,7 @@ def _get_httpx_client() -> httpx.AsyncClient:
     return _httpx_client
 
 
-def _sign(method: str, url: str, headers: dict, body: bytes) -> dict:
+def _sign(method: str, url: str, headers: dict, body: bytes, region: str) -> dict:
     """Freshly SigV4-sign the request and return the headers to forward."""
     creds = _session.get_credentials()
     if creds is None:
@@ -59,7 +56,7 @@ def _sign(method: str, url: str, headers: dict, body: bytes) -> dict:
     # botocore expects Host to be derivable from url; strip any incoming Host
     clean_headers = {k: v for k, v in headers.items() if k.lower() not in ("host", "content-length")}
     aws_req = AWSRequest(method=method, url=url, data=body, headers=clean_headers)
-    SigV4Auth(frozen, SERVICE, REGION).add_auth(aws_req)
+    SigV4Auth(frozen, SERVICE, region).add_auth(aws_req)
     return dict(aws_req.headers.items())
 
 
@@ -71,11 +68,18 @@ async def proxy(slug: str, path: str, request: Request):
     if slug not in GATEWAYS:
         return Response(status_code=404, content=f"Unknown gateway slug: {slug}")
 
-    target_url = f"{GATEWAYS[slug]}/{path}"
+    gateway = GATEWAY_CONFIGS[slug]
+    target_url = f"{gateway.url}/{path}"
     body = await request.body()
 
     try:
-        signed_headers = _sign(request.method, target_url, dict(request.headers), body)
+        signed_headers = _sign(
+            request.method,
+            target_url,
+            dict(request.headers),
+            body,
+            gateway.region,
+        )
     except Exception as e:
         logger.error("SigV4 sign failed for %s: %s", target_url, e)
         return Response(status_code=500, content=f"Sign failed: {e}")
@@ -118,3 +122,11 @@ def start_background() -> threading.Thread:
 def mcp_urls() -> dict[str, str]:
     """Return the localhost URLs the agent should point McpHttpServerConfig at."""
     return {slug: f"http://127.0.0.1:{LISTEN_PORT}/{slug}/mcp" for slug in GATEWAYS}
+
+
+def mcp_label(slug: str) -> str:
+    """Return a configured display label or a safe humanized fallback."""
+    config = GATEWAY_CONFIGS.get(slug)
+    if config:
+        return config.label
+    return slug.replace("_", " ").title()
