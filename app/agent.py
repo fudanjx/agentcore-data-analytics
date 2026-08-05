@@ -12,14 +12,76 @@ Phase 2 refactor:
 import asyncio
 import logging
 import os
+import re
+from dataclasses import dataclass
 from typing import AsyncIterator
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
-from claude_agent_sdk.types import AssistantMessage, StreamEvent, TextBlock
+from claude_agent_sdk.types import (
+    AssistantMessage,
+    StreamEvent,
+    TextBlock,
+    ToolResultBlock,
+    ToolUseBlock,
+    UserMessage,
+)
 
 from app import code_interpreter, gateway_proxy, memory
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class AgentStep:
+    """Sanitized user-visible lifecycle event for one skill or tool call."""
+
+    kind: str
+    name: str
+    status: str
+
+
+_STEP_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
+_MCP_SERVER_LABELS = {
+    "ah": "AH",
+    "nuh": "NUH",
+    "fm": "TimesFM",
+    "code_interpreter": "Code Interpreter",
+}
+
+
+def _safe_step_name(value: object, fallback: str) -> str:
+    normalized = " ".join(str(value or "").split())
+    normalized = _STEP_NAME_UNSAFE_RE.sub("", normalized).strip()
+    return (normalized or fallback)[:120]
+
+
+def _tool_step(block: ToolUseBlock) -> AgentStep:
+    """Convert an SDK tool-use block into safe display metadata."""
+    raw_name = str(block.name or "")
+    if raw_name.lower() == "skill":
+        skill_name = (block.input or {}).get("skill") or (block.input or {}).get("name")
+        return AgentStep(
+            kind="skill",
+            name=_safe_step_name(skill_name, "Agent skill"),
+            status="started",
+        )
+
+    if raw_name.startswith("mcp__"):
+        parts = raw_name.split("__", 2)
+        if len(parts) == 3:
+            server = _MCP_SERVER_LABELS.get(parts[1], parts[1].replace("_", " ").title())
+            operation = parts[2].replace("_", " ")
+            display_name = f"{server}: {operation}"
+        else:
+            display_name = raw_name
+    else:
+        display_name = raw_name.replace("_", " ")
+
+    return AgentStep(
+        kind="tool",
+        name=_safe_step_name(display_name, "Agent tool"),
+        status="started",
+    )
 
 MAX_SDK_BUFFER_BYTES = int(
     os.environ.get("CLAUDE_AGENT_MAX_BUFFER_BYTES", str(10 * 1024 * 1024))
@@ -192,7 +254,7 @@ async def stream(
     messages: list[dict],
     actor_id: str | None = None,
     session_id: str | None = None,
-) -> AsyncIterator[str]:
+) -> AsyncIterator[str | AgentStep]:
     """Yield text deltas from the agent as they arrive.
 
     actor_id / session_id enable AgentCore Memory:
@@ -256,6 +318,7 @@ async def stream(
 
     any_text = False
     assistant_buffer: list[str] = []  # accumulated final text for memory.save_turn
+    active_steps: dict[str, AgentStep] = {}
     try:
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
@@ -273,14 +336,30 @@ async def stream(
                                 assistant_buffer.append(text)
                                 yield text
                 elif isinstance(message, AssistantMessage):
-                    # Emitted after the full assistant turn. Only yield if StreamEvent
-                    # didn't already deliver the text (defensive fallback).
-                    if not any_text:
-                        for block in message.content:
-                            if isinstance(block, TextBlock) and block.text:
-                                any_text = True
-                                assistant_buffer.append(block.text)
-                                yield block.text
+                    # Assistant messages also carry tool-use blocks. Emit only safe
+                    # names; raw tool inputs may contain SQL, file paths, or secrets.
+                    for block in message.content:
+                        if isinstance(block, ToolUseBlock):
+                            step = _tool_step(block)
+                            active_steps[block.id] = step
+                            yield step
+                        elif not any_text and isinstance(block, TextBlock) and block.text:
+                            any_text = True
+                            assistant_buffer.append(block.text)
+                            yield block.text
+                elif isinstance(message, UserMessage) and isinstance(message.content, list):
+                    # Claude Agent SDK returns tool results as user-message content.
+                    # Report only lifecycle state, never result content.
+                    for block in message.content:
+                        if not isinstance(block, ToolResultBlock):
+                            continue
+                        started = active_steps.pop(block.tool_use_id, None)
+                        if started:
+                            yield AgentStep(
+                                kind=started.kind,
+                                name=started.name,
+                                status="failed" if block.is_error else "completed",
+                            )
                 elif isinstance(message, ResultMessage):
                     logger.info(
                         "Agent done: is_error=%s stop=%s turns=%d streamed=%s",

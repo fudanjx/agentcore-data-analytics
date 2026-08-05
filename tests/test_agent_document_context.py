@@ -19,13 +19,55 @@ def fake_tool(*_args, **_kwargs):
 sdk = types.ModuleType("claude_agent_sdk")
 sdk.ClaudeAgentOptions = FakeClaudeAgentOptions
 sdk.ClaudeSDKClient = type("ClaudeSDKClient", (), {})
-sdk.ResultMessage = type("ResultMessage", (), {})
+
+
+class FakeResultMessage:
+    def __init__(self, result=None):
+        self.is_error = False
+        self.stop_reason = "end_turn"
+        self.num_turns = 1
+        self.result = result
+
+
+class FakeTextBlock:
+    def __init__(self, text):
+        self.text = text
+
+
+class FakeToolUseBlock:
+    def __init__(self, tool_id, name, tool_input):
+        self.id = tool_id
+        self.name = name
+        self.input = tool_input
+
+
+class FakeToolResultBlock:
+    def __init__(self, tool_use_id, *, is_error=False):
+        self.tool_use_id = tool_use_id
+        self.content = None
+        self.is_error = is_error
+
+
+class FakeAssistantMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+class FakeUserMessage:
+    def __init__(self, content):
+        self.content = content
+
+
+sdk.ResultMessage = FakeResultMessage
 sdk.create_sdk_mcp_server = lambda **kwargs: kwargs
 sdk.tool = fake_tool
 sdk_types = types.ModuleType("claude_agent_sdk.types")
-sdk_types.AssistantMessage = type("AssistantMessage", (), {})
+sdk_types.AssistantMessage = FakeAssistantMessage
 sdk_types.StreamEvent = type("StreamEvent", (), {})
-sdk_types.TextBlock = type("TextBlock", (), {})
+sdk_types.TextBlock = FakeTextBlock
+sdk_types.ToolUseBlock = FakeToolUseBlock
+sdk_types.ToolResultBlock = FakeToolResultBlock
+sdk_types.UserMessage = FakeUserMessage
 sys.modules.setdefault("claude_agent_sdk", sdk)
 sys.modules.setdefault("claude_agent_sdk.types", sdk_types)
 
@@ -124,3 +166,65 @@ def test_document_input_reaches_agent_unchanged(monkeypatch):
     assert "downloaded by application" not in captured["options"].system_prompt
     assert not hasattr(agent, "_document_payload_from_s3_uris")
     assert not hasattr(agent, "_download_document")
+
+
+def test_agent_emits_sanitized_skill_and_tool_lifecycle_events(monkeypatch):
+    class FakeClaudeSDKClient:
+        def __init__(self, *, options):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def query(self, _prompt):
+            return None
+
+        async def receive_response(self):
+            yield FakeAssistantMessage(
+                [FakeToolUseBlock("skill-1", "Skill", {"skill": "admission-analysis"})]
+            )
+            yield FakeUserMessage([FakeToolResultBlock("skill-1")])
+            yield FakeAssistantMessage(
+                [
+                    FakeToolUseBlock(
+                        "tool-1",
+                        "mcp__nuh__query_data",
+                        {"sql": "SELECT sensitive_data"},
+                    )
+                ]
+            )
+            yield FakeUserMessage([FakeToolResultBlock("tool-1", is_error=True)])
+            yield FakeAssistantMessage([FakeTextBlock("Final answer")])
+            yield FakeResultMessage()
+
+    async def fake_start_session(_runtime_session_id):
+        return "code-interpreter-session-id"
+
+    async def fake_stop_session(_code_interpreter_session_id):
+        return None
+
+    monkeypatch.setattr(agent, "ClaudeSDKClient", FakeClaudeSDKClient)
+    monkeypatch.setattr(agent.code_interpreter, "start_session", fake_start_session)
+    monkeypatch.setattr(agent.code_interpreter, "stop_session", fake_stop_session)
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "build_mcp_server",
+        lambda session_id: {"session_id": session_id},
+    )
+
+    async def invoke():
+        return [item async for item in agent.stream([{"role": "user", "content": "hi"}])]
+
+    items = asyncio.run(invoke())
+
+    assert items == [
+        agent.AgentStep("skill", "admission-analysis", "started"),
+        agent.AgentStep("skill", "admission-analysis", "completed"),
+        agent.AgentStep("tool", "NUH: query data", "started"),
+        agent.AgentStep("tool", "NUH: query data", "failed"),
+        "Final answer",
+    ]
+    assert "sensitive_data" not in repr(items)

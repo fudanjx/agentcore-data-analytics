@@ -118,6 +118,10 @@ Gateway SigV4 proxy listening on 127.0.0.1:9000
 ## Part 2 — EKS Proxy
 
 The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore runtimes/harnesses.
+Runtime skill and tool lifecycle events are carried as private sideband SSE
+events. The Dify proxy validates these events and renders user-visible Markdown
+status lines containing only the skill/tool name and state; tool inputs and
+outputs are never forwarded to the user.
 
 ### Step 1 — Prep IRSA (one-time)
 
