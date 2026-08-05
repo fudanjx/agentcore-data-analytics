@@ -56,10 +56,25 @@ python3 infra/deploy.py            # creates IAM role + Runtime + Endpoint (idem
 The IAM role provisioned by `infra/deploy.py` includes:
 - `bedrock:InvokeModel*` on the inference profile
 - `bedrock-agentcore:InvokeGateway` on the three gateway ARNs (nuh, ah, timesfm)
+- `bedrock-agentcore:StartCodeInterpreterSession`/`InvokeCodeInterpreter`/
+  `StopCodeInterpreterSession` on the configured custom Code Interpreter
 - `s3:GetObject`/`ListBucket` on the Skills bucket
 - `bedrock-agentcore:CreateEvent`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
 - `ec2:CreateNetworkInterface`/... for VPC mode
 - No RDS or Secrets Manager access — this container no longer needs it
+
+The Runtime receives `CODE_INTERPRETER_ID` from `infra/deploy.py`. The Runtime
+role manages Code Interpreter sessions; the custom Code Interpreter's own
+execution role must grant `s3:GetObject` for uploaded-file prefixes and
+`s3:PutObject` for generated-artifact prefixes.
+
+The Runtime also receives the AgentCore Memory ID and generated semantic,
+preference, and summary strategy IDs. On every request it loads recent raw
+events for the current actor/session as short-term memory, then searches those
+strategy namespaces for relevant cross-session long-term memory. Summary
+records are stored below session-specific namespaces and are retrieved using
+their actor-level namespace prefix. The proxy must therefore pass a stable user
+ID and conversation UUID.
 
 ### Step 2 — Verify
 
@@ -82,7 +97,7 @@ The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore runtimes/harne
 
 ### Step 1 — Prep IRSA (one-time)
 
-Already created as `agentcore-proxy-irsa`. Trust policy uses OIDC provider on the cluster. Inline policy: `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeForUser`, `InvokeHarness`, plus S3/SecretsManager for ETL jobs. Use `Resource: "*"` — the IAM check uses endpoint ARN not runtime ARN.
+The role is `agentcore-proxy-irsa`; its trust policy uses the cluster's OIDC provider. Ensure its inline policy includes `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeForUser`, `InvokeHarness`, and `ListHarnesses`, plus S3/SecretsManager for ETL jobs. `ListHarnesses` lets the Dify proxy dynamically expose each READY harness at `/{harnessName}/v1`; it requires `Resource: "*"`. Use `Resource: "*"` for invocation as well — the IAM check uses endpoint ARN not runtime ARN.
 
 If recreating:
 ```bash

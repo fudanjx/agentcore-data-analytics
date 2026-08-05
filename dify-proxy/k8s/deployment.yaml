@@ -1,44 +1,34 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: agentcore-proxy
+  name: agentcore-dify-proxy
   namespace: agentcore
   labels:
-    app: agentcore-proxy
+    app: agentcore-dify-proxy
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: agentcore-proxy
+      app: agentcore-dify-proxy
   template:
     metadata:
       labels:
-        app: agentcore-proxy
+        app: agentcore-dify-proxy
     spec:
       serviceAccountName: agentcore-proxy
       containers:
-        - name: proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.7
-          imagePullPolicy: IfNotPresent
+        - name: dify-proxy
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.3
+          imagePullPolicy: Always
           ports:
             - containerPort: 8080
           env:
             - name: AWS_DEFAULT_REGION
               value: ap-southeast-1
-            - name: OPENWEBUI_UPLOADS_BUCKET
-              value: agentcore-openwebui-test-964340114883
-            - name: OPENWEBUI_UPLOADS_PREFIX
-              value: openwebui-test/
-            - name: INSIGHTS_UPLOADS_BUCKET
-              value: agentcore-openwebui-insights-964340114883
-            - name: INSIGHTS_UPLOADS_PREFIX
-              value: openwebui-insights/
             - name: DIFY_OFFICE_ARTIFACTS_BUCKET
               value: ah-dify
             - name: DIFY_OFFICE_ARTIFACTS_PREFIX
               value: harness_dev/
-            - name: INSIGHTS_OFFICE_HARNESS_ARN
-              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U
           resources:
             requests:
               cpu: 256m

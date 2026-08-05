@@ -26,6 +26,10 @@ OFFICE_ARTIFACT_URI = (
     "s3://agentcore-openwebui-insights-964340114883/"
     f"openwebui-insights/outputs/{USER_ID}/{CHAT_ID}/report.xlsx"
 )
+DIFY_ARTIFACT_URI = (
+    f"s3://{server.DIFY_OFFICE_ARTIFACTS_BUCKET}/"
+    f"{server.DIFY_OFFICE_ARTIFACTS_PREFIX}{USER_ID}/{CHAT_ID}/report.xlsx"
+)
 
 
 class FakeS3:
@@ -43,6 +47,7 @@ class FakeS3:
         self.size = size
         self.fail = fail
         self.exists = exists
+        self.presign_calls = []
 
     def list_objects_v2(self, **kwargs):
         if self.fail:
@@ -65,6 +70,10 @@ class FakeS3:
                 {"Key": "OpenWebUI-File-Id", "Value": self.file_id},
             ]
         }
+
+    def generate_presigned_url(self, operation, **kwargs):
+        self.presign_calls.append((operation, kwargs))
+        return "https://downloads.example/report.xlsx?signature=test"
 
 
 class DynamicFakeS3(FakeS3):
@@ -153,14 +162,14 @@ class OpenWebUIIdentityTests(unittest.TestCase):
             )
         return response, completion
 
-    def test_legacy_harness_accepts_requests_without_identity_headers_or_manifest_validation(self):
+    def test_dify_harness_requires_identity_context(self):
         completion = AsyncMock(return_value={"ok": True})
         with (
             patch.object(server, "_build_completion", completion),
             patch.object(
                 server,
                 "get_s3",
-                side_effect=AssertionError("legacy harness must not access S3"),
+                side_effect=AssertionError("invalid request must not access S3"),
             ),
         ):
             response = self.client.post(
@@ -168,11 +177,12 @@ class OpenWebUIIdentityTests(unittest.TestCase):
                 json={**self.body, "agentcore_files": "not-a-list"},
             )
 
-        self.assertEqual(response.status_code, 200)
-        args = completion.await_args.args
-        self.assertRegex(args[4], r"^[0-9a-f-]{36}$")
-        self.assertIsNone(args[5])
-        self.assertEqual(args[0], self.body["messages"])
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(
+            response.json()["detail"]["error"]["code"],
+            "identity_context_required",
+        )
+        completion.assert_not_awaited()
 
     def test_insights_headers_become_namespaced_actor_and_session(self):
         completion = AsyncMock(return_value={"ok": True})
@@ -607,6 +617,173 @@ class OpenWebUIIdentityTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         messages = completion.await_args.args[0]
         self.assertEqual(messages, self.body["messages"])
+
+
+class DifyOfficeArtifactContextTests(unittest.TestCase):
+    def setUp(self):
+        self.client = TestClient(server.app)
+
+    def test_dify_style_slugs_receive_scoped_office_output_instructions(self):
+        for slug in ("harness", "dify", "dify-eks"):
+            with self.subTest(slug=slug):
+                body = {
+                    "model": slug,
+                    "user": USER_ID,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": f"System instructions <C_ID>{CHAT_ID}<C_ID>",
+                        },
+                        {"role": "user", "content": "Create a concise report"},
+                    ],
+                    "stream": False,
+                }
+                completion = AsyncMock(return_value={"ok": True})
+
+                with patch.object(server, "_build_completion", completion):
+                    response = self.client.post(
+                        f"/{slug}/v1/chat/completions",
+                        json=body,
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                messages = completion.await_args.args[0]
+                system_content = "\n".join(
+                    message["content"]
+                    for message in messages
+                    if message["role"] == "system"
+                )
+                self.assertIn(
+                    f"s3://{server.DIFY_OFFICE_ARTIFACTS_BUCKET}/"
+                    f"{server.DIFY_OFFICE_ARTIFACTS_PREFIX}{USER_ID}/{CHAT_ID}/",
+                    system_content,
+                )
+                self.assertIn("aws s3api put-object", system_content)
+                self.assertNotIn("aws s3 presign", system_content)
+                self.assertIn("trusted proxy", system_content)
+                self.assertIn(f"OpenWebUI-User-Id={USER_ID}", system_content)
+                self.assertIn(f"OpenWebUI-Chat-Id={CHAT_ID}", system_content)
+                self.assertNotIn("<C_ID>", system_content)
+
+    def test_buffered_dify_artifact_is_validated_and_presigned_by_proxy(self):
+        body = {
+            "model": "dify",
+            "user": USER_ID,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"System instructions <C_ID>{CHAT_ID}<C_ID>",
+                },
+                {"role": "user", "content": "Create a workbook"},
+            ],
+            "stream": False,
+        }
+        harness_result = (
+            "Workbook created.\n<agentcore-artifacts>"
+            f'[{json.dumps({"s3_uri": DIFY_ARTIFACT_URI, "filename": "report.xlsx"})}]'
+            "</agentcore-artifacts>"
+        )
+        s3 = OfficeArtifactS3(size=120)
+
+        with (
+            patch.object(server, "_invoke_harness_buffered", return_value=harness_result),
+            patch.object(server, "get_s3", return_value=s3),
+        ):
+            response = self.client.post("/dify/v1/chat/completions", json=body)
+
+        self.assertEqual(response.status_code, 200)
+        content = response.json()["choices"][0]["message"]["content"]
+        self.assertIn("Workbook created.", content)
+        self.assertIn("https://downloads.example/report.xlsx?signature=test", content)
+        self.assertIn("Links expire in 60 minutes.", content)
+        self.assertNotIn("<agentcore-artifacts>", content)
+        self.assertNotIn(DIFY_ARTIFACT_URI, content)
+        self.assertEqual(len(s3.presign_calls), 1)
+        operation, kwargs = s3.presign_calls[0]
+        self.assertEqual(operation, "get_object")
+        self.assertEqual(kwargs["ExpiresIn"], 3600)
+
+    def test_buffered_dify_artifact_rejects_forged_s3_uri(self):
+        body = {
+            "model": "dify",
+            "user": USER_ID,
+            "messages": [
+                {
+                    "role": "system",
+                    "content": f"System instructions <C_ID>{CHAT_ID}<C_ID>",
+                },
+                {"role": "user", "content": "Create a workbook"},
+            ],
+            "stream": False,
+        }
+        forged_uri = (
+            f"s3://{server.DIFY_OFFICE_ARTIFACTS_BUCKET}/"
+            f"{server.DIFY_OFFICE_ARTIFACTS_PREFIX}another-user/{CHAT_ID}/report.xlsx"
+        )
+        harness_result = (
+            "Workbook created.\n<agentcore-artifacts>"
+            f'[{json.dumps({"s3_uri": forged_uri, "filename": "report.xlsx"})}]'
+            "</agentcore-artifacts>"
+        )
+        s3 = OfficeArtifactS3(size=120)
+
+        with (
+            patch.object(server, "_invoke_harness_buffered", return_value=harness_result),
+            patch.object(server, "get_s3", return_value=s3),
+        ):
+            response = self.client.post("/dify/v1/chat/completions", json=body)
+
+        self.assertEqual(response.status_code, 200)
+        content = response.json()["choices"][0]["message"]["content"]
+        self.assertIn("Generated file could not be made available", content)
+        self.assertNotIn(forged_uri, content)
+        self.assertEqual(s3.presign_calls, [])
+
+    def test_streaming_dify_artifact_is_presigned_after_validation(self):
+        marker = (
+            "<agentcore-artifacts>"
+            f'[{json.dumps({"s3_uri": DIFY_ARTIFACT_URI, "filename": "report.xlsx"})}]'
+            "</agentcore-artifacts>"
+        )
+        s3 = OfficeArtifactS3(size=120)
+        with (
+            patch.object(
+                server,
+                "_stream_harness_events",
+                return_value=iter(["Workbook created.\n", marker[:30], marker[30:]]),
+            ),
+            patch.object(server, "get_s3", return_value=s3),
+        ):
+            chunks = list(
+                server._sse_harness_dify_artifact_stream(
+                    [],
+                    "harness-arn",
+                    CHAT_ID,
+                    USER_ID,
+                    "dify",
+                    "completion-id",
+                    (
+                        USER_ID,
+                        CHAT_ID,
+                        server.DIFY_OFFICE_SOURCE_PROFILE,
+                    ),
+                )
+            )
+
+        contents = []
+        for chunk in chunks:
+            if not chunk.startswith("data: {"):
+                continue
+            payload = json.loads(chunk[6:])
+            contents.append(
+                ((payload.get("choices") or [{}])[0].get("delta") or {}).get("content")
+            )
+        combined = "".join(item or "" for item in contents)
+        self.assertIn("Workbook created.", combined)
+        self.assertIn("https://downloads.example/report.xlsx?signature=test", combined)
+        self.assertNotIn(DIFY_ARTIFACT_URI, combined)
+        self.assertNotIn("<agentcore-artifacts>", combined)
+        self.assertEqual(len(s3.presign_calls), 1)
 
 
 if __name__ == "__main__":

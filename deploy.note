@@ -3,12 +3,12 @@
 
 ### Upload document-review skill Markdown files to S3
 
-aws s3 sync .claude/skills/document-review s3://ah-data-analytics/skills/document-review --exclude "*" --include "*.md" --region ap-southeast-1
+aws s3 sync .claude/skills/ s3://agentcore-harness-dev/skills/ --exclude "*" --include "*.md" --region ap-southeast-1
 
 ### proxy
 
 # Bash
-export TAG=v0.0.3
+export TAG=v0.1.1
 ./proxy/build_and_push.sh
 
 kubectl set image deployment/agentcore-proxy \
@@ -17,13 +17,29 @@ kubectl set image deployment/agentcore-proxy \
 
 kubectl rollout status deployment/agentcore-proxy -n agentcore
 
+### Dify-only proxy
+
+# Builds and pushes the image, applies the Kubernetes manifests, updates the
+# Deployment image, waits for rollout, and displays the ClusterIP/internal NLB.
+export TAG=v0.0.3
+bash dify-proxy/deploy.sh
+
+# In-cluster Dify model-provider base URL:
+# http://agentcore-dify-proxy.agentcore.svc.cluster.local/dify/v1
+
+# Show the internal NLB hostname after AWS finishes provisioning it:
+kubectl get svc agentcore-dify-proxy-internal \
+  -n agentcore \
+  -o jsonpath='{.status.loadBalancer.ingress[0].hostname}{"\n"}'
+
 ###agentcore
 
 # Bash
-export TAG=v0.0.2
+export TAG=v0.0.3
 docker buildx build --platform linux/arm64 --push \
   -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG} .
 
 export AWS_DEFAULT_REGION="ap-southeast-1"
 export ECR_IMAGE_URI="964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG}"
 python infra/deploy.py
+

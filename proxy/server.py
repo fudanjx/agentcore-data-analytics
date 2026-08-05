@@ -68,12 +68,13 @@ import threading
 import time
 import uuid
 from contextlib import contextmanager
+from typing import Any
 from urllib.parse import urlparse
 
 import boto3
 import botocore.exceptions
 from botocore.config import Config
-from fastapi import FastAPI, File, Form, Request, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
@@ -102,6 +103,19 @@ INSIGHTS_OPENWEBUI_SOURCE_PROFILE = {
     "prefix": INSIGHTS_UPLOADS_PREFIX,
     "output_prefix": f"{INSIGHTS_UPLOADS_PREFIX}outputs/",
 }
+DIFY_OFFICE_ARTIFACTS_BUCKET = os.environ.get(
+    "DIFY_OFFICE_ARTIFACTS_BUCKET",
+    "ah-dify",
+)
+DIFY_OFFICE_ARTIFACTS_PREFIX = (
+    os.environ.get("DIFY_OFFICE_ARTIFACTS_PREFIX", "harness_dev/").strip("/")
+    + "/"
+)
+DIFY_OFFICE_SOURCE_PROFILE = {
+    "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
+    "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
+    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
+}
 MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
 MAX_FILES_PER_CHAT = 10
 MAX_CHAT_UPLOAD_BYTES = 200 * 1024 * 1024
@@ -113,6 +127,7 @@ ALLOWED_EXTENSIONS = {
 OFFICE_OUTPUT_EXTENSIONS = {"csv", "docx", "xlsx", "pptx", "pdf"}
 MAX_OFFICE_ARTIFACTS_PER_RESPONSE = 10
 MAX_OFFICE_ARTIFACT_MARKER_BYTES = 64 * 1024
+DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _RUNTIME_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
 
@@ -127,12 +142,14 @@ HARNESSES = {
     "harness": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
     "insights": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
     "dify": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E",
+    "dify-eks":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dev-m4cvZIUAYw"
 }
 _insights_office_harness_arn = os.environ.get("INSIGHTS_OFFICE_HARNESS_ARN", "")
 if _insights_office_harness_arn:
     HARNESSES["insights-office"] = _insights_office_harness_arn
 
 ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
+
 
 app = FastAPI(title="AgentCore Proxy", version="3.0.0")
 _client = None
@@ -487,6 +504,9 @@ def _validate_openwebui_artifact_manifest(
             f"At most {MAX_OFFICE_ARTIFACTS_PER_RESPONSE} generated files are allowed",
         )
 
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
     expected_prefix = (
         f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
     )
@@ -506,11 +526,14 @@ def _validate_openwebui_artifact_manifest(
                 "Each artifact requires s3_uri and filename",
             )
         extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if extension not in OFFICE_OUTPUT_EXTENSIONS:
+        if extension not in output_extensions:
+            allowed_formats = ", ".join(
+                extension.upper() for extension in sorted(output_extensions)
+            )
             raise FileManifestError(
                 400,
                 "unsupported_artifact_type",
-                "Generated files must be DOCX, XLSX, PPTX, PDF, or CSV",
+                f"Generated files must be one of: {allowed_formats}",
             )
 
         parsed = urlparse(s3_uri)
@@ -583,6 +606,36 @@ def _validate_openwebui_artifact_manifest(
     return validated
 
 
+def _presign_validated_artifacts(artifacts: list[dict]) -> list[dict]:
+    """Create short-lived download URLs only for already validated artifacts."""
+    signed: list[dict] = []
+    for artifact in artifacts:
+        parsed = urlparse(artifact["s3_uri"])
+        filename = _sanitize_filename(artifact["filename"])
+        url = get_s3().generate_presigned_url(
+            "get_object",
+            Params={
+                "Bucket": parsed.netloc,
+                "Key": parsed.path.lstrip("/"),
+                "ResponseContentDisposition": f'attachment; filename="{filename}"',
+                "ResponseContentType": artifact["mime_type"],
+            },
+            ExpiresIn=DIFY_ARTIFACT_URL_TTL_SECONDS,
+        )
+        signed.append({**artifact, "download_url": url})
+    return signed
+
+
+def _format_presigned_artifact_links(artifacts: list[dict]) -> str:
+    lines = ["", "Generated files:"]
+    for artifact in artifacts:
+        lines.append(f"- [{artifact['filename']}]({artifact['download_url']})")
+    lines.append(
+        f"Links expire in {DIFY_ARTIFACT_URL_TTL_SECONDS // 60} minutes."
+    )
+    return "\n".join(lines)
+
+
 def _discover_openwebui_office_artifacts(
     raw_user_id: str,
     chat_id: str,
@@ -596,6 +649,9 @@ def _discover_openwebui_office_artifacts(
     user/chat prefix, and pass the same independent ownership validation used
     by the registration endpoint.
     """
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
     prefix = f"{source_profile['output_prefix']}{raw_user_id}/{chat_id}/"
     listing = get_s3().list_objects_v2(
         Bucket=source_profile["bucket"],
@@ -619,7 +675,7 @@ def _discover_openwebui_office_artifacts(
             continue
         filename = _sanitize_filename(key.rsplit("/", 1)[-1])
         extension = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-        if modified_at < cutoff or extension not in OFFICE_OUTPUT_EXTENSIONS:
+        if modified_at < cutoff or extension not in output_extensions:
             continue
         candidates.append(
             (
@@ -674,6 +730,7 @@ def _inject_openwebui_office_artifact_context(
     raw_user_id: str,
     chat_id: str,
     source_profile: dict,
+    proxy_presigns_outputs: bool = False,
 ) -> list:
     """Give the Office Harness its exact trusted output location and tags."""
     output_prefix = (
@@ -683,6 +740,21 @@ def _inject_openwebui_office_artifact_context(
     tagging = (
         f"OpenWebUI-User-Id={raw_user_id}&"
         f"OpenWebUI-Chat-Id={chat_id}&AgentCore-Artifact=generated"
+    )
+    delivery_instruction = ""
+    if proxy_presigns_outputs:
+        delivery_instruction = """
+
+Do not generate a presigned URL and do not expose an S3 URI in user-visible
+prose. Report successful outputs only inside the `<agentcore-artifacts>` marker.
+The trusted proxy will validate ownership and generate short-lived download
+links for the caller.
+"""
+    output_extensions = source_profile.get(
+        "output_extensions", OFFICE_OUTPUT_EXTENSIONS
+    )
+    allowed_formats = ", ".join(
+        extension.upper() for extension in sorted(output_extensions)
     )
     instruction = f"""## Generated Office files
 
@@ -696,10 +768,11 @@ tags) and the exact S3 object tags below. Use the bucket
 local file, an appropriate `--content-type`, and:
 `{tagging}`
 
-Use only these downloadable output formats: DOCX, XLSX, PPTX, PDF, and CSV.
+Use only these downloadable output formats: {allowed_formats}.
 Before the final answer, confirm each upload completed. Then use the
 `<agentcore-artifacts>` JSON marker required by the system prompt; list only
 the S3 URI and the user-facing filename for each successful output.
+{delivery_instruction}
 """
     return [*messages, {"role": "system", "content": instruction}]
 
@@ -714,6 +787,67 @@ def _extract_session_context(body: dict):
     session_id = body.get("chat_id") or str(uuid.uuid4())
     user_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
     return session_id, user_id
+
+
+def _extract_dify_session_context(request_body: dict) -> tuple[str, str, dict[str, Any]]:
+    """
+    Extract mapped user UUID from request body when request is from Dify.
+    Conversation ID not sent from Dify -> Plugin and not sent from Plugin -> Provider.
+    Retrieve ID via regex inserted via system prompt.
+    """
+    DIFY_CONV_ID_PATTERN = r"\s*<C_ID>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<C_ID>\s*"
+    try:
+        user_id = uuid.UUID(request_body.get("user"))
+    except (AttributeError, TypeError, ValueError):
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "error": {
+                    "code": "identity_context_required",
+                    "message": "Missing user input in UUID format.",
+                }
+            },
+        )
+    
+    try:
+        messages = request_body.get("messages", [])
+        if not isinstance(messages, list):
+            raise ValueError("messages is not of list/array type.")
+        
+        system_prompt = ""
+        system_prompt_index = -1
+        for index, message in enumerate(messages):
+            if message.get("role") == "system":
+                system_prompt = message.get("content")
+                system_prompt_index = index
+                break
+        
+        if not system_prompt:
+            raise ValueError("System prompt must be included for tracking of conversation id.")
+        
+        session_id = re.search(DIFY_CONV_ID_PATTERN, system_prompt)
+        if not session_id:
+            raise ValueError("No conversation id matching C_ID tag pattern found.")
+        
+    except ValueError as e:
+        raise HTTPException(
+                    status_code=422,
+                    detail={
+                        "error": {
+                            "code": "identity_context_required",
+                            "message": f"{str(e)}",
+                        }
+                    },
+                )
+    
+    # Remove conversation_id from system prompt if found and return new body object
+    if system_prompt_index >= 0:
+        system_prompt_dict: dict[str, str] = messages[system_prompt_index]
+        system_prompt_dict["content"] = system_prompt_dict["content"].replace(session_id.group(0), "", 1)
+        messages[system_prompt_index] = system_prompt_dict
+        request_body["messages"] = messages
+        
+    return session_id.group(1), str(user_id), request_body
 
 
 def _extract_openwebui_context(
@@ -1151,11 +1285,13 @@ class _OfficeArtifactStreamSanitizer:
     complete; it never forwards its S3 URI or raw marker to the frontend.
     """
 
-    def __init__(self):
+    def __init__(self, *, emit_opaque_marker: bool = True):
         self._pending = ""
         self._collecting = False
         self._discarding = False
         self._artifact_json = ""
+        self._emit_opaque_marker = emit_opaque_marker
+        self.artifacts: list[dict] | None = None
         self.artifact_emitted = False
         self.artifact_problem = False
 
@@ -1201,7 +1337,9 @@ class _OfficeArtifactStreamSanitizer:
                     artifacts = json.loads(raw_json)
                     if not isinstance(artifacts, list):
                         raise ValueError("artifact payload must be a list")
-                    output.append(_office_artifact_marker(artifacts))
+                    self.artifacts = artifacts
+                    if self._emit_opaque_marker:
+                        output.append(_office_artifact_marker(artifacts))
                     self.artifact_emitted = True
                 except (ValueError, TypeError, json.JSONDecodeError):
                     self.artifact_problem = True
@@ -1322,6 +1460,135 @@ def _sse_harness_office_stream(
     yield "data: [DONE]\n\n"
 
 
+_DIFY_ARTIFACT_ERROR_TEXT = (
+    "\n\nGenerated file could not be made available. Please try again."
+)
+
+
+def _dify_artifact_error_label(error: Exception) -> str:
+    """Return a useful validation code without logging artifact locations."""
+    if isinstance(error, FileManifestError):
+        return f"{type(error).__name__}:{error.code}"
+    return type(error).__name__
+
+
+def _resolve_dify_presigned_artifacts(
+    artifact_sanitizer: _OfficeArtifactStreamSanitizer,
+    artifact_context: tuple[str, str, dict],
+    request_started_at: float,
+) -> list[dict]:
+    user_id, conversation_id, source_profile = artifact_context
+    if artifact_sanitizer.artifacts is not None:
+        validated = _validate_openwebui_artifact_manifest(
+            artifact_sanitizer.artifacts,
+            user_id,
+            conversation_id,
+            source_profile,
+        )
+    else:
+        validated = _discover_openwebui_office_artifacts(
+            user_id,
+            conversation_id,
+            source_profile,
+            request_started_at,
+        )
+    return _presign_validated_artifacts(validated) if validated else []
+
+
+def _render_dify_presigned_artifacts(
+    result_text: str,
+    artifact_context: tuple[str, str, dict],
+    request_started_at: float,
+) -> str:
+    """Replace a buffered artifact manifest with validated download links."""
+    artifact_sanitizer = _OfficeArtifactStreamSanitizer(emit_opaque_marker=False)
+    clean_text = "".join(artifact_sanitizer.feed(result_text))
+    clean_text += "".join(artifact_sanitizer.finish())
+    try:
+        artifacts = _resolve_dify_presigned_artifacts(
+            artifact_sanitizer,
+            artifact_context,
+            request_started_at,
+        )
+    except Exception as error:
+        logger.warning(
+            "Dify artifact delivery failed: %s",
+            _dify_artifact_error_label(error),
+        )
+        return clean_text + _DIFY_ARTIFACT_ERROR_TEXT
+    if artifacts:
+        return clean_text + "\n" + _format_presigned_artifact_links(artifacts)
+    if artifact_sanitizer.artifact_problem:
+        return clean_text + _DIFY_ARTIFACT_ERROR_TEXT
+    return clean_text
+
+
+def _sse_harness_dify_artifact_stream(
+    messages: list,
+    harness_arn: str,
+    session_id: str,
+    actor_id: str,
+    model: str,
+    completion_id: str,
+    artifact_context: tuple[str, str, dict],
+):
+    """Stream normal text, then append proxy-validated Dify download links."""
+    artifact_sanitizer = _OfficeArtifactStreamSanitizer(emit_opaque_marker=False)
+    request_started_at = time.time()
+
+    def stream_chunk(content: str):
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"content": content}, "finish_reason": None}
+            ],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
+    try:
+        for text in _stream_harness_events(
+            messages, harness_arn, session_id, actor_id
+        ):
+            for content in artifact_sanitizer.feed(text):
+                if content:
+                    yield stream_chunk(content)
+    except Exception as error:
+        logger.error("Dify Harness stream error (session=%s): %s", session_id, error)
+        yield f"data: {json.dumps({'error': {'message': str(error), 'type': 'stream_error'}})}\n\n"
+
+    for content in artifact_sanitizer.finish():
+        if content:
+            yield stream_chunk(content)
+    try:
+        artifacts = _resolve_dify_presigned_artifacts(
+            artifact_sanitizer,
+            artifact_context,
+            request_started_at,
+        )
+        if artifacts:
+            yield stream_chunk("\n" + _format_presigned_artifact_links(artifacts))
+        elif artifact_sanitizer.artifact_problem:
+            yield stream_chunk(_DIFY_ARTIFACT_ERROR_TEXT)
+    except Exception as error:
+        logger.warning(
+            "Dify artifact stream delivery failed (session=%s): %s",
+            session_id,
+            _dify_artifact_error_label(error),
+        )
+        yield stream_chunk(_DIFY_ARTIFACT_ERROR_TEXT)
+
+    final = {
+        "id": completion_id,
+        "object": "chat.completion.chunk",
+        "model": model,
+        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+    }
+    yield f"data: {json.dumps(final)}\n\n"
+    yield "data: [DONE]\n\n"
+
+
 def _stream_response(result_text: str, model: str, completion_id: str):
     chunk = {
         "id": completion_id,
@@ -1352,24 +1619,27 @@ async def _build_completion(
     session_id: str,
     user_id: str = None,
     office_artifact_context: tuple[str, str, dict] | None = None,
+    presigned_artifact_context: tuple[str, str, dict] | None = None,
 ):
     logger.info(
         "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
         slug, model, len(messages), stream, session_id, user_id,
     )
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
+    request_started_at = time.time()
 
     if slug in HARNESSES:
         arn = HARNESSES[slug]
         if stream:
-            stream_adapter = (
-                _sse_harness_office_stream
-                if slug == "insights-office"
-                else _sse_harness_stream
-            )
             stream_args = (messages, arn, session_id, user_id, model, completion_id)
             if slug == "insights-office":
+                stream_adapter = _sse_harness_office_stream
                 stream_args = (*stream_args, office_artifact_context)
+            elif presigned_artifact_context:
+                stream_adapter = _sse_harness_dify_artifact_stream
+                stream_args = (*stream_args, presigned_artifact_context)
+            else:
+                stream_adapter = _sse_harness_stream
             # Pipe harness token deltas directly to SSE — no buffering.
             return StreamingResponse(
                 stream_adapter(*stream_args),
@@ -1379,6 +1649,13 @@ async def _build_completion(
         result_text = await run_in_threadpool(
             _invoke_harness_buffered, messages, arn, session_id, user_id
         )
+        if presigned_artifact_context:
+            result_text = await run_in_threadpool(
+                _render_dify_presigned_artifacts,
+                result_text,
+                presigned_artifact_context,
+                request_started_at,
+            )
     else:
         # Runtime path — Phase 2: container emits text/event-stream SSE natively.
         arn = RUNTIMES[slug]
@@ -1481,17 +1758,18 @@ async def chat_completions_by_slug(slug: str, request: Request):
     except Exception:
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
 
-    if slug == "dev":
-        logger.info(
-            "OpenAI-compatible raw payload [%s]: %s",
-            slug,
-            json.dumps(body, ensure_ascii=False, default=str),
-        )
+    
+    logger.info(
+        "Raw payload [%s]: %s",
+        slug,
+        json.dumps(body, ensure_ascii=False, default=str),
+    )
 
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
     office_artifact_context = None
+    presigned_artifact_context = None
     if slug in {"insights", "insights-office"}:
         source_profile = INSIGHTS_OPENWEBUI_SOURCE_PROFILE
         context = _extract_openwebui_context(request, body, source_profile)
@@ -1553,6 +1831,21 @@ async def chat_completions_by_slug(slug: str, request: Request):
                     chat_id,
                     source_profile,
                 )
+    elif slug in ("harness", "dify", "dify-eks"):
+        session_id, user_id, body = _extract_dify_session_context(request_body=body)
+        messages = _inject_openwebui_office_artifact_context(
+            messages,
+            user_id,
+            session_id,
+            DIFY_OFFICE_SOURCE_PROFILE,
+            proxy_presigns_outputs=True,
+        )
+        presigned_artifact_context = (
+            user_id,
+            session_id,
+            DIFY_OFFICE_SOURCE_PROFILE,
+        )
+        
     else:
         session_id, user_id = _extract_session_context(body)
 
@@ -1565,7 +1858,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
     try:
         return await _build_completion(
             messages, slug, body.get("model", slug), body.get("stream", False),
-            session_id, user_id, office_artifact_context,
+            session_id, user_id, office_artifact_context, presigned_artifact_context,
         )
     except Exception as e:
         logger.error("AgentCore error [%s]: %s", slug, e)

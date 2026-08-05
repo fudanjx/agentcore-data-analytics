@@ -1,0 +1,6 @@
+docker login --username AWS 536639232685.dkr.ecr.ap-southeast-1.amazonaws.com
+cd dify-proxy
+docker build -t 536639232685.dkr.ecr.ap-southeast-1.amazonaws.com/ah-agentcore-proxy:v0.0.1 .
+docker push 536639232685.dkr.ecr.ap-southeast-1.amazonaws.com/ah-agentcore-proxy:v0.0.1
+export TAG=v0.0.4
+bash dify-proxy/build_and_push.sh
