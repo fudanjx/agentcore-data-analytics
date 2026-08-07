@@ -60,6 +60,8 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | --- | --- | --- |
 | `MODEL_ID` / `MODEL_ARN` | Reference application inference profile ARN | Bedrock model used by Strands |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
+| `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; the packaged prompt is used when unset |
+| `BASE_SYSTEM_PROMPT_MAX_BYTES` | `200000` | Maximum permitted size of the S3 system-prompt object |
 | `AGENTCORE_GATEWAYS_JSON` | Reference NUH, AH, and TimesFM Gateways | Gateway label, HTTPS URL, ARN, and inferred region mapping |
 | `ENABLE_GATEWAYS` | `true` | Enable Gateway MCP tools |
 | `CODE_INTERPRETER_ID` | Reference runtime interpreter | Managed Code Interpreter identifier |
@@ -78,6 +80,18 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 
 Set `CODE_INTERPRETER_ID` or `MEMORY_ID` to an empty string to disable that integration. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` are useful for a minimal smoke test.
 
+To customize the base prompt without rebuilding the ZIP, upload a UTF-8 text
+file and configure, for example:
+
+```text
+BASE_SYSTEM_PROMPT=s3://my-runtime-config/prompts/data-analyst.txt
+```
+
+The object is downloaded once per warm Runtime container. If the variable is
+unset, the packaged default is used. If it is set but cannot be loaded or is
+invalid, the invocation fails explicitly rather than silently changing agent
+behavior.
+
 ## Required IAM permissions
 
 The S3-source Runtime execution role must be granted access to:
@@ -86,7 +100,8 @@ The S3-source Runtime execution role must be granted access to:
 - `bedrock-agentcore:InvokeGateway` for every configured Gateway ARN;
 - `bedrock-agentcore:StartCodeInterpreterSession`, `InvokeCodeInterpreter`, and `StopCodeInterpreterSession` for the configured interpreter;
 - the required AgentCore Memory data-plane operations and `bedrock-agentcore-control:GetMemory` for the configured Memory;
-- `s3:ListBucket` on the skills bucket and `s3:GetObject` on the skills prefix.
+- `s3:ListBucket` on the skills bucket and `s3:GetObject` on the skills prefix;
+- `s3:GetObject` on the object configured by `BASE_SYSTEM_PROMPT`, when used. If that object uses a customer-managed KMS key, also grant `kms:Decrypt` on the key.
 
 The exact reference ARNs are intentionally retained as defaults, but a new Runtime role does not inherit permission to use them. Add these permissions in the AgentCore source configuration or replace the defaults with resources owned by that Runtime/account.
 
@@ -109,6 +124,7 @@ strands_agent/gateway_config.py
 strands_agent/gateway_proxy.py
 strands_agent/memory.py
 strands_agent/skills_sync.py
+strands_agent/system_prompt.py
 strands_agent/six.py
 strands_agent/typing_extensions.py
 strands_agent/requirements.txt
