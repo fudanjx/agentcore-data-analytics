@@ -35,3 +35,6 @@ cdk.out/
 him_scripts/
 .gstack/
 .code-workspace
+#Strands-runtime
+Strands-runtime/.bundle-build/
+Strands-runtime/dist/
