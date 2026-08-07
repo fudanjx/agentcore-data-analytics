@@ -13,8 +13,8 @@ import boto3
 
 logger = logging.getLogger(__name__)
 
-BUCKET = "ah-data-analytics"
-PREFIX = "skills/"
+BUCKET = os.environ.get("SKILLS_BUCKET") or "ah-data-analytics"
+PREFIX = os.environ.get("SKILLS_PREFIX") or "skills/"
 LOCAL_DIR = "/app/.claude/skills"
 
 
