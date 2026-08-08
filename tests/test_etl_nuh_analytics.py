@@ -1,7 +1,9 @@
 import importlib.util
+import os
 from pathlib import Path
 import sys
 import unittest
+from unittest import mock
 
 import pandas as pd
 import pyarrow as pa
@@ -15,6 +17,24 @@ SPEC.loader.exec_module(etl)
 
 
 class EmdEventDateRuleTests(unittest.TestCase):
+    def test_native_timestamps_are_preserved(self):
+        frame = pd.DataFrame(
+            {
+                "PERIOD": ["Aug 2023", "Jun 2026", None],
+                "EVENT_ED_TO_EDTU_DATE": [
+                    pd.Timestamp("2023-08-04"),
+                    pd.Timestamp("2026-06-07 08:09:10"),
+                    pd.NaT,
+                ],
+            }
+        )
+
+        actual = etl.apply_emd_event_date_rule(frame)
+
+        self.assertEqual(str(actual.loc[0, "EVENT_ED_TO_EDTU_DATE"]), "2023-08-04 00:00:00")
+        self.assertEqual(str(actual.loc[1, "EVENT_ED_TO_EDTU_DATE"]), "2026-06-07 08:09:10")
+        self.assertTrue(pd.isna(actual.loc[2, "EVENT_ED_TO_EDTU_DATE"]))
+
     def test_day_first_source_exception_and_iso_values_become_timestamps(self):
         frame = pd.DataFrame(
             {
@@ -59,6 +79,27 @@ class EmdEventDateRuleTests(unittest.TestCase):
         self.assertEqual([spec.target_name for spec in specs], ["Patient_Name", "Visit_Date"])
         self.assertEqual([spec.pg_type for spec in specs], ["TEXT", "TIMESTAMP WITHOUT TIME ZONE"])
         self.assertEqual(dropped, ["Unnamed: 0"])
+
+
+class JobSelectionTests(unittest.TestCase):
+    def test_selects_requested_subset_only(self):
+        with mock.patch.dict(
+            os.environ, {etl.TABLES_ENV: "emd,inpatient_movement"}, clear=False
+        ):
+            self.assertEqual(
+                etl.selected_jobs(),
+                (
+                    ("em_encoded.parquet.gzip", "emd"),
+                    ("in_encoded.parquet.gzip", "inpatient_movement"),
+                ),
+            )
+
+    def test_rejects_unknown_selected_table(self):
+        with mock.patch.dict(
+            os.environ, {etl.TABLES_ENV: "emd,unknown"}, clear=False
+        ):
+            with self.assertRaises(etl.SourceValidationError):
+                etl.selected_jobs()
 
 
 if __name__ == "__main__":

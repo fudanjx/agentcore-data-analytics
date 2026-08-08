@@ -1,14 +1,11 @@
 ---
 name: nuh-analytics-emd
-description: Column reference and SQL guidance for the NUH emd table. Use when analyzing NUH emergency department attendance, ED admissions, ED disposition, or adult versus children ED activity.
+description: Column reference and SQL guidance for NUH emd. Use when analyzing emergency department attendance, PACS acuity, ED admissions, Adult or Children segments, or arrival mode.
 ---
 
-# NUH Analytics — emd table
+# NUH Analytics — emd
 
-**One row is an ED visit. Primary date: `EMD_VISIT_DATE`.**
-
-The supplied logic is QC-verified for January–December 2025 and states that this
-table has one source system for that period.
+**One row is one ED visit. Primary date: `EMD_VISIT_DATE`. Coverage: January 2023–June 2026.**
 
 ## Mandatory base filter
 
@@ -18,74 +15,85 @@ WHERE "EMD_VISIT_DATE" IS NOT NULL
   AND "DUPLICATE" <> 'Y'
 ```
 
-`"DUPLICATE" <> 'Y'` is mandatory. Omitting it overcounts attendance.
+Never omit the duplicate filter. Use `EMD_VISIT_DATE` for date filtering and grouping.
 
-## Core fields
+## Required segment mapping
 
-| Column | Use |
-|---|---|
-| `EMD_VISIT_DATE` | Attendance date and monthly time series |
-| `DUPLICATE` | Exclude `Y` records |
-| `CASE_END_TYPE_DESC` | ED disposition; identify admissions with `LIKE 'Admit%'` |
-| `TREATMENT_OU_DESC` | Adult/children segmentation input |
+Use `TREATMENT_OU_CLINIC`, not a text inference from OU descriptions:
 
-## Metrics
+```sql
+CASE
+  WHEN "TREATMENT_OU_CLINIC" = 'NCA&E' THEN 'Adult (NCA&E)'
+  WHEN "TREATMENT_OU_CLINIC" = 'NCCE' THEN 'Children CE (NCCE)'
+  WHEN "TREATMENT_OU_CLINIC" = 'NCPUCC' THEN 'Children UCC (NCPUCC)'
+  ELSE 'Unknown'
+END AS segment
+```
 
-### ED attendance
+`NCPUCC` is available only from January 2025; report it as unavailable, not zero, for 2023–2024.
 
-Count all rows remaining after the mandatory base filter.
+## PACS rules
+
+Default to `PACS_STATUS_CONSULT` for PACS reporting. Use `PACS_STATUS` only if
+the user explicitly asks for initial-triage PACS, and `TRIAGE_ACUITY` only if
+explicitly requested. PACS levels are `P1`–`P4`.
+
+Exclude null PACS only from a PACS breakdown, not from total or segment attendance:
+
+```sql
+AND "PACS_STATUS_CONSULT" IS NOT NULL
+```
+
+The default and initial-triage PACS fields differ for 129 of 85,970 H1-2026
+records (0.15%), mainly at the P2/P3 boundary. Segment totals must remain equal.
+
+## ED admissions and arrival mode
+
+Identify ED admissions with `"CASE_END_TYPE_DESC" LIKE 'Admit%'`; do not list
+individual admission subtypes.
+
+For arrival-mode reports, normalise raw `ARRIVAL_MODE` before grouping. In
+particular, `06`, `6`, and `6.0` are the same Walk In category. Inspect live
+distinct values to complete any additional mapping, then verify the resulting
+groups sum to total ED attendance. A null raw arrival mode should be investigated.
+
+## Example: monthly PACS attendance
 
 ```sql
 SELECT
   DATE_TRUNC('month', "EMD_VISIT_DATE") AS month,
+  CASE
+    WHEN "TREATMENT_OU_CLINIC" = 'NCA&E' THEN 'Adult (NCA&E)'
+    WHEN "TREATMENT_OU_CLINIC" = 'NCCE' THEN 'Children CE (NCCE)'
+    WHEN "TREATMENT_OU_CLINIC" = 'NCPUCC' THEN 'Children UCC (NCPUCC)'
+    ELSE 'Unknown'
+  END AS segment,
+  "PACS_STATUS_CONSULT" AS pacs,
   COUNT(*) AS attendance
 FROM emd
-WHERE "EMD_VISIT_DATE" IS NOT NULL
-  AND "DUPLICATE" <> 'Y'
-  AND "EMD_VISIT_DATE" >= DATE '2025-01-01'
+WHERE "EMD_VISIT_DATE" >= DATE '2025-01-01'
   AND "EMD_VISIT_DATE" < DATE '2026-01-01'
-GROUP BY 1
-ORDER BY 1;
+  AND "DUPLICATE" <> 'Y'
+  AND "PACS_STATUS_CONSULT" IS NOT NULL
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3;
 ```
 
-### ED admissions
+## Locked benchmarks
 
-Apply the base filter and identify all admission dispositions with:
+| Period | Adult | Children CE | Children UCC | Total |
+|---|---:|---:|---:|---:|
+| CY2023 | 107,235 | 40,613 | unavailable | 147,848 |
+| CY2024 | 100,600 | 36,149 | unavailable | 136,749 |
+| CY2025 | 111,108 | 38,468 | 19,899 | 169,475 |
+| H1 2026 | 55,813 | 19,789 | 10,368 | 85,970 |
 
-```sql
-AND "CASE_END_TYPE_DESC" LIKE 'Admit%'
-```
+CY2025 total ED admissions are 45,512. Segment admission rates use their own
+segment attendance denominator; the cited adult and children references are about
+35.7% and 15.7% respectively.
 
-Do not hard-code individual `Admit` subtypes. The documented admission values
-include `Admit - Ward`, `Admit - ICU`, and `Admit - HDU`.
+## QC
 
-### Adult versus children
-
-Use `TREATMENT_OU_DESC`. The source material says child-specific departments are
-identified by their OU descriptions, but does not provide the exact allowed value
-list. First inspect the distinct non-null values and obtain or state a value-level
-mapping before labelling a series as Adult or Children. Do not use a speculative
-text match as a validated mapping.
-
-The supplied document also gives adult and children admission-rate reference
-figures while its QC note says to use total attendance as the rate denominator.
-This is ambiguous for a segment-specific rate. Confirm the intended denominator
-before reporting an Adult or Children admission rate.
-
-## 2025 locked benchmarks
-
-| Metric | Value |
-|---|---:|
-| Total ED attendance | 149,576 |
-| Total ED admissions | 45,512 |
-| Adult admission-rate reference | about 35.7% |
-| Children admission-rate reference | about 15.7% |
-
-## QC checks
-
-For an exactly matching 2025 query:
-
-1. Calculate totals in SQL, not by manual arithmetic.
-2. Confirm monthly attendance sums to the full-year attendance total.
-3. After a verified adult/children mapping, confirm Adult plus Children equals total attendance.
-4. Investigate mismatches before calling the result QC-passed.
+For a matching period, confirm: monthly roll-up equals annual total; segment total
+equals the grand total; PACS P1–P4 plus separately stated null PACS equals segment
+total; and arrival-mode groups equal total attendance.

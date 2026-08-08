@@ -1,49 +1,35 @@
 ---
 name: nuh-analytics-data-dictionary
-description: Route questions to the correct NUH table in nuh-analytics and apply the approved 2025 metric logic. Use when analyzing NUH emergency department, inpatient movement, specialist outpatient clinic, or surgery data; writing NUH SQL; or selecting date fields, filters, and validation benchmarks.
+description: Route questions to the correct NUH table in nuh-analytics and apply the approved 2023 to June 2026 metric logic. Use when analyzing NUH emergency department, inpatient movement, specialist outpatient clinic, surgery, dashboards, or when selecting date fields, filters, source-era rules, and validation benchmarks.
 ---
 
 # NUH Analytics — routing guide
 
-## Select the source table
+## Select the table
 
-| Question is about | Table | Primary date field | Row/count unit |
+| Question | Table | Primary date | Grain |
 |---|---|---|---|
-| ED attendance, ED disposition, or ED admissions | `emd` | `EMD_VISIT_DATE` | Valid ED visit |
-| Inpatient admissions, discharges, patient days, or ALOS | `inpatient_movement` | `CURRENT_DATE` monthly snapshot | Metric-specific; use the documented distinct key |
-| Specialist outpatient clinic activity | `soc` | `SOC_VISIT_DATE` | Actualized SOC visit |
-| Surgical workload | `surgery` | `SVISITDATE` | Procedure, not case |
+| ED attendance, PACS, arrival mode, disposition, or ED admission | `emd` | `EMD_VISIT_DATE` | ED visit |
+| Inpatient admissions, discharges, patient days, ALOS, or patient class | `inpatient_movement` | `CURRENT_DATE` snapshot | Metric-specific |
+| SOC visits, new/repeat, private/subsidised, clinic, or specialty | `soc` | `SOC_VISIT_DATE` | Actualised SOC visit |
+| Surgical workload, category, normal delivery, or emergency/elective | `surgery` | `SVISITDATE` | Procedure, not case |
 
-## Required query process
+Read the matching reference plus `dashboard.md` for dashboard requests.
 
-1. Read the table-level reference before querying.
-2. Use the approved base filter and metric-specific filters in that reference.
-3. Quote every mixed-case or reserved column name. In particular, always write `"CURRENT_DATE"`.
-4. For a calendar-year query in PostgreSQL, use half-open date ranges rather than `YEAR(...)`, for example:
+## Universal controls
 
-```sql
-WHERE "SVISITDATE" >= DATE '2025-01-01'
-  AND "SVISITDATE" < DATE '2026-01-01'
-```
+1. Quote mixed-case and reserved identifiers, including `"CURRENT_DATE"`.
+2. Filter only on the documented primary date with a half-open range.
+3. Do not group or filter by `Period`; it is inconsistent or incomplete across source eras.
+4. Do not filter a date-range query by `UID` or `Hosp_ABBR`. In surgery, `UID` is an era discriminator inside the hybrid CASE only.
+5. Generate annual totals and table subtotals programmatically. A yearly total must equal the same monthly rows displayed.
+6. Use a table reference's own benchmark only when every documented filter, period, and classification exactly matches.
 
-5. Use the 2025 benchmarks only when the query exactly matches the documented 2025 scope. They are not a target or forecast for other periods.
+## Coverage and source-era limits
 
-## Scope and relationship limits
+- `emd`: January 2023–June 2026; Children UCC (`NCPUCC`) starts January 2025.
+- `soc`: January 2023–June 2026; native new/repeat and private/subsidised groups start in 2024.
+- `surgery`: January 2023–June 2026; SAP is `UID IS NULL` through January 2024 and Epic is `UID IS NOT NULL` from February 2024.
+- `inpatient_movement`: use `CASE_NO` before May 2025 and `EPIC_CSN` from May 2025 for the validated 2025 snapshot measures.
 
-- The supplied logic validates calendar year 2025. Do not assume an identical source-system era, lookup, or benchmark beyond that period.
-- `inpatient_movement` changes from SAP logic through April 2025 to Epic logic from May 2025. Use the correct distinct key and `MOVEMENT_CAT` rule for each era.
-- The supplied materials do not define cross-table join keys or cardinalities. Before joining NUH tables, inspect the live columns, establish row grain, and state the join assumption. Do not copy AH join logic into NUH analysis.
-
-## Shared reporting checks
-
-- Generate monthly and full-period totals from SQL; do not sum values manually.
-- Check monthly total equals full-period total for a complete 2025 series.
-- Preserve nulls and report excluded rows only when the documented filter calls for their exclusion.
-- State the table, date field, filters, and aggregation unit with every result.
-
-## Table references
-
-- `emd.md` — ED attendance and disposition rules
-- `inpatient-movement.md` — SAP/Epic inpatient measures and ALOS methods
-- `soc.md` — SOC visit, class, cluster, and specialty rules
-- `surgery.md` — procedure count and surgical-category rules
+The source documents do not define safe cross-table join keys or cardinalities. Inspect the live schema and establish row grain before joining tables.

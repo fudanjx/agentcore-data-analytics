@@ -1,88 +1,62 @@
 ---
 name: nuh-analytics-surgery
-description: Column reference and SQL guidance for the NUH surgery table. Use when analyzing NUH procedure volume, day surgery, normal delivery, inpatient surgery, or surgical-category time series.
+description: Column reference and SQL guidance for NUH surgery. Use when analyzing procedure volume, day surgery, normal delivery, inpatient surgery, emergency versus elective activity, or surgical paying status across 2023 to June 2026.
 ---
 
-# NUH Analytics — surgery table
+# NUH Analytics — surgery
 
-**Count procedures, not surgical cases. Primary date: `SVISITDATE`.**
+**Count procedures, not cases or patients. Primary date: `SVISITDATE`. Coverage:
+January 2023–June 2026.** Use the unified table with a half-open `SVISITDATE`
+range. Never filter or group by `Period`, `Hosp_ABBR`, or `UID`.
 
-The supplied logic is QC-verified for January–December 2025 and uses one source
-system for that period.
+`UID` is only the hybrid era discriminator: SAP is `UID IS NULL` through January
+2024; Epic is `UID IS NOT NULL` from February 2024. Never infer the era from
+`S_CODE` nullness.
 
-## Mandatory 2025 base filter
-
-```sql
-FROM surgery
-WHERE "SVISITDATE" >= DATE '2025-01-01'
-  AND "SVISITDATE" < DATE '2026-01-01'
-```
-
-This is the PostgreSQL-safe equivalent of the supplied year-2025 condition.
-
-## Required surgical-category logic
-
-Use `PATIENT_TYPE` only. Do not use `Surgery_Patient_Class`: the supplied source
-states that it misclassifies about 8,390 cases.
-
-| Category | Logic |
-|---|---|
-| Day Surgery | `"PATIENT_TYPE" = 'D'` |
-| Normal Delivery | `"PATIENT_TYPE" = 'I' AND "S_CODE" IN ('SP836U', 'SI836U')` |
-| Inpatient Surgery | `"PATIENT_TYPE" = 'I' AND "S_CODE" NOT IN ('SP836U', 'SI836U')` |
-
-`SP836U` is Normal Delivery (Private); `SI836U` is Normal Delivery (Subsidised).
-
-## Example: monthly procedures by category
+## Locked hybrid surgical-category CASE
 
 ```sql
-SELECT
-  DATE_TRUNC('month', "SVISITDATE") AS month,
-  CASE
-    WHEN "PATIENT_TYPE" = 'D' THEN 'Day Surgery'
-    WHEN "PATIENT_TYPE" = 'I'
-      AND "S_CODE" IN ('SP836U', 'SI836U') THEN 'Normal Delivery'
-    WHEN "PATIENT_TYPE" = 'I'
-      AND "S_CODE" NOT IN ('SP836U', 'SI836U') THEN 'Inpatient Surgery'
-    ELSE 'Unclassified'
-  END AS surgical_category,
-  COUNT(*) AS procedures
-FROM surgery
-WHERE "SVISITDATE" >= DATE '2025-01-01'
-  AND "SVISITDATE" < DATE '2026-01-01'
-GROUP BY 1, 2
-ORDER BY 1, 2;
+CASE
+  WHEN "PATIENT_TYPE" = 'D' THEN 'Day Surgery'
+  WHEN "PATIENT_TYPE" = 'I' AND "UID" IS NULL
+   AND "SUR_PROC_CODE" IN ('NSP836U','NSI836U','NSI038U','NSP038U')
+    THEN 'Normal Delivery'
+  WHEN "PATIENT_TYPE" = 'I' AND "UID" IS NOT NULL
+   AND "S_CODE" IN ('SP836U','SI836U','SI038U','SP038U')
+    THEN 'Normal Delivery'
+  WHEN "PATIENT_TYPE" = 'I' AND "UID" IS NULL
+   AND "SUR_PROC_CODE" NOT IN ('NSP836U','NSI836U','NSI038U','NSP038U')
+    THEN 'Inpatient Surgery'
+  WHEN "PATIENT_TYPE" = 'I' AND "UID" IS NOT NULL
+   AND "S_CODE" NOT IN ('SP836U','SI836U','SI038U','SP038U')
+    THEN 'Inpatient Surgery'
+  ELSE 'Unclassified'
+END AS surgical_category
 ```
 
-Investigate any `Unclassified` records before presenting a fully classified total.
+`Surgery_Patient_Class` is not valid for surgical category. Any unclassified row
+is a QC failure. The SAP-only codes `NSI038U`/`NSP038U` and Epic-only
+`SI038U`/`SP038U` are retained for future-proofing although none were observed.
 
-## 2025 locked benchmarks
+## Emergency / elective and patient class
 
-| Category | Procedures | Share |
-|---|---:|---:|
-| Day Surgery | 83,467 | 66.3% |
-| Normal Delivery | 2,537 | 2.0% |
-| Inpatient Surgery | 39,945 | 31.7% |
-| Total procedures | 125,949 | 100% |
+Use `"EMERG_IND" = 'X'` for Emergency and `"EMERG_IND" IS NULL` for Elective.
+Do not use `EMERG_IND1` or `Surgery_Case_Type`.
 
-| Month | Day Surgery | Normal Delivery | Inpatient Surgery | Total |
-|---|---:|---:|---:|---:|
-| Jan | 6,368 | 205 | 3,015 | 9,588 |
-| Feb | 5,858 | 175 | 2,828 | 8,861 |
-| Mar | 6,894 | 196 | 3,278 | 10,368 |
-| Apr | 6,511 | 194 | 3,126 | 9,831 |
-| May | 6,881 | 207 | 3,250 | 10,338 |
-| Jun | 6,631 | 208 | 3,130 | 9,969 |
-| Jul | 7,107 | 218 | 3,434 | 10,759 |
-| Aug | 6,993 | 225 | 3,380 | 10,598 |
-| Sep | 6,918 | 222 | 3,315 | 10,455 |
-| Oct | 7,578 | 233 | 3,639 | 11,450 |
-| Nov | 7,134 | 224 | 3,312 | 10,670 |
-| Dec | 6,594 | 230 | 3,238 | 10,062 |
+For private/subsidised analysis, use `PATIENT_CLASS IN ('SP','RP','AC','AP','EP')`
+as Private in CY2023; all other CY2023 values are Subsidised. From CY2024, use
+`"Patient_Class_Grp" = 'Private'` as Private and all other values as Subsidised.
 
-## Mandatory 2025 QC
+## Locked annual benchmarks
 
-1. Confirm Day Surgery plus Normal Delivery plus Inpatient Surgery equals 125,949.
-2. Confirm monthly totals sum to 125,949.
-3. Confirm no record remains unclassified under the required `PATIENT_TYPE`/`S_CODE` logic.
-4. Calculate checks programmatically and investigate any mismatch before reporting.
+| Period | Day surgery | Normal delivery | Inpatient surgery | Total | Emergency |
+|---|---:|---:|---:|---:|---:|
+| CY2023 | 69,886 | 2,831 | 38,237 | 110,954 | 16,416 |
+| CY2024 | 73,061 | 2,730 | 39,112 | 114,903 | 14,137 |
+| CY2025 | 83,467 | 2,537 | 39,945 | 125,949 | 13,804 |
+| H1 2026 | 42,210 | 1,146 | 20,716 | 64,072 | 7,560 |
+
+QC: category total equals procedure total; Emergency plus Elective equals total;
+monthly totals roll to annual total; and no `Unclassified` category exists. For
+CY2025, Elective is 112,145. Investigate a Feb–Sep 2024 total below 7,000 as a
+likely source-filter error.

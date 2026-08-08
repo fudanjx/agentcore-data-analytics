@@ -1,4 +1,4 @@
-"""Stage and replace the four NUH analytics tables from S3 Parquet sources.
+"""Stage and replace selected NUH analytics tables from S3 Parquet sources.
 
 The loader deliberately keeps Parquet physical types and source column names:
 whitespace in names becomes ``_`` and ``Unnamed*`` columns are omitted.  The
@@ -38,6 +38,7 @@ JOBS = (
     ("sc_encoded.parquet.gzip", "soc"),
     ("su_encoded.parquet.gzip", "surgery"),
 )
+TABLES_ENV = "NUH_ETL_TABLES"
 
 EVENT_ED_TO_EDTU_DATE = "EVENT_ED_TO_EDTU_DATE"
 PERIOD = "PERIOD"
@@ -50,6 +51,27 @@ SLASH_DATE_RE = re.compile(r"^\d{1,2}/\d{1,2}/\d{4}$")
 
 class SourceValidationError(ValueError):
     """The input would require an unapproved or ambiguous transformation."""
+
+
+def selected_jobs() -> tuple[tuple[str, str], ...]:
+    """Return all jobs, or the explicit comma-separated table subset requested."""
+    selected = os.environ.get(TABLES_ENV)
+    if not selected:
+        return JOBS
+
+    requested = [table.strip() for table in selected.split(",") if table.strip()]
+    if not requested:
+        raise SourceValidationError(f"{TABLES_ENV} must name at least one table")
+    if len(set(requested)) != len(requested):
+        raise SourceValidationError(f"{TABLES_ENV} contains duplicate table names")
+
+    jobs_by_table = {table: (s3_key, table) for s3_key, table in JOBS}
+    unknown = sorted(set(requested) - jobs_by_table.keys())
+    if unknown:
+        raise SourceValidationError(
+            f"{TABLES_ENV} contains unsupported table(s): {', '.join(unknown)}"
+        )
+    return tuple(jobs_by_table[table] for table in requested)
 
 
 @dataclass(frozen=True)
@@ -162,6 +184,12 @@ def apply_emd_event_date_rule(frame: pd.DataFrame) -> pd.DataFrame:
     """Make the sole approved string-date exception an unambiguous timestamp."""
     if EVENT_ED_TO_EDTU_DATE not in frame.columns or PERIOD not in frame.columns:
         raise SourceValidationError("EMD is missing the date exception or PERIOD column")
+
+    # Refreshed Parquet files may carry this column as a native timestamp. It is
+    # already unambiguous, so preserve it exactly instead of formatting it back
+    # to text and re-parsing only midnight values.
+    if pd.api.types.is_datetime64_any_dtype(frame[EVENT_ED_TO_EDTU_DATE]):
+        return frame
 
     values = frame[EVENT_ED_TO_EDTU_DATE].astype("string")
     periods = frame[PERIOD].astype("string")
@@ -307,12 +335,12 @@ def validate_table(
     return {"source_rows": source_rows, "target_rows": target_rows, "schema_match": True}
 
 
-def replace_public_tables(conn):
-    """Atomically replace only the four user-approved public tables."""
+def replace_public_tables(conn, jobs: tuple[tuple[str, str], ...]):
+    """Atomically replace only the public tables selected for this run."""
     with conn.cursor() as cur:
-        for _, table in JOBS:
+        for _, table in jobs:
             cur.execute(f"DROP TABLE IF EXISTS public.{quote_ident(table)}")
-        for _, table in JOBS:
+        for _, table in jobs:
             cur.execute(
                 f"ALTER TABLE {quote_ident(STAGING_SCHEMA)}.{quote_ident(table)} "
                 "SET SCHEMA public"
@@ -327,11 +355,12 @@ def main():
     s3 = boto3.client("s3", region_name=REGION)
     report: dict[str, dict] = {}
     source_contracts: dict[str, tuple[list[ColumnSpec], int]] = {}
+    jobs = selected_jobs()
 
     conn = get_conn(creds)
     try:
         create_staging_schema(conn)
-        for s3_key, table in JOBS:
+        for s3_key, table in jobs:
             head = s3.head_object(Bucket=S3_BUCKET, Key=s3_key)
             path = download_parquet(s3, s3_key)
             try:
@@ -366,9 +395,9 @@ def main():
                 os.unlink(path)
 
         print(json.dumps({"event": "stage_validated", "tables": report}, sort_keys=True))
-        replace_public_tables(conn)
+        replace_public_tables(conn, jobs)
         public_report = {}
-        for _, table in JOBS:
+        for _, table in jobs:
             specs, source_rows = source_contracts[table]
             public_report[table] = validate_table(
                 conn, "public", table, specs, source_rows

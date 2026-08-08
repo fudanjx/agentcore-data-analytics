@@ -1,85 +1,62 @@
 ---
 name: nuh-analytics-soc
-description: Column reference and SQL guidance for the NUH soc table. Use when analyzing NUH specialist outpatient clinic visits, new versus repeat visits, private versus subsidised activity, clusters, specialties, or NUWoC-relevant activity.
+description: Column reference and SQL guidance for NUH soc. Use when analyzing specialist outpatient visits, new versus repeat visits, private versus subsidised activity, clinics, or specialties across 2023 to June 2026.
 ---
 
-# NUH Analytics — soc table
+# NUH Analytics — soc
 
-**One row is an actualized specialist outpatient clinic visit. Primary date: `SOC_VISIT_DATE`.**
+**One row is one actualised SOC visit. Primary date: `SOC_VISIT_DATE`. Coverage:
+January 2023–June 2026.** Do not add an `APPT_STATUS` filter.
 
-The supplied logic is QC-verified for January–December 2025.
+## New / repeat hybrid logic
 
-## Base filter
-
-```sql
-FROM soc
-WHERE "SOC_VISIT_DATE" IS NOT NULL
-```
-
-Do not add an `APPT_STATUS` filter: all rows in this table are already actualized
-visits.
-
-## Core fields and classifications
-
-| Column | Use |
-|---|---|
-| `SOC_VISIT_DATE` | Visit date and monthly time series |
-| `VISIT_TYPE_GRP` | Two-way visit classification: `New` or `Repeat` |
-| `PTE_SUB_GRP` | Patient class: `Subsidised Patients` or `Private Patients` |
-| `CLUSTER` | Cluster code, for example `(09) O&G` and `(06) UCMI` |
-| `MOH_SPEC_DESC` | Specialty description |
-
-Use `VISIT_TYPE_GRP`, not `NEW_REPEAT`. The latter has a third `Other` category
-(PA/TM types) and does not produce a complete two-way split; the locked source
-notes 4,848 affected records.
-
-## Example: monthly visits by visit type
+For CY2024 onward, use native `VISIT_TYPE_GRP`. For CY2023 and earlier, derive
+from `VISIT_TYPE`:
 
 ```sql
-SELECT
-  DATE_TRUNC('month', "SOC_VISIT_DATE") AS month,
-  "VISIT_TYPE_GRP",
-  COUNT(*) AS visits
-FROM soc
-WHERE "SOC_VISIT_DATE" IS NOT NULL
-  AND "SOC_VISIT_DATE" >= DATE '2025-01-01'
-  AND "SOC_VISIT_DATE" < DATE '2026-01-01'
-GROUP BY 1, 2
-ORDER BY 1, 2;
+CASE
+  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01' THEN "VISIT_TYPE_GRP"
+  WHEN "VISIT_TYPE" IN ('FV','PA','FD','FW','DF','TM','FS','GF') THEN 'New'
+  WHEN "VISIT_TYPE" IN ('RV','RD','DR','RW') THEN 'Repeat'
+  ELSE 'Unclassified'
+END AS visit_type_grp_derived
 ```
 
-## NUWoC-relevant clusters
+Use this logic rather than `NEW_REPEAT`, which has an `Other` category.
 
-| Cluster | Description |
-|---|---|
-| `(09) O&G` | Obstetrics and Gynaecology |
-| `(06) UCMI` | Paediatric / Child Medicine (UCMI) |
+## Private / subsidised hybrid logic
 
-NUWoC total is the sum of these two clusters.
+For CY2024 onward, use native `PTE_SUB_GRP`. For CY2023 and earlier, derive
+from `PATIENT_CLASS`:
 
-## 2025 locked benchmarks
-
-| Metric | Count | Share |
-|---|---:|---:|
-| New visits | 220,081 | 22.5% |
-| Repeat visits | 758,002 | 77.5% |
-| Total SOC visits | 978,083 | 100% |
-| Subsidised | 768,783 | 78.6% |
-| Private | 209,300 | 21.4% |
-| `(09) O&G` | 107,153 | 11.0% |
-| `(06) UCMI` | 77,151 | 7.9% |
-| NUWoC total | 184,304 | 18.8% |
-
-## Mandatory 2025 QC
-
-For a matching full-year query, calculate and confirm:
-
-```text
-New + Repeat = 978,083
-Subsidised + Private = 978,083
-Sum of every cluster = 978,083
-Sum of monthly visits = 978,083
+```sql
+CASE
+  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01' THEN "PTE_SUB_GRP"
+  WHEN "PATIENT_CLASS" IN ('PTE','NR','PTRF','PTEP','A','B1','AP','ARF',
+                            'NRB1','CRF','B1P','B1RF','B2RF') THEN 'Private Patients'
+  WHEN "PATIENT_CLASS" IN ('SUB','SUBP','B2','C','B2P','CP') THEN 'Subsidised Patients'
+  ELSE 'Unclassified'
+END AS pte_sub_grp_derived
 ```
 
-Inspect the relevant classification field when an assertion fails. Do not use
-manual arithmetic as evidence of a passing check.
+Flag unclassified records before reporting. The approved mappings have zero
+unclassified CY2023 records.
+
+## Other fields
+
+Use `TREATMENT_OU_CLINIC` for clinic-level analysis and `MOH_SPEC_DESC` for
+specialty. Do not apply the old 2025-only `CLUSTER` rule unless the user
+specifically needs that legacy view.
+
+## Locked benchmarks
+
+| Period | Total | New | Repeat | Private | Subsidised |
+|---|---:|---:|---:|---:|---:|
+| CY2023 | 917,990 | 210,571 | 707,419 | 217,358 | 700,632 |
+| CY2024 | 945,716 | 211,891 | 733,825 | 210,407 | 735,309 |
+| CY2025 | 978,083 | 220,081 | 758,002 | 209,300 | 768,783 |
+| H1 2026 | 497,978 | 111,209 | 386,769 | 104,160 | 393,818 |
+
+For every period, calculate in SQL and confirm New plus Repeat equals total and
+Private plus Subsidised equals total. Confirm the annual value is the sum of the
+same monthly rows displayed.
