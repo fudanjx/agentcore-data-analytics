@@ -85,6 +85,7 @@ MAX_ARTIFACTS_PER_RESPONSE = 10
 MAX_ARTIFACT_MARKER_BYTES = 64 * 1024
 DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+_STATUS_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
 _DIFY_CONVERSATION_ID_RE = re.compile(
     r"\s*<C_ID>"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -581,6 +582,12 @@ def _stream_runtime_events(
                     event = json.loads(payload)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
+                if event.get("event") == "agent_step":
+                    status = _runtime_status(event.get("step"))
+                    if status is not None:
+                        first_token_sent = True
+                        yield status
+                    continue
                 choices = event.get("choices") or []
                 if not choices:
                     continue
@@ -607,8 +614,50 @@ def _invoke_runtime_buffered(
 ) -> str:
     """Collect a Runtime SSE response for an OpenAI non-streaming request."""
     return "".join(
-        _stream_runtime_events(messages, runtime_arn, session_id, user_id)
+        _format_runtime_status(event) if isinstance(event, _RuntimeStatus) else event
+        for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id)
     )
+
+
+class _RuntimeStatus:
+    """Validated status metadata received from a Runtime sideband SSE event."""
+
+    __slots__ = ("kind", "name", "status")
+
+    def __init__(self, kind: str, name: str, status: str):
+        self.kind = kind
+        self.name = name
+        self.status = status
+
+
+def _runtime_status(step) -> _RuntimeStatus | None:
+    if not isinstance(step, dict):
+        return None
+    kind = step.get("type")
+    status = step.get("status")
+    name = step.get("name")
+    if kind not in {"skill", "tool"} or status not in {
+        "started",
+        "completed",
+        "failed",
+    }:
+        return None
+    if not isinstance(name, str):
+        return None
+    name = _STATUS_NAME_UNSAFE_RE.sub("", " ".join(name.split())).strip()[:120]
+    if not name:
+        return None
+    return _RuntimeStatus(kind, name, status)
+
+
+def _format_runtime_status(event: _RuntimeStatus) -> str:
+    label = "Skill" if event.kind == "skill" else "Tool"
+    state = {
+        "started": "running",
+        "completed": "completed",
+        "failed": "failed",
+    }[event.status]
+    return f"> **{label}:** `{event.name}` - {state}\n\n"
 
 
 class _ArtifactStreamSanitizer:
@@ -1030,8 +1079,11 @@ def _sse_artifact_stream(
         return f"data: {json.dumps(chunk)}\n\n"
 
     try:
-        for text in events:
-            for content in sanitizer.feed(text):
+        for item in events:
+            if isinstance(item, _RuntimeStatus):
+                yield stream_chunk(_format_runtime_status(item))
+                continue
+            for content in sanitizer.feed(item):
                 if content:
                     yield stream_chunk(content)
     except Exception as error:

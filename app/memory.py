@@ -13,18 +13,6 @@ MEMORY_ID = os.environ.get(
     "MEMORY_ID",
     "memory_runtime_dev-QNTwTS3Onp",
 )
-SEMANTIC_STRATEGY_ID = os.environ.get(
-    "MEMORY_SEMANTIC_STRATEGY_ID",
-    "semantic_builtin_8v5qp-vuvXBMFd6q",
-)
-PREFERENCE_STRATEGY_ID = os.environ.get(
-    "MEMORY_PREFERENCE_STRATEGY_ID",
-    "preference_builtin_8v5qp-YXpdmYG70z",
-)
-SUMMARY_STRATEGY_ID = os.environ.get(
-    "MEMORY_SUMMARY_STRATEGY_ID",
-    "summary_builtin_8v5qp-qRrGiHGRMt",
-)
 MAX_SHORT_TERM_EVENTS = min(
     100,
     max(1, int(os.environ.get("MEMORY_MAX_SHORT_TERM_EVENTS", "30"))),
@@ -35,6 +23,14 @@ MAX_SHORT_TERM_CONTEXT_CHARS = max(
 )
 
 _client = None
+_control_client = None
+_strategy_ids: tuple[str, ...] | None = None
+
+_LONG_TERM_STRATEGY_TYPES = (
+    "SEMANTIC",
+    "USER_PREFERENCE",
+    "SUMMARIZATION",
+)
 
 
 def _get_client():
@@ -42,6 +38,61 @@ def _get_client():
     if _client is None:
         _client = boto3.client("bedrock-agentcore", region_name=REGION)
     return _client
+
+
+def _get_control_client():
+    global _control_client
+    if _control_client is None:
+        _control_client = boto3.client("bedrock-agentcore-control", region_name=REGION)
+    return _control_client
+
+
+def _get_strategy_ids() -> tuple[str, ...]:
+    """Discover and cache active long-term-memory strategies for this memory."""
+    global _strategy_ids
+    if _strategy_ids is not None:
+        return _strategy_ids
+
+    try:
+        response = _get_control_client().get_memory(memoryId=MEMORY_ID)
+    except Exception as error:
+        # Do not cache failures so a later request can retry discovery.
+        logger.warning("Memory: strategy discovery failed: %s", error)
+        return ()
+
+    strategies = response.get("memory", {}).get("strategies", [])
+    active_by_type: dict[str, list[str]] = {
+        strategy_type: [] for strategy_type in _LONG_TERM_STRATEGY_TYPES
+    }
+    for strategy in strategies:
+        strategy_type = strategy.get("type")
+        strategy_id = strategy.get("strategyId")
+        if (
+            strategy.get("status") == "ACTIVE"
+            and strategy_type in active_by_type
+            and isinstance(strategy_id, str)
+            and strategy_id
+        ):
+            active_by_type[strategy_type].append(strategy_id)
+
+    _strategy_ids = tuple(
+        strategy_id
+        for strategy_type in _LONG_TERM_STRATEGY_TYPES
+        for strategy_id in active_by_type[strategy_type]
+    )
+    missing_types = [
+        strategy_type
+        for strategy_type, strategy_ids in active_by_type.items()
+        if not strategy_ids
+    ]
+    if missing_types:
+        logger.warning(
+            "Memory: no active strategies found for types: %s",
+            ", ".join(missing_types),
+        )
+    else:
+        logger.info("Memory: discovered %d active strategies", len(_strategy_ids))
+    return _strategy_ids
 
 
 def retrieve_short_term_context(actor_id: str, session_id: str) -> str:
@@ -121,13 +172,7 @@ def retrieve_long_term_context(actor_id: str, query: str) -> str:
     # Summary records live below a session-specific child namespace, but the
     # RetrieveMemoryRecords `namespace` parameter is a prefix. Searching from
     # the actor level therefore includes summaries from the actor's sessions.
-    for strategy_id in (
-        SEMANTIC_STRATEGY_ID,
-        PREFERENCE_STRATEGY_ID,
-        SUMMARY_STRATEGY_ID,
-    ):
-        if not strategy_id:
-            continue
+    for strategy_id in _get_strategy_ids():
         namespace = f"/strategies/{strategy_id}/actors/{actor_id}/"
         try:
             records = client.retrieve_memory_records(

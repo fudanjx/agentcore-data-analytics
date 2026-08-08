@@ -204,6 +204,63 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(text, "Hello world")
         self.assertEqual(len(client.calls), 1)
 
+    def test_runtime_stream_extracts_sanitized_agent_status_events(self):
+        client = FakeRuntimeClient(
+            [
+                b'data: {"event":"agent_step","step":{"type":"skill",'
+                b'"name":"admission-analysis","status":"started"}}',
+                b'data: {"event":"agent_step","step":{"type":"tool",'
+                b'"name":"NUH: query data<script>","status":"completed"}}',
+                b'data: {"choices":[{"delta":{"content":"Answer"}}]}',
+                b"data: [DONE]",
+            ]
+        )
+
+        with patch.object(
+            dify_server,
+            "get_agentcore_client",
+            return_value=client,
+        ):
+            events = list(
+                dify_server._stream_runtime_events(
+                    [{"role": "user", "content": "hello"}],
+                    "arn:runtime",
+                    "session-id",
+                    "user-id",
+                )
+            )
+
+        self.assertIsInstance(events[0], dify_server._RuntimeStatus)
+        self.assertEqual(events[0].kind, "skill")
+        self.assertEqual(events[0].name, "admission-analysis")
+        self.assertEqual(events[1].name, "NUH: query datascript")
+        self.assertEqual(events[2], "Answer")
+
+    def test_artifact_stream_renders_runtime_status_as_visible_markdown(self):
+        events = iter(
+            [
+                dify_server._RuntimeStatus("skill", "admission-analysis", "started"),
+                dify_server._RuntimeStatus("tool", "NUH: query data", "completed"),
+                "Answer",
+            ]
+        )
+
+        with patch.object(dify_server, "_resolve_artifacts", return_value=[]):
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    events,
+                    "runtime",
+                    "session-id",
+                    "dev",
+                    "chatcmpl-test",
+                    ("user-id", "session-id", {}),
+                )
+            )
+
+        self.assertIn("**Skill:** `admission-analysis`", response)
+        self.assertIn("**Tool:** `NUH: query data`", response)
+        self.assertIn("Answer", response)
+
     def test_non_streaming_completion_dispatches_to_runtime(self):
         messages = [{"role": "user", "content": "hello"}]
         with (

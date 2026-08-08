@@ -79,13 +79,26 @@ async def _sse_stream(messages: list[dict], model_slug: str,
     created = int(time.time())
 
     try:
-        async for text in agent.stream(messages, actor_id=actor_id, session_id=session_id):
+        async for item in agent.stream(messages, actor_id=actor_id, session_id=session_id):
+            if isinstance(item, agent.AgentStep):
+                yield "data: " + json.dumps(
+                    {
+                        "event": "agent_step",
+                        "step": {
+                            "type": item.kind,
+                            "name": item.name,
+                            "status": item.status,
+                        },
+                    }
+                ) + "\n\n"
+                continue
+
             chunk = {
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
                 "model": model_slug,
-                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
+                "choices": [{"index": 0, "delta": {"content": item}, "finish_reason": None}],
             }
             yield f"data: {json.dumps(chunk)}\n\n"
     except Exception as e:

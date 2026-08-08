@@ -47,6 +47,23 @@ The poc container no longer talks to RDS directly. It uses the three AgentCore G
 
 ### Step 1 — Build and deploy
 
+Configure the runtime gateways with one JSON environment variable. Each key is
+the MCP server slug used in tool names; `label` is the user-visible tool-status
+name. The URL and ARN must describe the same AgentCore Gateway. The ARN also
+determines the SigV4 signing region and the Runtime role's `InvokeGateway`
+resources.
+
+```bash
+export AGENTCORE_GATEWAYS_JSON='{"nuh":{"label":"NUH","url":"https://nuh-analytics-db-fhbzdmtdta.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/nuh-analytics-db-fhbzdmtdta"},"ah":{"label":"AH","url":"https://ah-analytics-db-gszih4adsx.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-db-gszih4adsx"},"fm":{"label":"TimesFM","url":"https://timesfm-gateway-w4fho4r9um.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/timesfm-gateway-w4fho4r9um"}}'
+```
+
+The current mapping is also shown in `.env.example`. If the variable is
+omitted, the application uses that current three-gateway mapping for backward
+compatibility. `infra/deploy.py` validates the mapping, updates the Runtime IAM
+policy from its ARNs, and passes the canonical JSON into the Runtime container.
+Changing a gateway therefore requires updating this variable and redeploying;
+there is no separate label dictionary to edit.
+
 ```bash
 bash infra/build_and_push.sh       # linux/arm64 → ECR
 export ECR_IMAGE_URI=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:latest
@@ -55,11 +72,11 @@ python3 infra/deploy.py            # creates IAM role + Runtime + Endpoint (idem
 
 The IAM role provisioned by `infra/deploy.py` includes:
 - `bedrock:InvokeModel*` on the inference profile
-- `bedrock-agentcore:InvokeGateway` on the three gateway ARNs (nuh, ah, timesfm)
+- `bedrock-agentcore:InvokeGateway` on the configured gateway ARNs
 - `bedrock-agentcore:StartCodeInterpreterSession`/`InvokeCodeInterpreter`/
   `StopCodeInterpreterSession` on the configured custom Code Interpreter
 - `s3:GetObject`/`ListBucket` on the Skills bucket
-- `bedrock-agentcore:CreateEvent`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
+- `bedrock-agentcore:CreateEvent`/`GetMemory`/`RetrieveMemoryRecords`/`ListEvents` on the shared memory ARN
 - `ec2:CreateNetworkInterface`/... for VPC mode
 - No RDS or Secrets Manager access — this container no longer needs it
 
@@ -68,13 +85,37 @@ role manages Code Interpreter sessions; the custom Code Interpreter's own
 execution role must grant `s3:GetObject` for uploaded-file prefixes and
 `s3:PutObject` for generated-artifact prefixes.
 
-The Runtime also receives the AgentCore Memory ID and generated semantic,
-preference, and summary strategy IDs. On every request it loads recent raw
-events for the current actor/session as short-term memory, then searches those
-strategy namespaces for relevant cross-session long-term memory. Summary
-records are stored below session-specific namespaces and are retrieved using
-their actor-level namespace prefix. The proxy must therefore pass a stable user
-ID and conversation UUID.
+The Runtime receives the AgentCore Memory ID and uses `GetMemory` to discover
+and cache its active semantic, preference, and summary strategies. On every
+request it loads recent raw events for the current actor/session as short-term
+memory, then searches those strategy namespaces for relevant cross-session
+long-term memory. Summary records are stored below session-specific namespaces
+and are retrieved using their actor-level namespace prefix. The proxy must
+therefore pass a stable user ID and conversation UUID.
+
+To inventory long-term records without changing them:
+
+```bash
+python infra/clear_long_term_memory.py \
+  --memory-id memory_runtime_dev-QNTwTS3Onp
+```
+
+The script is dry-run by default and does not display record content. Clearing
+all long-term records requires both explicit execution and an exact target-ID
+confirmation:
+
+```bash
+python infra/clear_long_term_memory.py \
+  --memory-id memory_runtime_dev-QNTwTS3Onp \
+  --execute \
+  --confirm-memory-id memory_runtime_dev-QNTwTS3Onp
+```
+
+The caller needs `bedrock-agentcore:ListMemoryRecords` and
+`bedrock-agentcore:BatchDeleteMemoryRecords` on the Memory ARN. This operation
+does not delete short-term events, strategies, or the Memory resource. Pause
+new traffic first if the memory must remain empty, because new turns or
+in-flight extraction jobs can create records during or after maintenance.
 
 ### Step 2 — Verify
 
@@ -94,6 +135,10 @@ Gateway SigV4 proxy listening on 127.0.0.1:9000
 ## Part 2 — EKS Proxy
 
 The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore runtimes/harnesses.
+Runtime skill and tool lifecycle events are carried as private sideband SSE
+events. The Dify proxy validates these events and renders user-visible Markdown
+status lines containing only the skill/tool name and state; tool inputs and
+outputs are never forwarded to the user.
 
 ### Step 1 — Prep IRSA (one-time)
 

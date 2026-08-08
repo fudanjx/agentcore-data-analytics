@@ -1,5 +1,5 @@
 
-
+aws ecr get-login-password --region ap-southeast-1 | docker login --username AWS --password-stdin 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com
 
 ### Upload document-review skill Markdown files to S3
 
@@ -35,10 +35,10 @@ kubectl get svc agentcore-dify-proxy-internal \
 ###agentcore
 
 # Bash
-export TAG=v0.0.3
+export TAG=v0.0.2
 docker buildx build --platform linux/arm64 --push \
   -t 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG} .
-
+docker push 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG}
 export AWS_DEFAULT_REGION="ap-southeast-1"
 export ECR_IMAGE_URI="964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-poc:${TAG}"
 python infra/deploy.py
