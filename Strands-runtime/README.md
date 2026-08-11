@@ -52,7 +52,7 @@ The blocking response is:
 }
 ```
 
-With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE objects with `choices[0].delta.content`, plus sanitized `agent_step` sideband events and a final stop chunk. Tool inputs and results are not exposed in status events. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
+With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE objects with `choices[0].delta.content`, sanitized `agent_step` sideband events, a final `model_usage` sideband event, and a final stop chunk. Tool inputs and results are not exposed in status events. The Dify proxy converts `model_usage` into an OpenAI usage chunk so Dify can persist aggregate prompt and completion tokens. Cache-read, cache-write, and estimated-cost details remain in the Runtime's `MODEL_USAGE` CloudWatch record because Dify's standard message schema only supports aggregate token counts. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
 
 ## Configuration
 
@@ -61,6 +61,13 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `MODEL_ID` / `MODEL_ARN` | Reference application inference profile ARN | Bedrock model used by Strands |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
 | `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
+| `ENABLE_MODEL_USAGE_LOGS` | `true` | Emit one `MODEL_USAGE` JSON log after every invocation, without prompt or response content |
+| `MODEL_PRICING_LABEL` | `claude-sonnet-4.6-standard-2026-08` | Label included with estimated-cost logs so the configured rates can be audited |
+| `MODEL_INPUT_PRICE_PER_MTOK_USD` | `3.00` | Estimated uncached-input price in USD per million tokens |
+| `MODEL_OUTPUT_PRICE_PER_MTOK_USD` | `15.00` | Estimated output price in USD per million tokens |
+| `MODEL_CACHE_READ_PRICE_PER_MTOK_USD` | `0.30` | Estimated cache-read price in USD per million tokens |
+| `MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD` | `3.75` | Estimated five-minute cache-write price in USD per million tokens |
+| `MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD` | `6.00` | Estimated one-hour cache-write price in USD per million tokens |
 | `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; the packaged prompt is used when unset |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | `200000` | Maximum permitted size of the S3 system-prompt object |
 | `AGENTCORE_GATEWAYS_JSON` | Reference NUH, AH, and TimesFM Gateways | Gateway label, HTTPS URL, ARN, and inferred region mapping |
@@ -83,6 +90,21 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 Set `CODE_INTERPRETER_ID` or `MEMORY_ID` to an empty string to disable that integration. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` are useful for a minimal smoke test.
+
+Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
+
+Example CloudWatch Logs Insights query:
+
+```text
+fields @timestamp, @message
+| filter @message like /MODEL_USAGE/
+| parse @message /"session_id":"(?<session_id>[^"]+)"/
+| parse @message /"cache_read_input_tokens":(?<cache_read>\d+)/
+| parse @message /"cache_write_input_tokens":(?<cache_write>\d+)/
+| parse @message /"estimated_cost_usd":(?<estimated_cost>[0-9.]+)/
+| sort @timestamp desc
+| display @timestamp, session_id, cache_read, cache_write, estimated_cost
+```
 
 When memory is enabled, AgentCore Memory is the source of truth for prior conversation turns. The Runtime sends only the latest user message from an OpenAI-style `messages` payload to Strands, preventing the caller's flattened history from duplicating the session restored by `AgentCoreMemorySessionManager`. Raw tool requests and results are excluded from durable conversational memory; the user turn and final assistant response are retained. Legacy plain-text events written by the previous Runtime implementation remain readable.
 

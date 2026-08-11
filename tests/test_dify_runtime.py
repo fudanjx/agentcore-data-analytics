@@ -236,6 +236,44 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(events[1].name, "NUH: query datascript")
         self.assertEqual(events[2], "Answer")
 
+    def test_runtime_stream_extracts_aggregate_model_usage(self):
+        client = FakeRuntimeClient(
+            [
+                b'data: {"choices":[{"delta":{"content":"Answer"}}]}',
+                (
+                    b'data: {"event":"model_usage","input_tokens":1000,'
+                    b'"output_tokens":100,"cache_read_input_tokens":2000,'
+                    b'"cache_write_input_tokens":4000,"total_input_tokens":7000}'
+                ),
+                b"data: [DONE]",
+            ]
+        )
+
+        with patch.object(
+            dify_server,
+            "get_agentcore_client",
+            return_value=client,
+        ):
+            events = list(
+                dify_server._stream_runtime_events(
+                    [{"role": "user", "content": "hello"}],
+                    "arn:runtime",
+                    "session-id",
+                    "user-id",
+                )
+            )
+
+        self.assertEqual(events[0], "Answer")
+        self.assertIsInstance(events[1], dify_server._RuntimeUsage)
+        self.assertEqual(
+            events[1].as_openai(),
+            {
+                "prompt_tokens": 7000,
+                "completion_tokens": 100,
+                "total_tokens": 7100,
+            },
+        )
+
     def test_artifact_stream_renders_runtime_status_as_visible_markdown(self):
         events = iter(
             [
@@ -261,13 +299,52 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertIn("**Tool:** `NUH: query data`", response)
         self.assertIn("Answer", response)
 
+    def test_artifact_stream_emits_final_openai_usage_chunk(self):
+        events = iter(
+            [
+                "Answer",
+                dify_server._RuntimeUsage(7000, 100),
+            ]
+        )
+
+        with patch.object(dify_server, "_resolve_artifacts", return_value=[]):
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    events,
+                    "runtime",
+                    "session-id",
+                    "dev",
+                    "chatcmpl-test",
+                    ("user-id", "session-id", {}),
+                )
+            )
+
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.splitlines()
+            if line.startswith("data: {")
+        ]
+        self.assertEqual(chunks[-1]["choices"], [])
+        self.assertEqual(
+            chunks[-1]["usage"],
+            {
+                "prompt_tokens": 7000,
+                "completion_tokens": 100,
+                "total_tokens": 7100,
+            },
+        )
+        self.assertTrue(response.endswith("data: [DONE]\n\n"))
+
     def test_non_streaming_completion_dispatches_to_runtime(self):
         messages = [{"role": "user", "content": "hello"}]
         with (
             patch.object(
                 dify_server,
                 "_invoke_runtime_buffered",
-                return_value="runtime answer",
+                return_value=dify_server._BufferedRuntimeResult(
+                    "runtime answer",
+                    dify_server._RuntimeUsage(7000, 100),
+                ),
             ) as invoke_runtime,
             patch.object(
                 dify_server,
@@ -298,6 +375,14 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(
             response["choices"][0]["message"]["content"],
             "runtime answer with artifacts",
+        )
+        self.assertEqual(
+            response["usage"],
+            {
+                "prompt_tokens": 7000,
+                "completion_tokens": 100,
+                "total_tokens": 7100,
+            },
         )
 
     def test_runtime_chat_adds_artifact_prompt(self):

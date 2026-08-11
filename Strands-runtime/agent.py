@@ -1,7 +1,9 @@
 """Strands data analyst with Gateway, Memory, skills, and Code Interpreter."""
 
 import asyncio
+import json
 import logging
+import math
 import os
 import re
 import time
@@ -21,6 +23,19 @@ from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
 from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
+
+
+def _price_env(name: str, default: str) -> float:
+    raw = os.environ.get(name, default).strip()
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a non-negative number") from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
+    return value
+
+
 MODEL_ID = os.environ.get(
     "MODEL_ID",
     os.environ.get(
@@ -32,6 +47,27 @@ MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
 PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
 if PROMPT_CACHE_TTL not in {"5m", "1h"}:
     raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h'")
+ENABLE_MODEL_USAGE_LOGS = os.environ.get(
+    "ENABLE_MODEL_USAGE_LOGS", "true"
+).lower() not in {"0", "false", "no"}
+MODEL_PRICING_LABEL = os.environ.get(
+    "MODEL_PRICING_LABEL", "claude-sonnet-4.6-standard-2026-08"
+).strip()
+MODEL_INPUT_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_INPUT_PRICE_PER_MTOK_USD", "3.00"
+)
+MODEL_OUTPUT_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_OUTPUT_PRICE_PER_MTOK_USD", "15.00"
+)
+MODEL_CACHE_READ_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_READ_PRICE_PER_MTOK_USD", "0.30"
+)
+MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD", "3.75"
+)
+MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD", "6.00"
+)
 ENABLE_GATEWAYS = os.environ.get("ENABLE_GATEWAYS", "true").lower() not in {"0", "false", "no"}
 ENABLE_CODE_INTERPRETER = os.environ.get(
     "ENABLE_CODE_INTERPRETER", "true"
@@ -186,6 +222,95 @@ def _model_region() -> str:
     return match.group(1) if match else os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
 
 
+def _model_usage_payload(
+    request: InvocationRequest,
+    runtime_agent: Any,
+    *,
+    duration_ms: int,
+    succeeded: bool,
+) -> dict[str, Any] | None:
+    metrics = getattr(runtime_agent, "event_loop_metrics", None)
+    usage = getattr(metrics, "accumulated_usage", None)
+    if not isinstance(usage, dict):
+        return None
+
+    input_tokens = int(usage.get("inputTokens", 0) or 0)
+    output_tokens = int(usage.get("outputTokens", 0) or 0)
+    cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
+    cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
+    total_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+    cache_write_rate = (
+        MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD
+        if PROMPT_CACHE_TTL == "1h"
+        else MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD
+    )
+
+    def cost(tokens: int, rate: float) -> float:
+        return round(tokens * rate / 1_000_000, 10)
+
+    cost_breakdown = {
+        "input": cost(input_tokens, MODEL_INPUT_PRICE_PER_MTOK_USD),
+        "output": cost(output_tokens, MODEL_OUTPUT_PRICE_PER_MTOK_USD),
+        "cache_read": cost(
+            cache_read_tokens,
+            MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
+        ),
+        "cache_write": cost(cache_write_tokens, cache_write_rate),
+    }
+    return {
+        "event": "model_usage",
+        "model_id": MODEL_ID,
+        "model_slug": request.model_slug,
+        "session_id": request.session_id,
+        "stream": request.stream,
+        "succeeded": succeeded,
+        "duration_ms": duration_ms,
+        "prompt_cache_ttl": PROMPT_CACHE_TTL,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_tokens,
+        "cache_write_input_tokens": cache_write_tokens,
+        "total_input_tokens": total_input_tokens,
+        "total_tokens_reported": int(usage.get("totalTokens", 0) or 0),
+        "cache_read_ratio": (
+            round(cache_read_tokens / total_input_tokens, 6)
+            if total_input_tokens
+            else 0.0
+        ),
+        "estimated_cost_usd": round(sum(cost_breakdown.values()), 10),
+        "estimated_cost_breakdown_usd": cost_breakdown,
+        "pricing": {
+            "label": MODEL_PRICING_LABEL,
+            "unit": "USD_per_million_tokens",
+            "input": MODEL_INPUT_PRICE_PER_MTOK_USD,
+            "output": MODEL_OUTPUT_PRICE_PER_MTOK_USD,
+            "cache_read": MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
+            "cache_write": cache_write_rate,
+        },
+    }
+
+
+def _log_model_usage(
+    request: InvocationRequest,
+    runtime_agent: Any,
+    *,
+    started_at: float,
+    succeeded: bool,
+) -> dict[str, Any] | None:
+    """Collect final invocation usage and optionally write it to CloudWatch logs."""
+    if runtime_agent is None:
+        return None
+    payload = _model_usage_payload(
+        request,
+        runtime_agent,
+        duration_ms=round((time.perf_counter() - started_at) * 1000),
+        succeeded=succeeded,
+    )
+    if payload is not None and ENABLE_MODEL_USAGE_LOGS:
+        logger.info("MODEL_USAGE %s", json.dumps(payload, separators=(",", ":")))
+    return payload
+
+
 def _make_gateway_clients() -> list[MCPClient]:
     if not ENABLE_GATEWAYS:
         return []
@@ -311,6 +436,8 @@ def _cleanup(
 
 def run(request: InvocationRequest) -> dict:
     """Run one isolated Strands invocation and return a blocking response."""
+    started_at = time.perf_counter()
+    succeeded = False
     runtime_agent = None
     interpreter_session = None
     memory_session_manager = None
@@ -318,12 +445,19 @@ def run(request: InvocationRequest) -> dict:
         runtime_agent, interpreter_session, memory_session_manager, prompt = _prepare(request)
         result = runtime_agent(prompt)
         text = _result_text(result)
+        succeeded = True
         return {
             "result": text,
             "session_id": request.session_id,
             "model": request.model_slug,
         }
     finally:
+        _log_model_usage(
+            request,
+            runtime_agent,
+            started_at=started_at,
+            succeeded=succeeded,
+        )
         _cleanup(runtime_agent, interpreter_session, memory_session_manager)
 
 
@@ -343,9 +477,12 @@ def _safe_tool_name(value: Any) -> str:
 
 async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     """Stream OpenAI-compatible chunks for the existing Dify proxy."""
+    started_at = time.perf_counter()
+    succeeded = False
     runtime_agent = None
     interpreter_session = None
     memory_session_manager = None
+    usage_payload = None
     text_parts: list[str] = []
     active_steps: dict[str, str] = {}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -388,6 +525,7 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
                 "event": "agent_step",
                 "step": {"type": "tool", "name": safe_name, "status": "completed"},
             }
+        succeeded = True
     except Exception as error:
         logger.exception("Strands streaming invocation failed")
         error_text = f"\n\n[error] {error}"
@@ -406,12 +544,21 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             ],
         }
     finally:
+        usage_payload = _log_model_usage(
+            request,
+            runtime_agent,
+            started_at=started_at,
+            succeeded=succeeded,
+        )
         await asyncio.to_thread(
             _cleanup,
             runtime_agent,
             interpreter_session,
             memory_session_manager,
         )
+
+    if usage_payload is not None:
+        yield usage_payload
 
     yield {
         "id": completion_id,

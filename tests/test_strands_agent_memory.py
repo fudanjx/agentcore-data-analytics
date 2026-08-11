@@ -1,3 +1,4 @@
+import asyncio
 import importlib.util
 import sys
 import types
@@ -9,6 +10,16 @@ MODULE_PATH = Path(__file__).parents[1] / "Strands-runtime" / "agent.py"
 
 
 def _load_agent_module(monkeypatch, prompt_cache_ttl=None):
+    for name in (
+        "ENABLE_MODEL_USAGE_LOGS",
+        "MODEL_PRICING_LABEL",
+        "MODEL_INPUT_PRICE_PER_MTOK_USD",
+        "MODEL_OUTPUT_PRICE_PER_MTOK_USD",
+        "MODEL_CACHE_READ_PRICE_PER_MTOK_USD",
+        "MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD",
+        "MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD",
+    ):
+        monkeypatch.delenv(name, raising=False)
     if prompt_cache_ttl is None:
         monkeypatch.delenv("PROMPT_CACHE_TTL", raising=False)
     else:
@@ -149,6 +160,96 @@ def test_prepare_applies_one_hour_prompt_cache_ttl(monkeypatch):
 def test_rejects_unsupported_prompt_cache_ttl(monkeypatch):
     with pytest.raises(ValueError, match="PROMPT_CACHE_TTL must be '5m' or '1h'"):
         _load_agent_module(monkeypatch, prompt_cache_ttl="30m")
+
+
+def test_model_usage_payload_separates_cache_tokens_and_estimates_cost(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "create a dashboard"}],
+        actor_id="actor-id",
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+    runtime_agent = types.SimpleNamespace(
+        event_loop_metrics=types.SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 1_000,
+                "outputTokens": 100,
+                "cacheReadInputTokens": 2_000,
+                "cacheWriteInputTokens": 4_000,
+                "totalTokens": 7_100,
+            }
+        )
+    )
+
+    payload = agent._model_usage_payload(
+        request,
+        runtime_agent,
+        duration_ms=12_345,
+        succeeded=True,
+    )
+
+    assert payload["input_tokens"] == 1_000
+    assert payload["cache_read_input_tokens"] == 2_000
+    assert payload["cache_write_input_tokens"] == 4_000
+    assert payload["total_input_tokens"] == 7_000
+    assert payload["cache_read_ratio"] == 0.285714
+    assert payload["estimated_cost_breakdown_usd"] == {
+        "input": 0.003,
+        "output": 0.0015,
+        "cache_read": 0.0006,
+        "cache_write": 0.015,
+    }
+    assert payload["estimated_cost_usd"] == 0.0201
+    assert payload["duration_ms"] == 12_345
+    assert payload["succeeded"] is True
+
+
+def test_stream_emits_model_usage_before_final_chunk(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 1_000,
+                "outputTokens": 100,
+                "cacheReadInputTokens": 2_000,
+                "cacheWriteInputTokens": 4_000,
+                "totalTokens": 7_100,
+            }
+        )
+
+        async def stream_async(self, _prompt):
+            yield {"data": "Answer"}
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+
+    async def collect():
+        return [event async for event in agent.stream(request)]
+
+    events = asyncio.run(collect())
+
+    assert events[0]["choices"][0]["delta"]["content"] == "Answer"
+    assert events[-2]["event"] == "model_usage"
+    assert events[-2]["total_input_tokens"] == 7_000
+    assert events[-2]["output_tokens"] == 100
+    assert events[-1]["choices"][0]["finish_reason"] == "stop"
 
 
 def test_prepare_keeps_caller_history_when_memory_is_disabled(monkeypatch):
