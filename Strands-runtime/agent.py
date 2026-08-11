@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, AsyncIterator
 
-from strands import Agent
+from strands import Agent, AgentSkills
 from strands.handlers.callback_handler import null_callback_handler
 from strands.models import BedrockModel, CacheConfig
 from strands.tools.mcp import MCPClient
@@ -223,7 +223,7 @@ def _prepare(request: InvocationRequest):
         prompt = f"{short_context}\n\n---\n\n## Current request\n\n{prompt}"
 
     base_prompt = system_prompt.load()
-    system_prompt_text = base_prompt + skills_sync.prompt_context() + long_context
+    system_prompt_text = base_prompt + skills_sync.ACTIVATION_GUIDANCE + long_context
     if system_messages:
         system_prompt_text += (
             "\n\n---\n\n## Caller-provided system guidance\n\n"
@@ -232,7 +232,7 @@ def _prepare(request: InvocationRequest):
 
     interpreter_session = None
     try:
-        tools: list = []
+        tools: list = [skills_sync.read_skill_resource]
         if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
             interpreter_session = code_interpreter.start_session(request.session_id)
             tools.extend(code_interpreter.build_tools(interpreter_session))
@@ -249,6 +249,7 @@ def _prepare(request: InvocationRequest):
         runtime_agent = Agent(
             model=model,
             tools=tools,
+            plugins=[AgentSkills(skills=skills_sync.LOCAL_DIR)],
             system_prompt=system_prompt_text,
             callback_handler=null_callback_handler,
             name="data-analyst",

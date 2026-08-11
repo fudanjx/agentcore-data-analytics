@@ -9,7 +9,7 @@ This directory is an upload-ready Amazon Bedrock AgentCore **S3 source** bundle.
 - Three AgentCore Gateway MCP connections (`NUH`, `AH`, and `TimesFM`) through directly signed SigV4 HTTP transports.
 - Request-scoped managed AgentCore Code Interpreter tools for code and shell execution.
 - AgentCore Memory retrieval for current-session history and semantic, preference, and summary records, plus completed-turn persistence.
-- Markdown analysis skills loaded from S3 and added to the system context.
+- Native Strands Agent Skills synced from S3, advertised by name and description, and activated on demand.
 - OpenAI-style `messages` and simple AgentCore `prompt`, `input`, or `inputText` payloads.
 - OpenAI-compatible streaming by default for `messages` payloads, matching the Dify/OpenAI proxy; simple `prompt` payloads remain blocking unless `stream` is true.
 
@@ -73,12 +73,37 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
 | `MEMORY_MAX_SHORT_TERM_EVENTS` | `30` | Recent events loaded per invocation |
 | `MEMORY_MAX_SHORT_TERM_CONTEXT_CHARS` | `40000` | Recent-history prompt limit |
-| `SKILLS_BUCKET` | `ah-data-analytics` | S3 bucket holding Markdown skills |
+| `SKILLS_BUCKET` | `ah-data-analytics` | S3 bucket holding complete Agent Skill packages |
 | `SKILLS_PREFIX` | `skills/` | S3 skills prefix |
 | `SKILLS_LOCAL_DIR` | `/tmp/strands-agent-skills` | Writable runtime cache |
-| `SKILLS_MAX_PROMPT_CHARS` | `50000` | Combined skill-context limit |
+| `SKILLS_MAX_OBJECT_BYTES` | `50000000` | Maximum size of one downloaded skill object |
+| `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
+| `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 Set `CODE_INTERPRETER_ID` or `MEMORY_ID` to an empty string to disable that integration. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` are useful for a minimal smoke test.
+
+## Skills
+
+The startup lifespan syncs every S3 object beneath `SKILLS_PREFIX` into `SKILLS_LOCAL_DIR`, preserving the hierarchy and enforcing per-object and total size limits. Each skill must use the Agent Skills directory format:
+
+```text
+skills/
+  hospital-data-analyst-nuh/
+    SKILL.md
+    references/
+      emd.md
+      schema.json
+    scripts/
+      validate.py
+    assets/
+      report-template.xlsx
+```
+
+Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a useful `description`; the name should match its directory. The request-scoped agent registers Strands' `AgentSkills` plugin against the local parent directory. Strands places only skill metadata in the system prompt and adds its native `skills` activation tool. When the model activates a relevant skill, that tool returns the complete `SKILL.md` instructions.
+
+Gateway MCP clients and managed Code Interpreter remain operational tools. They are not registered as skills. Runtime guidance directs the model to activate a matching skill before using its related domain tools. When the activated instructions require a UTF-8 text resource, the bounded `read_skill_resource` tool reads it from the local skill cache without allowing access outside that skill's directory.
+
+Scripts and binary assets are downloaded and appear in the resource listing returned when a skill is activated, but downloading does not execute or interpret them. Using a binary asset or executing a script still requires a compatible, explicitly registered tool. Restart or redeploy the Runtime after changing S3 content because synchronization occurs once during container startup.
 
 To customize the base prompt without rebuilding the ZIP, upload a UTF-8 text
 file and configure, for example:
