@@ -103,7 +103,7 @@ Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a usefu
 
 Gateway MCP clients and managed Code Interpreter remain operational tools. They are not registered as skills. Runtime guidance directs the model to activate a matching skill before using its related domain tools. When the activated instructions require a UTF-8 text resource, the bounded `read_skill_resource` tool reads it from the local skill cache without allowing access outside that skill's directory.
 
-Scripts and binary assets are downloaded and appear in the resource listing returned when a skill is activated, but downloading does not execute or interpret them. Using a binary asset or executing a script still requires a compatible, explicitly registered tool. Restart or redeploy the Runtime after changing S3 content because synchronization occurs once during container startup.
+When Code Interpreter is enabled, the request-scoped `stage_skill_resource` tool validates a selected resource against the synchronized skill package, derives its URI beneath the configured S3 skills prefix, and copies it into the active interpreter session. The custom Code Interpreter execution role therefore needs `s3:GetObject` on `arn:aws:s3:::<SKILLS_BUCKET>/<SKILLS_PREFIX>*`, plus `kms:Decrypt` when the objects use a customer-managed KMS key. Scripts are downloaded and can be staged, but they are never executed automatically. Restart or redeploy the Runtime after changing S3 content because synchronization occurs once during container startup.
 
 To customize the base prompt without rebuilding the ZIP, upload a UTF-8 text
 file and configure, for example:

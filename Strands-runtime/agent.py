@@ -235,7 +235,12 @@ def _prepare(request: InvocationRequest):
         tools: list = [skills_sync.read_skill_resource]
         if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
             interpreter_session = code_interpreter.start_session(request.session_id)
-            tools.extend(code_interpreter.build_tools(interpreter_session))
+            tools.extend(
+                code_interpreter.build_tools(
+                    interpreter_session,
+                    skill_resource_uri=skills_sync.skill_resource_s3_uri,
+                )
+            )
         tools.extend(_make_gateway_clients())
 
         model = BedrockModel(

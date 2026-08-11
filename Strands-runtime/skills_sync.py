@@ -156,6 +156,15 @@ def _resolve_resource(skill_name: str, resource_path: str) -> Path:
     return candidate
 
 
+def skill_resource_s3_uri(skill_name: str, resource_path: str) -> str:
+    """Return the canonical S3 URI for a resource present in the synced skill."""
+    if not BUCKET:
+        raise ValueError("SKILLS_BUCKET must be configured to stage skill resources")
+    local = _resolve_resource(skill_name, resource_path)
+    relative = local.relative_to(LOCAL_DIR.resolve()).as_posix()
+    return f"s3://{BUCKET}/{PREFIX}{relative}"
+
+
 @tool(
     name="read_skill_resource",
     description=(

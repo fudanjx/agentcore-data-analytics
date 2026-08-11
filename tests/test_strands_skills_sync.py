@@ -102,3 +102,19 @@ def test_prompt_context_bulk_injection_was_removed(monkeypatch):
     module = _load_skills_sync(monkeypatch)
 
     assert not hasattr(module, "prompt_context")
+
+
+def test_builds_s3_uri_only_for_a_synced_skill_resource(tmp_path, monkeypatch):
+    module = _load_skills_sync(monkeypatch)
+    skill_root = tmp_path / "skills"
+    asset = skill_root / "example" / "assets" / "template.xlsx"
+    asset.parent.mkdir(parents=True)
+    asset.write_bytes(b"xlsx")
+    monkeypatch.setattr(module, "BUCKET", "skill-bucket")
+    monkeypatch.setattr(module, "PREFIX", "skills/")
+    monkeypatch.setattr(module, "LOCAL_DIR", skill_root)
+
+    assert module.skill_resource_s3_uri("example", "assets/template.xlsx") == (
+        "s3://skill-bucket/skills/example/assets/template.xlsx"
+    )
+    assert "must stay inside" in module.read_skill_resource("example", "../outside.txt")
