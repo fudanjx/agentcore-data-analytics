@@ -8,7 +8,7 @@ This directory is an upload-ready Amazon Bedrock AgentCore **S3 source** bundle.
 - The reference Bedrock application inference profile, configurable through `MODEL_ID` or `MODEL_ARN`.
 - Three AgentCore Gateway MCP connections (`NUH`, `AH`, and `TimesFM`) through directly signed SigV4 HTTP transports.
 - Request-scoped managed AgentCore Code Interpreter tools for code and shell execution.
-- AgentCore Memory retrieval for current-session history and semantic, preference, and summary records, plus completed-turn persistence.
+- Native Strands `AgentCoreMemorySessionManager` integration for session restoration, semantic/preference/summary retrieval, and batched turn persistence.
 - Native Strands Agent Skills synced from S3, advertised by name and description, and activated on demand.
 - OpenAI-style `messages` and simple AgentCore `prompt`, `input`, or `inputText` payloads.
 - OpenAI-compatible streaming by default for `messages` payloads, matching the Dify/OpenAI proxy; simple `prompt` payloads remain blocking unless `stream` is true.
@@ -71,8 +71,9 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Tool-result context limit |
 | `MEMORY_ID` | Reference runtime Memory ID | AgentCore Memory resource |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
-| `MEMORY_MAX_SHORT_TERM_EVENTS` | `30` | Recent events loaded per invocation |
-| `MEMORY_MAX_SHORT_TERM_CONTEXT_CHARS` | `40000` | Recent-history prompt limit |
+| `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
+| `MEMORY_TOP_K` | `5` | Maximum long-term records retrieved from each active strategy |
+| `MEMORY_RELEVANCE_SCORE` | `0.2` | Minimum long-term-memory relevance score, constrained to 0-1 |
 | `SKILLS_BUCKET` | `ah-data-analytics` | S3 bucket holding complete Agent Skill packages |
 | `SKILLS_PREFIX` | `skills/` | S3 skills prefix |
 | `SKILLS_LOCAL_DIR` | `/tmp/strands-agent-skills` | Writable runtime cache |
@@ -81,6 +82,8 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 Set `CODE_INTERPRETER_ID` or `MEMORY_ID` to an empty string to disable that integration. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` are useful for a minimal smoke test.
+
+When memory is enabled, AgentCore Memory is the source of truth for prior conversation turns. The Runtime sends only the latest user message from an OpenAI-style `messages` payload to Strands, preventing the caller's flattened history from duplicating the session restored by `AgentCoreMemorySessionManager`. Raw tool requests and results are excluded from durable conversational memory; the user turn and final assistant response are retained. Legacy plain-text events written by the previous Runtime implementation remain readable.
 
 ## Skills
 

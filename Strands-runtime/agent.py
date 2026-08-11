@@ -6,21 +6,19 @@ import os
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
-
-from strands import Agent, AgentSkills
-from strands.handlers.callback_handler import null_callback_handler
-from strands.models import BedrockModel, CacheConfig
-from strands.tools.mcp import MCPClient
+from typing import Any
 
 import code_interpreter
 import gateway_proxy
 import memory
 import skills_sync
 import system_prompt
-
+from strands import Agent, AgentSkills
+from strands.handlers.callback_handler import null_callback_handler
+from strands.models import BedrockModel, CacheConfig
+from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
 MODEL_ID = os.environ.get(
@@ -48,7 +46,7 @@ class InvocationRequest:
     @classmethod
     def from_payload(cls, payload: dict, context: Any = None) -> "InvocationRequest":
         if not isinstance(payload, dict):
-            raise ValueError("Invocation payload must be a JSON object")
+            raise TypeError("Invocation payload must be a JSON object")
         has_messages = payload.get("messages") is not None
         messages = payload.get("messages")
         if messages is None:
@@ -61,7 +59,7 @@ class InvocationRequest:
         normalized = []
         for item in messages:
             if not isinstance(item, dict):
-                raise ValueError("Every message must be a JSON object")
+                raise TypeError("Every message must be a JSON object")
             normalized.append(
                 {
                     "role": str(item.get("role") or "user").lower(),
@@ -159,13 +157,13 @@ def _split_system(messages: list[dict]) -> tuple[list[str], list[dict]]:
 
 
 def _build_prompt(messages: list[dict]) -> str:
-    if not messages:
-        return ""
+    """Flatten caller history only when no persistent session manager is active."""
     if len(messages) == 1 and messages[0]["role"] == "user":
         return _content_text(messages[0]["content"])
-    lines: list[str] = []
-    for item in messages[:-1]:
-        lines.append(f"{item['role'].upper()}: {_content_text(item['content'])}")
+    lines = [
+        f"{item['role'].upper()}: {_content_text(item['content'])}"
+        for item in messages[:-1]
+    ]
     last = messages[-1]
     lines.extend(["", f"Current {last['role']} message: {_content_text(last['content'])}"])
     return "\n".join(lines)
@@ -176,19 +174,6 @@ def _latest_user_text(messages: list[dict]) -> str:
         if item["role"] == "user":
             return _content_text(item["content"])
     return ""
-
-
-def _memory_context(request: InvocationRequest, prompt: str) -> tuple[str, str]:
-    if not request.actor_id:
-        return "", ""
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory") as executor:
-        short_future = executor.submit(
-            memory.retrieve_short_term_context, request.actor_id, request.session_id
-        )
-        long_future = executor.submit(
-            memory.retrieve_long_term_context, request.actor_id, prompt
-        )
-        return short_future.result(), long_future.result()
 
 
 def _model_region() -> str:
@@ -215,23 +200,32 @@ def _make_gateway_clients() -> list[MCPClient]:
 
 def _prepare(request: InvocationRequest):
     system_messages, ordinary_messages = _split_system(request.messages)
-    prompt = _build_prompt(ordinary_messages)
-    if not prompt.strip():
+    current_user = _latest_user_text(ordinary_messages)
+    if not current_user.strip():
         raise ValueError("The invocation does not contain a user question")
-    short_context, long_context = _memory_context(request, prompt)
-    if short_context:
-        prompt = f"{short_context}\n\n---\n\n## Current request\n\n{prompt}"
-
-    base_prompt = system_prompt.load()
-    system_prompt_text = base_prompt + skills_sync.ACTIVATION_GUIDANCE + long_context
-    if system_messages:
-        system_prompt_text += (
-            "\n\n---\n\n## Caller-provided system guidance\n\n"
-            + "\n\n".join(system_messages)
-        )
 
     interpreter_session = None
+    memory_session_manager = None
     try:
+        memory_session_manager = memory.create_session_manager(
+            request.actor_id,
+            request.session_id,
+            async_mode=request.stream,
+        )
+        # Native session management restores prior turns. If memory is disabled,
+        # retain the caller-provided history as a stateless fallback.
+        prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
+
+        base_prompt = system_prompt.load()
+        system_prompt_text = (
+            base_prompt + skills_sync.ACTIVATION_GUIDANCE + memory.MEMORY_GUIDANCE
+        )
+        if system_messages:
+            system_prompt_text += (
+                "\n\n---\n\n## Caller-provided system guidance\n\n"
+                + "\n\n".join(system_messages)
+            )
+
         tools: list = [skills_sync.read_skill_resource]
         if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
             interpreter_session = code_interpreter.start_session(request.session_id)
@@ -255,6 +249,7 @@ def _prepare(request: InvocationRequest):
             model=model,
             tools=tools,
             plugins=[AgentSkills(skills=skills_sync.LOCAL_DIR)],
+            session_manager=memory_session_manager,
             system_prompt=system_prompt_text,
             callback_handler=null_callback_handler,
             name="data-analyst",
@@ -263,12 +258,17 @@ def _prepare(request: InvocationRequest):
         return (
             runtime_agent,
             interpreter_session,
+            memory_session_manager,
             prompt,
-            _latest_user_text(ordinary_messages) or prompt,
         )
     except BaseException:
         if interpreter_session:
             code_interpreter.stop_session(interpreter_session)
+        if memory_session_manager:
+            try:
+                memory_session_manager.close()
+            except Exception:
+                logger.warning("Unable to flush AgentCore Memory", exc_info=True)
         raise
 
 
@@ -284,7 +284,11 @@ def _result_text(result: Any) -> str:
     return str(result)
 
 
-def _cleanup(runtime_agent: Agent | None, interpreter_session: str | None) -> None:
+def _cleanup(
+    runtime_agent: Agent | None,
+    interpreter_session: str | None,
+    memory_session_manager: Any = None,
+) -> None:
     if runtime_agent is not None:
         try:
             runtime_agent.cleanup()
@@ -292,25 +296,29 @@ def _cleanup(runtime_agent: Agent | None, interpreter_session: str | None) -> No
             logger.warning("Unable to clean up Strands tools", exc_info=True)
     if interpreter_session:
         code_interpreter.stop_session(interpreter_session)
+    if memory_session_manager is not None:
+        try:
+            memory_session_manager.close()
+        except Exception:
+            logger.warning("Unable to flush AgentCore Memory", exc_info=True)
 
 
 def run(request: InvocationRequest) -> dict:
     """Run one isolated Strands invocation and return a blocking response."""
     runtime_agent = None
     interpreter_session = None
+    memory_session_manager = None
     try:
-        runtime_agent, interpreter_session, prompt, current_user = _prepare(request)
+        runtime_agent, interpreter_session, memory_session_manager, prompt = _prepare(request)
         result = runtime_agent(prompt)
         text = _result_text(result)
-        if request.actor_id:
-            memory.save_turn(request.actor_id, request.session_id, current_user, text)
         return {
             "result": text,
             "session_id": request.session_id,
             "model": request.model_slug,
         }
     finally:
-        _cleanup(runtime_agent, interpreter_session)
+        _cleanup(runtime_agent, interpreter_session, memory_session_manager)
 
 
 _STEP_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
@@ -331,13 +339,13 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     """Stream OpenAI-compatible chunks for the existing Dify proxy."""
     runtime_agent = None
     interpreter_session = None
+    memory_session_manager = None
     text_parts: list[str] = []
     active_steps: dict[str, str] = {}
-    current_user = ""
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
     try:
-        runtime_agent, interpreter_session, prompt, current_user = await asyncio.to_thread(
+        runtime_agent, interpreter_session, memory_session_manager, prompt = await asyncio.to_thread(
             _prepare, request
         )
         async for event in runtime_agent.stream_async(prompt):
@@ -374,15 +382,6 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
                 "event": "agent_step",
                 "step": {"type": "tool", "name": safe_name, "status": "completed"},
             }
-        text = "".join(text_parts)
-        if request.actor_id:
-            await asyncio.to_thread(
-                memory.save_turn,
-                request.actor_id,
-                request.session_id,
-                current_user,
-                text,
-            )
     except Exception as error:
         logger.exception("Strands streaming invocation failed")
         error_text = f"\n\n[error] {error}"
@@ -401,7 +400,12 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             ],
         }
     finally:
-        await asyncio.to_thread(_cleanup, runtime_agent, interpreter_session)
+        await asyncio.to_thread(
+            _cleanup,
+            runtime_agent,
+            interpreter_session,
+            memory_session_manager,
+        )
 
     yield {
         "id": completion_id,
