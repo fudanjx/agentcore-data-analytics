@@ -54,7 +54,7 @@ def mcp_transport(gateway: GatewayConfig):
     return streamablehttp_client(
         url=f"{gateway.url}/mcp",
         timeout=120,
-        sse_read_timeout=300,
+        sse_read_timeout=600,
         auth=SigV4HTTPXAuth(credentials, SERVICE, gateway.region),
     )
 
