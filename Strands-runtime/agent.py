@@ -17,7 +17,7 @@ import skills_sync
 import system_prompt
 from strands import Agent, AgentSkills
 from strands.handlers.callback_handler import null_callback_handler
-from strands.models import BedrockModel, CacheConfig
+from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
 from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
@@ -29,6 +29,9 @@ MODEL_ID = os.environ.get(
     ),
 ).strip()
 MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
+PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
+if PROMPT_CACHE_TTL not in {"5m", "1h"}:
+    raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h'")
 ENABLE_GATEWAYS = os.environ.get("ENABLE_GATEWAYS", "true").lower() not in {"0", "false", "no"}
 ENABLE_CODE_INTERPRETER = os.environ.get(
     "ENABLE_CODE_INTERPRETER", "true"
@@ -242,8 +245,11 @@ def _prepare(request: InvocationRequest):
             region_name=_model_region(),
             # The default model is an opaque inference-profile ARN, so Strands
             # cannot infer the provider when CacheConfig uses strategy="auto".
-            cache_config=CacheConfig(strategy="anthropic"),
-            cache_tools="default",
+            cache_config=CacheConfig(
+                strategy="anthropic",
+                ttl=PROMPT_CACHE_TTL,
+            ),
+            cache_tools=CacheToolsConfig(ttl=PROMPT_CACHE_TTL),
         )
         runtime_agent = Agent(
             model=model,

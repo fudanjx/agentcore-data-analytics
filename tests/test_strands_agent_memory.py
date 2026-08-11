@@ -3,10 +3,17 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 MODULE_PATH = Path(__file__).parents[1] / "Strands-runtime" / "agent.py"
 
 
-def _load_agent_module(monkeypatch):
+def _load_agent_module(monkeypatch, prompt_cache_ttl=None):
+    if prompt_cache_ttl is None:
+        monkeypatch.delenv("PROMPT_CACHE_TTL", raising=False)
+    else:
+        monkeypatch.setenv("PROMPT_CACHE_TTL", prompt_cache_ttl)
+
     code_interpreter = types.ModuleType("code_interpreter")
     code_interpreter.CODE_INTERPRETER_ID = ""
 
@@ -66,7 +73,11 @@ def test_prepare_uses_native_session_manager_and_only_current_user_turn(monkeypa
     memory.create_session_manager = create_session_manager
     monkeypatch.setattr(agent, "Agent", FakeAgent)
     monkeypatch.setattr(agent, "AgentSkills", lambda **kwargs: kwargs)
-    monkeypatch.setattr(agent, "BedrockModel", lambda **kwargs: kwargs)
+    def build_model(**kwargs):
+        captured["model_kwargs"] = kwargs
+        return kwargs
+
+    monkeypatch.setattr(agent, "BedrockModel", build_model)
     monkeypatch.setattr(agent, "ENABLE_GATEWAYS", False)
     monkeypatch.setattr(agent, "ENABLE_CODE_INTERPRETER", False)
 
@@ -93,6 +104,8 @@ def test_prepare_uses_native_session_manager_and_only_current_user_turn(monkeypa
     assert prompt == "current question"
     assert captured["memory_factory"] == ("actor-id", "session-id", True)
     assert captured["agent_kwargs"]["session_manager"] is memory_manager
+    assert captured["model_kwargs"]["cache_config"].ttl == "5m"
+    assert captured["model_kwargs"]["cache_tools"].ttl == "5m"
     assert captured["agent_kwargs"]["system_prompt"] == (
         "BASE_SYSTEM\nACTIVATE_SKILLS\nMEMORY_GUIDANCE"
         "\n\n---\n\n## Caller-provided system guidance\n\nCALLER_SYSTEM"
@@ -101,6 +114,41 @@ def test_prepare_uses_native_session_manager_and_only_current_user_turn(monkeypa
     agent._cleanup(runtime_agent, interpreter_session, memory_manager)
     assert captured["agent_cleaned"] is True
     assert captured["memory_closed"] is True
+
+
+def test_prepare_applies_one_hour_prompt_cache_ttl(monkeypatch):
+    agent, memory = _load_agent_module(monkeypatch, prompt_cache_ttl="1h")
+    captured = {}
+
+    memory.create_session_manager = lambda *_args, **_kwargs: None
+    monkeypatch.setattr(agent, "Agent", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent, "AgentSkills", lambda **kwargs: kwargs)
+
+    def build_model(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(agent, "BedrockModel", build_model)
+    monkeypatch.setattr(agent, "ENABLE_GATEWAYS", False)
+    monkeypatch.setattr(agent, "ENABLE_CODE_INTERPRETER", False)
+
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "create a dashboard"}],
+        actor_id=None,
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=False,
+    )
+
+    agent._prepare(request)
+
+    assert captured["cache_config"].ttl == "1h"
+    assert captured["cache_tools"].ttl == "1h"
+
+
+def test_rejects_unsupported_prompt_cache_ttl(monkeypatch):
+    with pytest.raises(ValueError, match="PROMPT_CACHE_TTL must be '5m' or '1h'"):
+        _load_agent_module(monkeypatch, prompt_cache_ttl="30m")
 
 
 def test_prepare_keeps_caller_history_when_memory_is_disabled(monkeypatch):

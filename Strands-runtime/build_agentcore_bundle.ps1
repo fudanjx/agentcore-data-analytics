@@ -108,13 +108,14 @@ assert version("strands-agents") == "1.50.2", version("strands-agents")
 assert version("mcp") == "1.29.0", version("mcp")
 
 from strands import AgentSkills
-from strands.models import CacheConfig
+from strands.models import CacheConfig, CacheToolsConfig
 import pydantic_core
 import rpds
 import agent
 import main
 
 assert agent.CacheConfig is CacheConfig
+assert agent.CacheToolsConfig is CacheToolsConfig
 assert agent.AgentSkills is AgentSkills
 print("Verified strands-agents", version("strands-agents"))
 print("Verified mcp", version("mcp"))

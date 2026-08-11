@@ -60,6 +60,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | --- | --- | --- |
 | `MODEL_ID` / `MODEL_ARN` | Reference application inference profile ARN | Bedrock model used by Strands |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
+| `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
 | `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; the packaged prompt is used when unset |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | `200000` | Maximum permitted size of the S3 system-prompt object |
 | `AGENTCORE_GATEWAYS_JSON` | Reference NUH, AH, and TimesFM Gateways | Gateway label, HTTPS URL, ARN, and inferred region mapping |
@@ -163,4 +164,4 @@ strands_agent/<freshly installed dependencies>
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.0.3.zip
+    -OutputPath .\dist\strands_agent_v0.0.4.zip
