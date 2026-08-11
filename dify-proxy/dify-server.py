@@ -556,6 +556,74 @@ def _runtime_kwargs(
     }
 
 
+class _RuntimeUsage:
+    """Aggregate token usage safe to expose through the OpenAI-compatible API."""
+
+    __slots__ = ("completion_tokens", "prompt_tokens", "total_tokens")
+
+    def __init__(self, prompt_tokens: int, completion_tokens: int):
+        self.prompt_tokens = prompt_tokens
+        self.completion_tokens = completion_tokens
+        self.total_tokens = prompt_tokens + completion_tokens
+
+    def as_openai(self) -> dict[str, int]:
+        return {
+            "prompt_tokens": self.prompt_tokens,
+            "completion_tokens": self.completion_tokens,
+            "total_tokens": self.total_tokens,
+        }
+
+
+class _BufferedRuntimeResult:
+    __slots__ = ("text", "usage")
+
+    def __init__(self, text: str, usage: _RuntimeUsage | None):
+        self.text = text
+        self.usage = usage
+
+
+def _usage_token_count(value) -> int | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        count = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return count if count >= 0 else None
+
+
+def _runtime_usage(payload) -> _RuntimeUsage | None:
+    if not isinstance(payload, dict):
+        return None
+
+    prompt_tokens = _usage_token_count(payload.get("total_input_tokens"))
+    if prompt_tokens is None:
+        prompt_tokens = _usage_token_count(payload.get("prompt_tokens"))
+    if prompt_tokens is None:
+        input_tokens = _usage_token_count(payload.get("input_tokens"))
+        cache_read_tokens = _usage_token_count(
+            payload.get("cache_read_input_tokens")
+        )
+        cache_write_tokens = _usage_token_count(
+            payload.get("cache_write_input_tokens")
+        )
+        if any(
+            count is not None
+            for count in (input_tokens, cache_read_tokens, cache_write_tokens)
+        ):
+            prompt_tokens = sum(
+                count or 0
+                for count in (input_tokens, cache_read_tokens, cache_write_tokens)
+            )
+
+    completion_tokens = _usage_token_count(payload.get("output_tokens"))
+    if completion_tokens is None:
+        completion_tokens = _usage_token_count(payload.get("completion_tokens"))
+    if prompt_tokens is None or completion_tokens is None:
+        return None
+    return _RuntimeUsage(prompt_tokens, completion_tokens)
+
+
 def _stream_runtime_events(
     messages: list[dict],
     runtime_arn: str,
@@ -582,6 +650,15 @@ def _stream_runtime_events(
                     event = json.loads(payload)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
+                if event.get("event") == "model_usage":
+                    usage = _runtime_usage(event.get("usage") or event)
+                    if usage is not None:
+                        yield usage
+                    continue
+                if event.get("usage") is not None:
+                    usage = _runtime_usage(event.get("usage"))
+                    if usage is not None:
+                        yield usage
                 if event.get("event") == "agent_step":
                     status = _runtime_status(event.get("step"))
                     if status is not None:
@@ -611,12 +688,18 @@ def _invoke_runtime_buffered(
     runtime_arn: str,
     session_id: str,
     user_id: str,
-) -> str:
+) -> _BufferedRuntimeResult:
     """Collect a Runtime SSE response for an OpenAI non-streaming request."""
-    return "".join(
-        _format_runtime_status(event) if isinstance(event, _RuntimeStatus) else event
-        for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id)
-    )
+    parts = []
+    usage = None
+    for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id):
+        if isinstance(event, _RuntimeUsage):
+            usage = event
+        elif isinstance(event, _RuntimeStatus):
+            parts.append(_format_runtime_status(event))
+        else:
+            parts.append(event)
+    return _BufferedRuntimeResult("".join(parts), usage)
 
 
 class _RuntimeStatus:
@@ -1062,6 +1145,7 @@ def _sse_artifact_stream(
 ):
     sanitizer = _ArtifactStreamSanitizer()
     request_started_at = time.time()
+    usage = None
 
     def stream_chunk(content: str) -> str:
         chunk = {
@@ -1080,6 +1164,9 @@ def _sse_artifact_stream(
 
     try:
         for item in events:
+            if isinstance(item, _RuntimeUsage):
+                usage = item
+                continue
             if isinstance(item, _RuntimeStatus):
                 yield stream_chunk(_format_runtime_status(item))
                 continue
@@ -1127,6 +1214,15 @@ def _sse_artifact_stream(
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
     yield f"data: {json.dumps(final)}\n\n"
+    if usage is not None:
+        usage_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [],
+            "usage": usage.as_openai(),
+        }
+        yield f"data: {json.dumps(usage_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
 
@@ -1159,6 +1255,7 @@ async def _build_completion(
         DIFY_OFFICE_SOURCE_PROFILE,
     )
     request_started_at = time.time()
+    usage = None
     if backend_type == "runtime":
         if stream:
             return StreamingResponse(
@@ -1179,13 +1276,15 @@ async def _build_completion(
                 media_type="text/event-stream",
                 headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
             )
-        result_text = await run_in_threadpool(
+        runtime_result = await run_in_threadpool(
             _invoke_runtime_buffered,
             messages,
             backend_arn,
             session_id,
             user_id,
         )
+        result_text = runtime_result.text
+        usage = runtime_result.usage
     else:
         if stream:
             return StreamingResponse(
@@ -1224,7 +1323,7 @@ async def _build_completion(
         request_started_at,
         output_urls,
     )
-    return {
+    completion = {
         "id": completion_id,
         "object": "chat.completion",
         "model": model,
@@ -1235,12 +1334,10 @@ async def _build_completion(
                 "finish_reason": "stop",
             }
         ],
-        "usage": {
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-        },
     }
+    if usage is not None:
+        completion["usage"] = usage.as_openai()
+    return completion
 
 
 @app.get("/health")
