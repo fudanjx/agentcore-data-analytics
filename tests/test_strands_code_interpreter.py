@@ -24,6 +24,16 @@ def _load_code_interpreter(monkeypatch):
     return module
 
 
+def test_code_interpreter_is_disabled_when_identifier_is_unset_or_empty(monkeypatch):
+    monkeypatch.delenv("CODE_INTERPRETER_ID", raising=False)
+    module = _load_code_interpreter(monkeypatch)
+    assert module.CODE_INTERPRETER_ID == ""
+
+    monkeypatch.setenv("CODE_INTERPRETER_ID", "   ")
+    module = _load_code_interpreter(monkeypatch)
+    assert module.CODE_INTERPRETER_ID == ""
+
+
 def test_stages_only_resolved_skill_resource_in_active_session(monkeypatch):
     module = _load_code_interpreter(monkeypatch)
     invocations = []

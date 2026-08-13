@@ -21,9 +21,7 @@ REGION = os.environ.get(
     "CODE_INTERPRETER_REGION",
     os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1"),
 )
-CODE_INTERPRETER_ID = os.environ.get(
-    "CODE_INTERPRETER_ID", "code_interpreter_runtime_dev-PEpoCecsBL"
-).strip()
+CODE_INTERPRETER_ID = os.environ.get("CODE_INTERPRETER_ID", "").strip()
 SESSION_TIMEOUT_SECONDS = min(
     28_800,
     max(60, int(os.environ.get("CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS", "1800"))),

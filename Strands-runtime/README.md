@@ -6,8 +6,8 @@ This directory is an upload-ready Amazon Bedrock AgentCore **S3 source** bundle.
 
 - A new Strands `Agent` per invocation, preventing conversation state from leaking between users.
 - The reference Bedrock application inference profile, configurable through `MODEL_ID` or `MODEL_ARN`.
-- Three AgentCore Gateway MCP connections (`NUH`, `AH`, and `TimesFM`) through directly signed SigV4 HTTP transports.
-- Request-scoped managed AgentCore Code Interpreter tools for code and shell execution.
+- Optional AgentCore Gateway MCP connections through directly signed SigV4 HTTP transports.
+- Optional request-scoped managed AgentCore Code Interpreter tools for code and shell execution.
 - Native Strands `AgentCoreMemorySessionManager` integration for session restoration, semantic/preference/summary retrieval, and batched turn persistence.
 - Native Strands Agent Skills synced from S3, advertised by name and description, and activated on demand.
 - OpenAI-style `messages` and simple AgentCore `prompt`, `input`, or `inputText` payloads.
@@ -68,11 +68,11 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `MODEL_CACHE_READ_PRICE_PER_MTOK_USD` | `0.30` | Estimated cache-read price in USD per million tokens |
 | `MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD` | `3.75` | Estimated five-minute cache-write price in USD per million tokens |
 | `MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD` | `6.00` | Estimated one-hour cache-write price in USD per million tokens |
-| `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; the packaged prompt is used when unset |
+| `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; no base prompt is added when empty or unset |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | `200000` | Maximum permitted size of the S3 system-prompt object |
-| `AGENTCORE_GATEWAYS_JSON` | Reference NUH, AH, and TimesFM Gateways | Gateway label, HTTPS URL, ARN, and inferred region mapping |
+| `AGENTCORE_GATEWAYS_JSON` | Empty | Gateway label, HTTPS URL, ARN, and inferred region mapping; no Gateway tools are added when empty, unset, or `{}` |
 | `ENABLE_GATEWAYS` | `true` | Enable Gateway MCP tools |
-| `CODE_INTERPRETER_ID` | Reference runtime interpreter | Managed Code Interpreter identifier |
+| `CODE_INTERPRETER_ID` | Empty | Managed Code Interpreter identifier; no interpreter tools are added when empty or unset |
 | `CODE_INTERPRETER_REGION` | `AWS_DEFAULT_REGION` or `ap-southeast-1` | Interpreter region |
 | `ENABLE_CODE_INTERPRETER` | `true` | Enable interpreter tools |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | Session timeout, constrained to 60-28,800 seconds |
@@ -89,7 +89,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
-Set `CODE_INTERPRETER_ID` or `MEMORY_ID` to an empty string to disable that integration. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` are useful for a minimal smoke test.
+Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, or `CODE_INTERPRETER_ID` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test. Set `MEMORY_ID` to an empty string to disable memory.
 
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 
@@ -139,9 +139,10 @@ BASE_SYSTEM_PROMPT=s3://my-runtime-config/prompts/data-analyst.txt
 ```
 
 The object is downloaded once per warm Runtime container. If the variable is
-unset, the packaged default is used. If it is set but cannot be loaded or is
-invalid, the invocation fails explicitly rather than silently changing agent
-behavior.
+empty or unset, the Runtime adds no base application prompt; caller-provided
+system guidance (for example, from Dify) is still passed to Strands. If the
+variable is set but cannot be loaded or is invalid, the invocation fails
+explicitly rather than silently changing agent behavior.
 
 ## Required IAM permissions
 
@@ -154,7 +155,7 @@ The S3-source Runtime execution role must be granted access to:
 - `s3:ListBucket` on the skills bucket and `s3:GetObject` on the skills prefix;
 - `s3:GetObject` on the object configured by `BASE_SYSTEM_PROMPT`, when used. If that object uses a customer-managed KMS key, also grant `kms:Decrypt` on the key.
 
-The exact reference ARNs are intentionally retained as defaults, but a new Runtime role does not inherit permission to use them. Add these permissions in the AgentCore source configuration or replace the defaults with resources owned by that Runtime/account.
+Only permissions for integrations explicitly configured through environment variables are required.
 
 ## Packaging
 
@@ -186,4 +187,4 @@ strands_agent/<freshly installed dependencies>
 
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.0.4.zip
+    -OutputPath .\dist\strands_agent_v0.0.5.zip
