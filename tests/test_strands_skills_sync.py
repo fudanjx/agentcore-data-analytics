@@ -5,6 +5,8 @@ from pathlib import Path
 
 
 def _load_skills_sync(monkeypatch):
+    monkeypatch.delenv("SKILLS_BUCKET", raising=False)
+    monkeypatch.delenv("SKILLS_PREFIX", raising=False)
     strands = types.ModuleType("strands")
 
     def fake_tool(**_kwargs):
@@ -20,6 +22,18 @@ def _load_skills_sync(monkeypatch):
     assert spec.loader is not None
     spec.loader.exec_module(module)
     return module
+
+
+def test_bucket_enables_root_level_skills_without_a_prefix(monkeypatch):
+    module = _load_skills_sync(monkeypatch)
+
+    assert module.BUCKET == ""
+    assert module.PREFIX == ""
+    assert module.skills_enabled() is False
+    assert module.sync_skills() == []
+
+    monkeypatch.setattr(module, "BUCKET", "skill-bucket")
+    assert module.skills_enabled() is True
 
 
 def test_reads_bounded_utf8_text_inside_skill_root(tmp_path, monkeypatch):

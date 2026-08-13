@@ -9,7 +9,7 @@ import pytest
 MODULE_PATH = Path(__file__).parents[1] / "Strands-runtime" / "agent.py"
 
 
-def _load_agent_module(monkeypatch, prompt_cache_ttl=None):
+def _load_agent_module(monkeypatch, prompt_cache_ttl=None, skills_enabled=True):
     for name in (
         "ENABLE_MODEL_USAGE_LOGS",
         "MODEL_PRICING_LABEL",
@@ -39,9 +39,30 @@ def _load_agent_module(monkeypatch, prompt_cache_ttl=None):
     skills_sync.ACTIVATION_GUIDANCE = "\nACTIVATE_SKILLS"
     skills_sync.LOCAL_DIR = "skills"
     skills_sync.read_skill_resource = lambda: None
+    skills_sync.skill_resource_s3_uri = lambda *_args: "s3://bucket/skills/resource"
+    skills_sync.skills_enabled = lambda: skills_enabled
 
     system_prompt = types.ModuleType("system_prompt")
     system_prompt.load = lambda: "BASE_SYSTEM"
+
+    strands = types.ModuleType("strands")
+    strands.Agent = object
+    strands.AgentSkills = object
+
+    callback_handler = types.ModuleType("strands.handlers.callback_handler")
+    callback_handler.null_callback_handler = lambda *_args, **_kwargs: None
+
+    class FakeCacheConfig:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    models = types.ModuleType("strands.models")
+    models.BedrockModel = object
+    models.CacheConfig = FakeCacheConfig
+    models.CacheToolsConfig = FakeCacheConfig
+
+    mcp = types.ModuleType("strands.tools.mcp")
+    mcp.MCPClient = object
 
     for name, module in {
         "code_interpreter": code_interpreter,
@@ -49,6 +70,10 @@ def _load_agent_module(monkeypatch, prompt_cache_ttl=None):
         "memory": memory,
         "skills_sync": skills_sync,
         "system_prompt": system_prompt,
+        "strands": strands,
+        "strands.handlers.callback_handler": callback_handler,
+        "strands.models": models,
+        "strands.tools.mcp": mcp,
     }.items():
         monkeypatch.setitem(sys.modules, name, module)
 
@@ -155,6 +180,60 @@ def test_prepare_applies_one_hour_prompt_cache_ttl(monkeypatch):
 
     assert captured["cache_config"].ttl == "1h"
     assert captured["cache_tools"].ttl == "1h"
+
+
+def test_prepare_omits_all_skill_components_when_skills_are_disabled(monkeypatch):
+    agent, memory = _load_agent_module(monkeypatch, skills_enabled=False)
+    captured = {}
+
+    memory.create_session_manager = lambda *_args, **_kwargs: None
+
+    def build_agent(**kwargs):
+        captured.update(kwargs)
+        return kwargs
+
+    monkeypatch.setattr(agent, "Agent", build_agent)
+    monkeypatch.setattr(
+        agent,
+        "AgentSkills",
+        lambda **_kwargs: pytest.fail("AgentSkills must not be created"),
+    )
+    monkeypatch.setattr(agent, "BedrockModel", lambda **kwargs: kwargs)
+    monkeypatch.setattr(agent, "ENABLE_GATEWAYS", False)
+    monkeypatch.setattr(agent, "ENABLE_CODE_INTERPRETER", True)
+    monkeypatch.setattr(agent.code_interpreter, "CODE_INTERPRETER_ID", "interpreter-id")
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "start_session",
+        lambda _session_id: "interpreter-session",
+        raising=False,
+    )
+
+    def build_interpreter_tools(_session, *, skill_resource_uri):
+        captured["skill_resource_uri"] = skill_resource_uri
+        return ["execute_code"]
+
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "build_tools",
+        build_interpreter_tools,
+        raising=False,
+    )
+
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "create a dashboard"}],
+        actor_id=None,
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=False,
+    )
+
+    agent._prepare(request)
+
+    assert captured["system_prompt"] == "BASE_SYSTEM\nMEMORY_GUIDANCE"
+    assert captured["tools"] == ["execute_code"]
+    assert captured["plugins"] == []
+    assert captured["skill_resource_uri"] is None
 
 
 def test_rejects_unsupported_prompt_cache_ttl(monkeypatch):

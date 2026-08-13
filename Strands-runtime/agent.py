@@ -345,22 +345,28 @@ def _prepare(request: InvocationRequest):
         prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
 
         base_prompt = system_prompt.load()
-        system_prompt_text = (
-            base_prompt + skills_sync.ACTIVATION_GUIDANCE + memory.MEMORY_GUIDANCE
-        )
+        skills_enabled = skills_sync.skills_enabled()
+        skills_guidance = skills_sync.ACTIVATION_GUIDANCE if skills_enabled else ""
+        system_prompt_text = base_prompt + skills_guidance + memory.MEMORY_GUIDANCE
         if system_messages:
             system_prompt_text += (
                 "\n\n---\n\n## Caller-provided system guidance\n\n"
                 + "\n\n".join(system_messages)
             )
 
-        tools: list = [skills_sync.read_skill_resource]
+        tools: list = []
+        plugins: list = []
+        if skills_enabled:
+            tools.append(skills_sync.read_skill_resource)
+            plugins.append(AgentSkills(skills=skills_sync.LOCAL_DIR))
         if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
             interpreter_session = code_interpreter.start_session(request.session_id)
             tools.extend(
                 code_interpreter.build_tools(
                     interpreter_session,
-                    skill_resource_uri=skills_sync.skill_resource_s3_uri,
+                    skill_resource_uri=(
+                        skills_sync.skill_resource_s3_uri if skills_enabled else None
+                    ),
                 )
             )
         tools.extend(_make_gateway_clients())
@@ -379,7 +385,7 @@ def _prepare(request: InvocationRequest):
         runtime_agent = Agent(
             model=model,
             tools=tools,
-            plugins=[AgentSkills(skills=skills_sync.LOCAL_DIR)],
+            plugins=plugins,
             session_manager=memory_session_manager,
             system_prompt=system_prompt_text,
             callback_handler=null_callback_handler,

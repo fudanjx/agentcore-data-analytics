@@ -2,6 +2,8 @@
 
 This directory is an upload-ready Amazon Bedrock AgentCore **S3 source** bundle. It keeps the generated `main.py`/`BedrockAgentCoreApp` contract and translates the capabilities from `agentcore-data-analytics/app` into a Strands-native agent.
 
+For a complete self-service deployment walkthrough, including every environment variable, Agent Skills, IAM policies, and console testing, see [USER_GUIDE.md](USER_GUIDE.md).
+
 ## Included capabilities
 
 - A new Strands `Agent` per invocation, preventing conversation state from leaking between users.
@@ -15,10 +17,10 @@ This directory is an upload-ready Amazon Bedrock AgentCore **S3 source** bundle.
 
 ## Entry point and request formats
 
-Configure the S3 source entry point as:
+The build script places the application beneath `strands_agent/` in the ZIP. Configure the S3 source entry point as:
 
 ```text
-main.py
+strands_agent/main.py
 ```
 
 Simple request:
@@ -82,14 +84,14 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
 | `MEMORY_TOP_K` | `5` | Maximum long-term records retrieved from each active strategy |
 | `MEMORY_RELEVANCE_SCORE` | `0.2` | Minimum long-term-memory relevance score, constrained to 0-1 |
-| `SKILLS_BUCKET` | `ah-data-analytics` | S3 bucket holding complete Agent Skill packages |
-| `SKILLS_PREFIX` | `skills/` | S3 skills prefix |
+| `SKILLS_BUCKET` | Empty | S3 bucket holding complete Agent Skill packages; required to enable skills |
+| `SKILLS_PREFIX` | Empty | Optional S3 skills prefix; empty means skills are stored at the bucket root |
 | `SKILLS_LOCAL_DIR` | `/tmp/strands-agent-skills` | Writable runtime cache |
 | `SKILLS_MAX_OBJECT_BYTES` | `50000000` | Maximum size of one downloaded skill object |
 | `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
-Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, or `CODE_INTERPRETER_ID` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test. Set `MEMORY_ID` to an empty string to disable memory.
+Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, or `SKILLS_BUCKET` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test. Set `MEMORY_ID` to an empty string to disable memory.
 
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 
@@ -110,7 +112,7 @@ When memory is enabled, AgentCore Memory is the source of truth for prior conver
 
 ## Skills
 
-The startup lifespan syncs every S3 object beneath `SKILLS_PREFIX` into `SKILLS_LOCAL_DIR`, preserving the hierarchy and enforcing per-object and total size limits. Each skill must use the Agent Skills directory format:
+When `SKILLS_BUCKET` is configured, the startup lifespan syncs every S3 object beneath `SKILLS_PREFIX` into `SKILLS_LOCAL_DIR`, preserving the hierarchy and enforcing per-object and total size limits. An empty prefix means the bucket root. Each skill must use the Agent Skills directory format:
 
 ```text
 skills/
@@ -126,6 +128,8 @@ skills/
 ```
 
 Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a useful `description`; the name should match its directory. The request-scoped agent registers Strands' `AgentSkills` plugin against the local parent directory. Strands places only skill metadata in the system prompt and adds its native `skills` activation tool. When the model activates a relevant skill, that tool returns the complete `SKILL.md` instructions.
+
+If `SKILLS_BUCKET` is empty or unset, the Runtime skips synchronization and does not add skill activation guidance, the `AgentSkills` plugin, `read_skill_resource`, or `stage_skill_resource`.
 
 Gateway MCP clients and managed Code Interpreter remain operational tools. They are not registered as skills. Runtime guidance directs the model to activate a matching skill before using its related domain tools. When the activated instructions require a UTF-8 text resource, the bounded `read_skill_resource` tool reads it from the local skill cache without allowing access outside that skill's directory.
 
@@ -181,6 +185,7 @@ strands_agent/six.py
 strands_agent/typing_extensions.py
 strands_agent/requirements.txt
 strands_agent/README.md
+strands_agent/USER_GUIDE.md
 strands_agent/.gitignore
 strands_agent/<freshly installed dependencies>
 ```

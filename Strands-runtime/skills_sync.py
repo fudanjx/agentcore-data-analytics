@@ -9,8 +9,8 @@ from strands import tool
 
 
 logger = logging.getLogger(__name__)
-BUCKET = os.environ.get("SKILLS_BUCKET", "ah-data-analytics").strip()
-PREFIX = os.environ.get("SKILLS_PREFIX", "skills/").strip()
+BUCKET = os.environ.get("SKILLS_BUCKET", "").strip()
+PREFIX = os.environ.get("SKILLS_PREFIX", "").strip()
 if PREFIX and not PREFIX.endswith("/"):
     PREFIX += "/"
 LOCAL_DIR = Path(os.environ.get("SKILLS_LOCAL_DIR", "/tmp/strands-agent-skills"))
@@ -35,6 +35,11 @@ ACTIVATION_GUIDANCE = """
 """
 
 
+def skills_enabled() -> bool:
+    """Return whether an S3 skills bucket is configured."""
+    return bool(BUCKET)
+
+
 def _local_path_for_key(key: str) -> Path:
     """Map an S3 object key safely beneath the configured local skill root."""
     if not key.startswith(PREFIX):
@@ -55,7 +60,7 @@ def _local_path_for_key(key: str) -> Path:
 
 def sync_skills() -> list[str]:
     """Download complete skill packages while preserving their S3 hierarchy."""
-    if not BUCKET:
+    if not skills_enabled():
         return []
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     client = boto3.client(
@@ -158,7 +163,7 @@ def _resolve_resource(skill_name: str, resource_path: str) -> Path:
 
 def skill_resource_s3_uri(skill_name: str, resource_path: str) -> str:
     """Return the canonical S3 URI for a resource present in the synced skill."""
-    if not BUCKET:
+    if not skills_enabled():
         raise ValueError("SKILLS_BUCKET must be configured to stage skill resources")
     local = _resolve_resource(skill_name, resource_path)
     relative = local.relative_to(LOCAL_DIR.resolve()).as_posix()
