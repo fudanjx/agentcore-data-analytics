@@ -9,7 +9,12 @@ import pytest
 MODULE_PATH = Path(__file__).parents[1] / "Strands-runtime" / "agent.py"
 
 
-def _load_agent_module(monkeypatch, prompt_cache_ttl=None, skills_enabled=True):
+def _load_agent_module(
+    monkeypatch,
+    prompt_cache_ttl=None,
+    skills_enabled=True,
+    model_id="test-model-id",
+):
     for name in (
         "ENABLE_MODEL_USAGE_LOGS",
         "MODEL_PRICING_LABEL",
@@ -24,6 +29,11 @@ def _load_agent_module(monkeypatch, prompt_cache_ttl=None, skills_enabled=True):
         monkeypatch.delenv("PROMPT_CACHE_TTL", raising=False)
     else:
         monkeypatch.setenv("PROMPT_CACHE_TTL", prompt_cache_ttl)
+    monkeypatch.delenv("MODEL_ARN", raising=False)
+    if model_id is None:
+        monkeypatch.delenv("MODEL_ID", raising=False)
+    else:
+        monkeypatch.setenv("MODEL_ID", model_id)
 
     code_interpreter = types.ModuleType("code_interpreter")
     code_interpreter.CODE_INTERPRETER_ID = ""
@@ -240,6 +250,20 @@ def test_prepare_omits_all_skill_components_when_skills_are_disabled(monkeypatch
 def test_rejects_unsupported_prompt_cache_ttl(monkeypatch):
     with pytest.raises(ValueError, match="PROMPT_CACHE_TTL must be '5m' or '1h'"):
         _load_agent_module(monkeypatch, prompt_cache_ttl="30m")
+
+
+def test_prepare_requires_an_explicit_model(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch, model_id=None)
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "hello"}],
+        actor_id=None,
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=False,
+    )
+
+    with pytest.raises(ValueError, match="MODEL_ID or MODEL_ARN must be configured"):
+        agent._prepare(request)
 
 
 def test_model_usage_payload_separates_cache_tokens_and_estimates_cost(monkeypatch):

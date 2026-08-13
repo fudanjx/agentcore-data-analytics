@@ -36,12 +36,8 @@ def _price_env(name: str, default: str) -> float:
     return value
 
 
-MODEL_ID = os.environ.get(
-    "MODEL_ID",
-    os.environ.get(
-        "MODEL_ARN",
-        "arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3",
-    ),
+MODEL_ID = os.environ.get("MODEL_ID", "").strip() or os.environ.get(
+    "MODEL_ARN", ""
 ).strip()
 MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
 PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
@@ -327,6 +323,9 @@ def _make_gateway_clients() -> list[MCPClient]:
 
 
 def _prepare(request: InvocationRequest):
+    if not MODEL_ID:
+        raise ValueError("MODEL_ID or MODEL_ARN must be configured")
+
     system_messages, ordinary_messages = _split_system(request.messages)
     current_user = _latest_user_text(ordinary_messages)
     if not current_user.strip():

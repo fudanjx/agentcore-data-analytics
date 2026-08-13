@@ -60,7 +60,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `MODEL_ID` / `MODEL_ARN` | Reference application inference profile ARN | Bedrock model used by Strands |
+| `MODEL_ID` / `MODEL_ARN` | Empty | Required Bedrock model ID or application inference profile ARN used by Strands |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
 | `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Emit one `MODEL_USAGE` JSON log after every invocation, without prompt or response content |
@@ -91,7 +91,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
-Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
+`MODEL_ID` or `MODEL_ARN` must be configured. Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that optional capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
 
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 

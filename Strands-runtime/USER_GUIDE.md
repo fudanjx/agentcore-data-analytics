@@ -113,7 +113,7 @@ If the bucket uses a customer-managed KMS key, add `kms:Decrypt` for that key to
 | AgentCore Memory | `MEMORY_ID=<memory-id>` | Omit `MEMORY_ID` or use an empty value |
 | Agent Skills | Set `SKILLS_BUCKET`; `SKILLS_PREFIX` is optional | Omit `SKILLS_BUCKET` or use an empty value |
 
-Do not set `MODEL_ID` to an empty value. Set a valid model identifier or omit it only if you intentionally want the project-specific fallback. For a portable deployment, always configure your own `MODEL_ID` or `MODEL_ARN`. Configure your own skills bucket and prefix only when the deployment needs skills.
+Configure a valid `MODEL_ID` or `MODEL_ARN`; there is no packaged model fallback. Configure your own skills bucket and prefix only when the deployment needs skills.
 
 ### Dify-oriented configuration
 
@@ -131,8 +131,8 @@ Environment variable values in the AgentCore console are strings. The following 
 | --- | --- | --- |
 | `AWS_DEFAULT_REGION` | `ap-southeast-1` in fallback paths | Set to the Runtime/AgentCore resource Region |
 | `AWS_REGION` | Usually supplied by AWS | Normally leave Runtime-managed; it is used as the first S3 prompt-client Region fallback |
-| `MODEL_ID` | Project-specific application inference profile ARN | Set your Bedrock model ID or application inference profile ARN |
-| `MODEL_ARN` | Used only when `MODEL_ID` is absent | Alternative to `MODEL_ID`; do not set both |
+| `MODEL_ID` | Empty | Required unless `MODEL_ARN` is set; use a Bedrock model ID or application inference profile ARN |
+| `MODEL_ARN` | Empty | Alternative to `MODEL_ID`; do not set both |
 | `MODEL_REGION` | Parsed from an ARN, otherwise `AWS_DEFAULT_REGION` | Set explicitly when the model is in a different Region |
 | `PROMPT_CACHE_TTL` | `5m` | `5m` or `1h`; the model must support the selected TTL |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Use `true` to emit one content-free `MODEL_USAGE` record per invocation |
