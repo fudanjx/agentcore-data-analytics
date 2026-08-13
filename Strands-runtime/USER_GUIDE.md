@@ -110,7 +110,7 @@ If the bucket uses a customer-managed KMS key, add `kms:Decrypt` for that key to
 | Application base prompt | `BASE_SYSTEM_PROMPT=s3://bucket/key.txt` | Omit it or use an empty value |
 | AgentCore Gateway MCP tools | Valid `AGENTCORE_GATEWAYS_JSON` | Omit it, use an empty value, or use `{}` |
 | Code Interpreter | `CODE_INTERPRETER_ID=<custom-interpreter-id>` | Omit it or use an empty value |
-| AgentCore Memory | `MEMORY_ID=<memory-id>` | Set `MEMORY_ID` to an empty value |
+| AgentCore Memory | `MEMORY_ID=<memory-id>` | Omit `MEMORY_ID` or use an empty value |
 | Agent Skills | Set `SKILLS_BUCKET`; `SKILLS_PREFIX` is optional | Omit `SKILLS_BUCKET` or use an empty value |
 
 Do not set `MODEL_ID` to an empty value. Set a valid model identifier or omit it only if you intentionally want the project-specific fallback. For a portable deployment, always configure your own `MODEL_ID` or `MODEL_ARN`. Configure your own skills bucket and prefix only when the deployment needs skills.
@@ -195,7 +195,7 @@ Use a custom Code Interpreter when skill resources or user files must be copied 
 
 | Variable | Runtime default | Recommended configuration |
 | --- | --- | --- |
-| `MEMORY_ID` | Project-specific Memory ID | Set your Memory ID, or explicitly set an empty value to disable memory |
+| `MEMORY_ID` | Empty | Set your Memory ID to enable Memory; empty or unset disables it |
 | `MEMORY_REGION` | `ap-southeast-1` | Region containing the Memory resource |
 | `MEMORY_BATCH_SIZE` | `10` | Messages per persistence batch, clamped to `1` through `100` |
 | `MEMORY_TOP_K` | `5` | Records retrieved per active strategy, clamped to `1` through `1000` |
@@ -254,7 +254,7 @@ SKILLS_MAX_SYNC_BYTES=250000000
 SKILLS_MAX_RESOURCE_CHARS=100000
 ```
 
-If the console does not accept an empty value, omit `BASE_SYSTEM_PROMPT`, `CODE_INTERPRETER_ID`, `SKILLS_BUCKET`, and `SKILLS_PREFIX`. Keep `AGENTCORE_GATEWAYS_JSON={}` because it is unambiguous. To disable Memory without falling back to the packaged project ID, explicitly save `MEMORY_ID` as an empty value; if the console cannot retain empty values, use a deployment API that can pass the empty string.
+If the console does not accept an empty value, omit `BASE_SYSTEM_PROMPT`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, `SKILLS_BUCKET`, and `SKILLS_PREFIX`. Keep `AGENTCORE_GATEWAYS_JSON={}` because it is unambiguous.
 
 ### Full-feature overrides
 

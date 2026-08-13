@@ -347,7 +347,8 @@ def _prepare(request: InvocationRequest):
         base_prompt = system_prompt.load()
         skills_enabled = skills_sync.skills_enabled()
         skills_guidance = skills_sync.ACTIVATION_GUIDANCE if skills_enabled else ""
-        system_prompt_text = base_prompt + skills_guidance + memory.MEMORY_GUIDANCE
+        memory_guidance = memory.MEMORY_GUIDANCE if memory.memory_enabled() else ""
+        system_prompt_text = base_prompt + skills_guidance + memory_guidance
         if system_messages:
             system_prompt_text += (
                 "\n\n---\n\n## Caller-provided system guidance\n\n"

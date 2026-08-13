@@ -79,7 +79,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `ENABLE_CODE_INTERPRETER` | `true` | Enable interpreter tools |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | Session timeout, constrained to 60-28,800 seconds |
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Tool-result context limit |
-| `MEMORY_ID` | Reference runtime Memory ID | AgentCore Memory resource |
+| `MEMORY_ID` | Empty | AgentCore Memory resource; empty or unset disables Memory |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
 | `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
 | `MEMORY_TOP_K` | `5` | Maximum long-term records retrieved from each active strategy |
@@ -91,7 +91,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
-Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, or `SKILLS_BUCKET` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test. Set `MEMORY_ID` to an empty string to disable memory.
+Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
 
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 

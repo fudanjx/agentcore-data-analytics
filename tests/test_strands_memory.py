@@ -11,6 +11,15 @@ def _load_memory_module():
     return module
 
 
+def test_memory_defaults_to_disabled_when_id_is_not_configured(monkeypatch):
+    monkeypatch.delenv("MEMORY_ID", raising=False)
+    memory = _load_memory_module()
+
+    assert memory.MEMORY_ID == ""
+    assert memory.memory_enabled() is False
+    assert memory.create_session_manager("actor-id", "session-id") is None
+
+
 def test_discovers_active_strategies_in_stable_type_order(monkeypatch):
     memory = _load_memory_module()
 

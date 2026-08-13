@@ -34,6 +34,7 @@ def _load_agent_module(monkeypatch, prompt_cache_ttl=None, skills_enabled=True):
 
     memory = types.ModuleType("memory")
     memory.MEMORY_GUIDANCE = "\nMEMORY_GUIDANCE"
+    memory.memory_enabled = lambda: True
 
     skills_sync = types.ModuleType("skills_sync")
     skills_sync.ACTIVATION_GUIDANCE = "\nACTIVATE_SKILLS"

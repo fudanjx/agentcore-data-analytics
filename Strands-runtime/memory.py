@@ -20,7 +20,7 @@ from strands.types.session import SessionMessage
 
 logger = logging.getLogger(__name__)
 REGION = os.environ.get("MEMORY_REGION", "ap-southeast-1").strip()
-MEMORY_ID = os.environ.get("MEMORY_ID", "memory_runtime_dev-QNTwTS3Onp").strip()
+MEMORY_ID = os.environ.get("MEMORY_ID", "").strip()
 MEMORY_BATCH_SIZE = min(100, max(1, int(os.environ.get("MEMORY_BATCH_SIZE", "10"))))
 MEMORY_TOP_K = min(1000, max(1, int(os.environ.get("MEMORY_TOP_K", "5"))))
 MEMORY_RELEVANCE_SCORE = min(
@@ -36,6 +36,11 @@ _LONG_TERM_STRATEGY_TYPES = ("SEMANTIC", "USER_PREFERENCE", "SUMMARIZATION")
 
 _control_client = None
 _strategy_ids: tuple[str, ...] | None = None
+
+
+def memory_enabled() -> bool:
+    """Return whether an AgentCore Memory resource is configured."""
+    return bool(MEMORY_ID)
 
 
 class _ConversationMemoryConverter(AgentCoreMemoryConverter):
@@ -98,7 +103,7 @@ def _get_strategy_ids() -> tuple[str, ...]:
     global _strategy_ids
     if _strategy_ids is not None:
         return _strategy_ids
-    if not MEMORY_ID:
+    if not memory_enabled():
         return ()
     try:
         response = _get_control_client().get_memory(memoryId=MEMORY_ID)
@@ -148,7 +153,7 @@ def create_session_manager(
     async_mode: bool = False,
 ) -> AgentCoreMemorySessionManager | None:
     """Create the native Strands/AgentCore memory integration for one invocation."""
-    if not MEMORY_ID or not actor_id or not session_id:
+    if not memory_enabled() or not actor_id or not session_id:
         return None
 
     config = AgentCoreMemoryConfig(
