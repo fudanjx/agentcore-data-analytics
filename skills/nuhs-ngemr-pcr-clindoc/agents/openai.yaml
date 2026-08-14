@@ -1,0 +1,4 @@
+interface:
+  display_name: "NUHS NGEMR PCR ClinDoc"
+  short_description: "Route and enrich Epic ClinDoc PCR requests"
+  default_prompt: "Use $nuhs-ngemr-pcr-clindoc to assess and draft this ClinDoc PCR request."

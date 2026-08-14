@@ -1,9 +1,14 @@
 """Request-scoped AgentCore Code Interpreter tools for Strands."""
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
+import re
+import shlex
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import boto3
@@ -16,9 +21,7 @@ REGION = os.environ.get(
     "CODE_INTERPRETER_REGION",
     os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1"),
 )
-CODE_INTERPRETER_ID = os.environ.get(
-    "CODE_INTERPRETER_ID", "code_interpreter_runtime_dev-PEpoCecsBL"
-).strip()
+CODE_INTERPRETER_ID = os.environ.get("CODE_INTERPRETER_ID", "").strip()
 SESSION_TIMEOUT_SECONDS = min(
     28_800,
     max(60, int(os.environ.get("CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS", "1800"))),
@@ -74,7 +77,9 @@ def stop_session(session_id: str) -> None:
             codeInterpreterIdentifier=_require_identifier(), sessionId=session_id
         )
     except Exception:
-        logger.warning("Unable to stop Code Interpreter session %s", session_id, exc_info=True)
+        logger.warning(
+            "Unable to stop Code Interpreter session %s", session_id, exc_info=True
+        )
 
 
 def _json_default(value: Any):
@@ -105,7 +110,38 @@ async def _invoke_tool(session_id: str, name: str, arguments: dict) -> str:
         return f"Code Interpreter {name} failed: {error}"
 
 
-def build_tools(session_id: str) -> list:
+def _tool_result_is_error(rendered: str) -> bool:
+    """Return whether a rendered AgentCore tool response reports a failure."""
+    try:
+        results = json.loads(rendered)
+    except (TypeError, json.JSONDecodeError):
+        return True
+    if not isinstance(results, list) or not results:
+        return True
+    for result in results:
+        if not isinstance(result, dict):
+            continue
+        if result.get("isError") is True:
+            return True
+        structured = result.get("structuredContent")
+        if isinstance(structured, dict) and structured.get("exitCode") not in {None, 0}:
+            return True
+    return False
+
+
+def _skill_resource_destination(skill_name: str, resource_path: str) -> str:
+    """Build a safe collision-resistant destination in the interpreter sandbox."""
+    digest = hashlib.sha256(
+        f"{skill_name}\0{resource_path}".encode("utf-8")
+    ).hexdigest()[:12]
+    filename = re.sub(r"[^A-Za-z0-9._-]", "_", Path(resource_path).name)[:100]
+    return f"/tmp/skill-resource-{digest}-{filename or 'resource'}"
+
+
+def build_tools(
+    session_id: str,
+    skill_resource_uri: Callable[[str, str], str] | None = None,
+) -> list:
     """Create Strands tools bound to one managed interpreter session."""
 
     @tool(
@@ -135,4 +171,38 @@ def build_tools(session_id: str) -> list:
     async def execute_command(command: str) -> str:
         return await _invoke_tool(session_id, "executeCommand", {"command": command})
 
-    return [execute_code, execute_command]
+    tools = [execute_code, execute_command]
+    if skill_resource_uri is not None:
+
+        @tool(
+            name="stage_skill_resource",
+            description=(
+                "Copy a resource from an activated Agent Skill into this request's "
+                "managed Code Interpreter session. Provide the activated skill name "
+                "and its relative resource path. The tool accepts only resources "
+                "present in the synchronized skill package and returns the sandbox "
+                "path to use with execute_code or execute_command."
+            ),
+        )
+        async def stage_skill_resource(skill_name: str, resource_path: str) -> str:
+            try:
+                uri = skill_resource_uri(skill_name, resource_path)
+            except (OSError, ValueError) as error:
+                return f"Unable to stage skill resource: {error}"
+            destination = _skill_resource_destination(skill_name, resource_path)
+            command = (
+                "aws s3 cp --only-show-errors "
+                f"{shlex.quote(uri)} {shlex.quote(destination)}"
+            )
+            result = await _invoke_tool(
+                session_id,
+                "executeCommand",
+                {"command": command},
+            )
+            if _tool_result_is_error(result):
+                return f"Unable to stage skill resource from {uri}: {result}"
+            return f"Skill resource staged at {destination}"
+
+        tools.append(stage_skill_resource)
+
+    return tools

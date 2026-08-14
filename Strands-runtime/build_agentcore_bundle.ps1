@@ -107,13 +107,16 @@ sys.path.insert(0, "/stage/strands_agent")
 assert version("strands-agents") == "1.50.2", version("strands-agents")
 assert version("mcp") == "1.29.0", version("mcp")
 
-from strands.models import CacheConfig
+from strands import AgentSkills
+from strands.models import CacheConfig, CacheToolsConfig
 import pydantic_core
 import rpds
 import agent
 import main
 
 assert agent.CacheConfig is CacheConfig
+assert agent.CacheToolsConfig is CacheToolsConfig
+assert agent.AgentSkills is AgentSkills
 print("Verified strands-agents", version("strands-agents"))
 print("Verified mcp", version("mcp"))
 print("Verified entry point strands_agent/main.py")

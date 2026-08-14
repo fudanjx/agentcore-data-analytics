@@ -15,43 +15,6 @@ _ARN_RE = re.compile(
     r"gateway/(?P<gateway_id>[A-Za-z0-9_-]+)$"
 )
 
-DEFAULT_GATEWAYS = {
-    "nuh": {
-        "label": "NUH",
-        "url": (
-            "https://nuh-analytics-db-fhbzdmtdta.gateway.bedrock-agentcore."
-            "ap-southeast-1.amazonaws.com"
-        ),
-        "arn": (
-            "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
-            "gateway/nuh-analytics-db-fhbzdmtdta"
-        ),
-    },
-    "ah": {
-        "label": "AH",
-        "url": (
-            "https://ah-analytics-db-gszih4adsx.gateway.bedrock-agentcore."
-            "ap-southeast-1.amazonaws.com"
-        ),
-        "arn": (
-            "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
-            "gateway/ah-analytics-db-gszih4adsx"
-        ),
-    },
-    "fm": {
-        "label": "TimesFM",
-        "url": (
-            "https://timesfm-gateway-w4fho4r9um.gateway.bedrock-agentcore."
-            "ap-southeast-1.amazonaws.com"
-        ),
-        "arn": (
-            "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:"
-            "gateway/timesfm-gateway-w4fho4r9um"
-        ),
-    },
-}
-
-
 @dataclass(frozen=True)
 class GatewayConfig:
     slug: str
@@ -109,19 +72,19 @@ def _validate_gateway(slug: object, value: object) -> GatewayConfig:
 
 
 def load_gateway_configs(raw: str | None = None) -> dict[str, GatewayConfig]:
-    """Load Gateway mappings from JSON, falling back to project defaults."""
+    """Load optional Gateway mappings from JSON."""
     if raw is None:
         raw = os.environ.get(ENV_NAME)
-    if raw:
-        try:
-            values = json.loads(raw)
-        except json.JSONDecodeError as error:
-            raise ValueError(f"{ENV_NAME} must contain valid JSON: {error}") from error
-    else:
-        values = DEFAULT_GATEWAYS
+    if not raw or not raw.strip():
+        return {}
 
-    if not isinstance(values, dict) or not values:
-        raise ValueError(f"{ENV_NAME} must be a non-empty JSON object")
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{ENV_NAME} must contain valid JSON: {error}") from error
+
+    if not isinstance(values, dict):
+        raise ValueError(f"{ENV_NAME} must be a JSON object")
     return {slug: _validate_gateway(slug, value) for slug, value in values.items()}
 
 

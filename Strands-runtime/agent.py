@@ -1,40 +1,88 @@
 """Strands data analyst with Gateway, Memory, skills, and Code Interpreter."""
 
 import asyncio
+import json
 import logging
+import math
 import os
 import re
 import time
 import uuid
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
-from typing import Any, AsyncIterator
-
-from strands import Agent
-from strands.handlers.callback_handler import null_callback_handler
-from strands.models import BedrockModel, CacheConfig
-from strands.tools.mcp import MCPClient
+from typing import Any
 
 import code_interpreter
 import gateway_proxy
 import memory
 import skills_sync
 import system_prompt
-
+from strands import Agent, AgentSkills
+from strands.handlers.callback_handler import null_callback_handler
+from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
+from strands.tools.mcp import MCPClient
 
 logger = logging.getLogger(__name__)
-MODEL_ID = os.environ.get(
-    "MODEL_ID",
-    os.environ.get(
-        "MODEL_ARN",
-        "arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3",
-    ),
+
+
+def _price_env(name: str, default: str) -> float:
+    raw = os.environ.get(name, default).strip()
+    try:
+        value = float(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a non-negative number") from error
+    if not math.isfinite(value) or value < 0:
+        raise ValueError(f"{name} must be a non-negative number")
+    return value
+
+
+MODEL_ID = os.environ.get("MODEL_ID", "").strip() or os.environ.get(
+    "MODEL_ARN", ""
 ).strip()
 MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
+AGENT_NAME = os.environ.get("AGENT_NAME", "data-analyst").strip() or "data-analyst"
+AGENT_DESCRIPTION = (
+    os.environ.get(
+        "AGENT_DESCRIPTION",
+        "Data analyst with connected databases and managed code execution",
+    ).strip()
+    or "Data analyst with connected databases and managed code execution"
+)
+PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
+if PROMPT_CACHE_TTL not in {"5m", "1h"}:
+    raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h'")
+ENABLE_MODEL_USAGE_LOGS = os.environ.get(
+    "ENABLE_MODEL_USAGE_LOGS", "true"
+).lower() not in {"0", "false", "no"}
+MODEL_PRICING_LABEL = os.environ.get(
+    "MODEL_PRICING_LABEL", "claude-sonnet-4.6-standard-2026-08"
+).strip()
+MODEL_INPUT_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_INPUT_PRICE_PER_MTOK_USD", "3.00"
+)
+MODEL_OUTPUT_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_OUTPUT_PRICE_PER_MTOK_USD", "15.00"
+)
+MODEL_CACHE_READ_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_READ_PRICE_PER_MTOK_USD", "0.30"
+)
+MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD", "3.75"
+)
+MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD = _price_env(
+    "MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD", "6.00"
+)
 ENABLE_GATEWAYS = os.environ.get("ENABLE_GATEWAYS", "true").lower() not in {"0", "false", "no"}
 ENABLE_CODE_INTERPRETER = os.environ.get(
     "ENABLE_CODE_INTERPRETER", "true"
 ).lower() not in {"0", "false", "no"}
+ENABLE_TOOL_DETAILS = os.environ.get(
+    "ENABLE_TOOL_DETAILS", "false"
+).lower() in {"1", "true", "yes", "on"}
+TOOL_DETAIL_MAX_CHARS = min(
+    1_000_000,
+    max(1_000, int(os.environ.get("TOOL_DETAIL_MAX_CHARS", "200000"))),
+)
 
 
 @dataclass(frozen=True)
@@ -48,7 +96,7 @@ class InvocationRequest:
     @classmethod
     def from_payload(cls, payload: dict, context: Any = None) -> "InvocationRequest":
         if not isinstance(payload, dict):
-            raise ValueError("Invocation payload must be a JSON object")
+            raise TypeError("Invocation payload must be a JSON object")
         has_messages = payload.get("messages") is not None
         messages = payload.get("messages")
         if messages is None:
@@ -61,7 +109,7 @@ class InvocationRequest:
         normalized = []
         for item in messages:
             if not isinstance(item, dict):
-                raise ValueError("Every message must be a JSON object")
+                raise TypeError("Every message must be a JSON object")
             normalized.append(
                 {
                     "role": str(item.get("role") or "user").lower(),
@@ -114,7 +162,7 @@ class InvocationRequest:
             messages=normalized,
             actor_id=str(actor) if actor else None,
             session_id=session_id,
-            model_slug=str(payload.get("model") or "strands-data-analyst"),
+            model_slug=str(payload.get("model") or "strands-agent"),
             # The existing Dify/OpenAI proxy expects Runtime message payloads
             # to stream even though it does not add a downstream `stream` flag.
             # Simple AgentCore console prompts remain blocking by default.
@@ -159,13 +207,13 @@ def _split_system(messages: list[dict]) -> tuple[list[str], list[dict]]:
 
 
 def _build_prompt(messages: list[dict]) -> str:
-    if not messages:
-        return ""
+    """Flatten caller history only when no persistent session manager is active."""
     if len(messages) == 1 and messages[0]["role"] == "user":
         return _content_text(messages[0]["content"])
-    lines: list[str] = []
-    for item in messages[:-1]:
-        lines.append(f"{item['role'].upper()}: {_content_text(item['content'])}")
+    lines = [
+        f"{item['role'].upper()}: {_content_text(item['content'])}"
+        for item in messages[:-1]
+    ]
     last = messages[-1]
     lines.extend(["", f"Current {last['role']} message: {_content_text(last['content'])}"])
     return "\n".join(lines)
@@ -178,24 +226,100 @@ def _latest_user_text(messages: list[dict]) -> str:
     return ""
 
 
-def _memory_context(request: InvocationRequest, prompt: str) -> tuple[str, str]:
-    if not request.actor_id:
-        return "", ""
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix="memory") as executor:
-        short_future = executor.submit(
-            memory.retrieve_short_term_context, request.actor_id, request.session_id
-        )
-        long_future = executor.submit(
-            memory.retrieve_long_term_context, request.actor_id, prompt
-        )
-        return short_future.result(), long_future.result()
-
-
 def _model_region() -> str:
     if MODEL_REGION:
         return MODEL_REGION
     match = re.match(r"^arn:[^:]+:bedrock:([^:]+):", MODEL_ID)
     return match.group(1) if match else os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
+
+
+def _model_usage_payload(
+    request: InvocationRequest,
+    runtime_agent: Any,
+    *,
+    duration_ms: int,
+    succeeded: bool,
+) -> dict[str, Any] | None:
+    metrics = getattr(runtime_agent, "event_loop_metrics", None)
+    usage = getattr(metrics, "accumulated_usage", None)
+    if not isinstance(usage, dict):
+        return None
+
+    input_tokens = int(usage.get("inputTokens", 0) or 0)
+    output_tokens = int(usage.get("outputTokens", 0) or 0)
+    cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
+    cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
+    total_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens
+    cache_write_rate = (
+        MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD
+        if PROMPT_CACHE_TTL == "1h"
+        else MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD
+    )
+
+    def cost(tokens: int, rate: float) -> float:
+        return round(tokens * rate / 1_000_000, 10)
+
+    cost_breakdown = {
+        "input": cost(input_tokens, MODEL_INPUT_PRICE_PER_MTOK_USD),
+        "output": cost(output_tokens, MODEL_OUTPUT_PRICE_PER_MTOK_USD),
+        "cache_read": cost(
+            cache_read_tokens,
+            MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
+        ),
+        "cache_write": cost(cache_write_tokens, cache_write_rate),
+    }
+    return {
+        "event": "model_usage",
+        "model_id": MODEL_ID,
+        "model_slug": request.model_slug,
+        "session_id": request.session_id,
+        "stream": request.stream,
+        "succeeded": succeeded,
+        "duration_ms": duration_ms,
+        "prompt_cache_ttl": PROMPT_CACHE_TTL,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "cache_read_input_tokens": cache_read_tokens,
+        "cache_write_input_tokens": cache_write_tokens,
+        "total_input_tokens": total_input_tokens,
+        "total_tokens_reported": int(usage.get("totalTokens", 0) or 0),
+        "cache_read_ratio": (
+            round(cache_read_tokens / total_input_tokens, 6)
+            if total_input_tokens
+            else 0.0
+        ),
+        "estimated_cost_usd": round(sum(cost_breakdown.values()), 10),
+        "estimated_cost_breakdown_usd": cost_breakdown,
+        "pricing": {
+            "label": MODEL_PRICING_LABEL,
+            "unit": "USD_per_million_tokens",
+            "input": MODEL_INPUT_PRICE_PER_MTOK_USD,
+            "output": MODEL_OUTPUT_PRICE_PER_MTOK_USD,
+            "cache_read": MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
+            "cache_write": cache_write_rate,
+        },
+    }
+
+
+def _log_model_usage(
+    request: InvocationRequest,
+    runtime_agent: Any,
+    *,
+    started_at: float,
+    succeeded: bool,
+) -> dict[str, Any] | None:
+    """Collect final invocation usage and optionally write it to CloudWatch logs."""
+    if runtime_agent is None:
+        return None
+    payload = _model_usage_payload(
+        request,
+        runtime_agent,
+        duration_ms=round((time.perf_counter() - started_at) * 1000),
+        succeeded=succeeded,
+    )
+    if payload is not None and ENABLE_MODEL_USAGE_LOGS:
+        logger.info("MODEL_USAGE %s", json.dumps(payload, separators=(",", ":")))
+    return payload
 
 
 def _make_gateway_clients() -> list[MCPClient]:
@@ -214,28 +338,56 @@ def _make_gateway_clients() -> list[MCPClient]:
 
 
 def _prepare(request: InvocationRequest):
-    system_messages, ordinary_messages = _split_system(request.messages)
-    prompt = _build_prompt(ordinary_messages)
-    if not prompt.strip():
-        raise ValueError("The invocation does not contain a user question")
-    short_context, long_context = _memory_context(request, prompt)
-    if short_context:
-        prompt = f"{short_context}\n\n---\n\n## Current request\n\n{prompt}"
+    if not MODEL_ID:
+        raise ValueError("MODEL_ID or MODEL_ARN must be configured")
 
-    base_prompt = system_prompt.load()
-    system_prompt_text = base_prompt + skills_sync.prompt_context() + long_context
-    if system_messages:
-        system_prompt_text += (
-            "\n\n---\n\n## Caller-provided system guidance\n\n"
-            + "\n\n".join(system_messages)
-        )
+    system_messages, ordinary_messages = _split_system(request.messages)
+    current_user = _latest_user_text(ordinary_messages)
+    if not current_user.strip():
+        raise ValueError("The invocation does not contain a user question")
 
     interpreter_session = None
+    memory_session_manager = None
     try:
+        memory_session_manager = memory.create_session_manager(
+            request.actor_id,
+            request.session_id,
+            async_mode=request.stream,
+        )
+        # Native session management restores prior turns. If memory is disabled,
+        # retain the caller-provided history as a stateless fallback.
+        prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
+
+        document_guidance = """When <document_input> tags are present:
+Each <document_input> provides the uploaded file’s original filename and S3 URL. Use Code Interpreter to download these files"""
+        base_prompt = "\n\n".join(
+            part for part in (system_prompt.load(), document_guidance) if part
+        )
+        skills_enabled = skills_sync.skills_enabled()
+        skills_guidance = skills_sync.ACTIVATION_GUIDANCE if skills_enabled else ""
+        memory_guidance = memory.MEMORY_GUIDANCE if memory.memory_enabled() else ""
+        system_prompt_text = base_prompt + skills_guidance + memory_guidance
+        if system_messages:
+            system_prompt_text += (
+                "\n\n---\n\n## Caller-provided system guidance\n\n"
+                + "\n\n".join(system_messages)
+            )
+
         tools: list = []
+        plugins: list = []
+        if skills_enabled:
+            tools.append(skills_sync.read_skill_resource)
+            plugins.append(AgentSkills(skills=skills_sync.LOCAL_DIR))
         if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
             interpreter_session = code_interpreter.start_session(request.session_id)
-            tools.extend(code_interpreter.build_tools(interpreter_session))
+            tools.extend(
+                code_interpreter.build_tools(
+                    interpreter_session,
+                    skill_resource_uri=(
+                        skills_sync.skill_resource_s3_uri if skills_enabled else None
+                    ),
+                )
+            )
         tools.extend(_make_gateway_clients())
 
         model = BedrockModel(
@@ -243,26 +395,36 @@ def _prepare(request: InvocationRequest):
             region_name=_model_region(),
             # The default model is an opaque inference-profile ARN, so Strands
             # cannot infer the provider when CacheConfig uses strategy="auto".
-            cache_config=CacheConfig(strategy="anthropic"),
-            cache_tools="default",
+            cache_config=CacheConfig(
+                strategy="anthropic",
+                ttl=PROMPT_CACHE_TTL,
+            ),
+            cache_tools=CacheToolsConfig(ttl=PROMPT_CACHE_TTL),
         )
         runtime_agent = Agent(
             model=model,
             tools=tools,
+            plugins=plugins,
+            session_manager=memory_session_manager,
             system_prompt=system_prompt_text,
             callback_handler=null_callback_handler,
-            name="data-analyst",
-            description="Data analyst with connected databases and managed code execution",
+            name=AGENT_NAME,
+            description=AGENT_DESCRIPTION,
         )
         return (
             runtime_agent,
             interpreter_session,
+            memory_session_manager,
             prompt,
-            _latest_user_text(ordinary_messages) or prompt,
         )
     except BaseException:
         if interpreter_session:
             code_interpreter.stop_session(interpreter_session)
+        if memory_session_manager:
+            try:
+                memory_session_manager.close()
+            except Exception:
+                logger.warning("Unable to flush AgentCore Memory", exc_info=True)
         raise
 
 
@@ -278,7 +440,11 @@ def _result_text(result: Any) -> str:
     return str(result)
 
 
-def _cleanup(runtime_agent: Agent | None, interpreter_session: str | None) -> None:
+def _cleanup(
+    runtime_agent: Agent | None,
+    interpreter_session: str | None,
+    memory_session_manager: Any = None,
+) -> None:
     if runtime_agent is not None:
         try:
             runtime_agent.cleanup()
@@ -286,28 +452,42 @@ def _cleanup(runtime_agent: Agent | None, interpreter_session: str | None) -> No
             logger.warning("Unable to clean up Strands tools", exc_info=True)
     if interpreter_session:
         code_interpreter.stop_session(interpreter_session)
+    if memory_session_manager is not None:
+        try:
+            memory_session_manager.close()
+        except Exception:
+            logger.warning("Unable to flush AgentCore Memory", exc_info=True)
 
 
 def run(request: InvocationRequest) -> dict:
     """Run one isolated Strands invocation and return a blocking response."""
+    started_at = time.perf_counter()
+    succeeded = False
     runtime_agent = None
     interpreter_session = None
+    memory_session_manager = None
     try:
-        runtime_agent, interpreter_session, prompt, current_user = _prepare(request)
+        runtime_agent, interpreter_session, memory_session_manager, prompt = _prepare(request)
         result = runtime_agent(prompt)
         text = _result_text(result)
-        if request.actor_id:
-            memory.save_turn(request.actor_id, request.session_id, current_user, text)
+        succeeded = True
         return {
             "result": text,
             "session_id": request.session_id,
             "model": request.model_slug,
         }
     finally:
-        _cleanup(runtime_agent, interpreter_session)
+        _log_model_usage(
+            request,
+            runtime_agent,
+            started_at=started_at,
+            succeeded=succeeded,
+        )
+        _cleanup(runtime_agent, interpreter_session, memory_session_manager)
 
 
 _STEP_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
+_DETAIL_MISSING = object()
 
 
 def _safe_tool_name(value: Any) -> str:
@@ -321,17 +501,134 @@ def _safe_tool_name(value: Any) -> str:
     return (raw or "Agent tool")[:120]
 
 
+def _tool_kind(raw_name: Any) -> str:
+    """Classify native skill operations separately for frontend presentation."""
+    skill_tools = {"skills", "read_skill_resource"}
+    return "skill" if str(raw_name or "") in skill_tools else "tool"
+
+
+def _step_display_name(raw_name: Any, tool_input: Any) -> Any:
+    """Use the activated skill/resource name instead of the generic tool name."""
+    if not isinstance(tool_input, dict):
+        return raw_name
+    if str(raw_name or "") == "skills":
+        return tool_input.get("skill_name") or raw_name
+    if str(raw_name or "") == "read_skill_resource":
+        skill_name = tool_input.get("skill_name")
+        resource_path = tool_input.get("resource_path")
+        if skill_name and resource_path:
+            return f"{skill_name}: {resource_path}"
+        return skill_name or resource_path or raw_name
+    return raw_name
+
+
+def _parsed_tool_input(value: Any) -> tuple[Any, bool]:
+    """Parse Strands' incrementally assembled JSON tool input when complete."""
+    if not isinstance(value, str):
+        return value, True
+    if not value.strip():
+        # Strands may emit an empty first input delta before the JSON arguments.
+        # Wait for the real payload so skill events use the selected skill name.
+        return {}, False
+    try:
+        return json.loads(value), True
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value, False
+
+
+def _json_safe_detail(value: Any) -> Any:
+    """Return a JSON-safe copy without allowing binary payloads into the stream."""
+
+    def fallback(item: Any) -> Any:
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            return {"type": "binary", "bytes": len(item)}
+        return str(item)
+
+    return json.loads(json.dumps(value, ensure_ascii=False, default=fallback))
+
+
+def _bounded_detail(value: Any) -> tuple[Any, bool]:
+    """Bound one frontend detail while retaining structured JSON when it fits."""
+    safe_value = _json_safe_detail(value)
+    rendered = json.dumps(safe_value, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= TOOL_DETAIL_MAX_CHARS:
+        return safe_value, False
+    return {
+        "preview": rendered[:TOOL_DETAIL_MAX_CHARS],
+        "original_chars": len(rendered),
+    }, True
+
+
+def _agent_step(
+    tool_id: str,
+    raw_name: Any,
+    status: str,
+    *,
+    tool_input: Any = _DETAIL_MISSING,
+    output: Any = _DETAIL_MISSING,
+) -> dict[str, Any]:
+    """Build a bounded sideband event that a frontend can selectively render."""
+    details: dict[str, Any] = {}
+    if ENABLE_TOOL_DETAILS:
+        truncated = False
+        if tool_input is not _DETAIL_MISSING:
+            bounded_input, input_truncated = _bounded_detail(tool_input)
+            details["input"] = bounded_input
+            truncated = truncated or input_truncated
+        if output is not _DETAIL_MISSING:
+            bounded_output, output_truncated = _bounded_detail(output)
+            details["output"] = bounded_output
+            truncated = truncated or output_truncated
+        if truncated:
+            details["truncated"] = True
+
+    step: dict[str, Any] = {
+        "id": tool_id[:200],
+        "type": _tool_kind(raw_name),
+        "name": _safe_tool_name(_step_display_name(raw_name, tool_input)),
+        "status": status,
+    }
+    if details:
+        step["details"] = details
+    return {"event": "agent_step", "step": step}
+
+
+def _event_tool_results(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read direct and message-wrapped Strands tool-result event shapes."""
+    results: list[dict[str, Any]] = []
+    direct_result = event.get("tool_result")
+    if isinstance(direct_result, dict):
+        results.append(direct_result)
+
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return results
+    content = message.get("content")
+    if not isinstance(content, list):
+        return results
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        message_result = block.get("toolResult")
+        if isinstance(message_result, dict):
+            results.append(message_result)
+    return results
+
+
 async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     """Stream OpenAI-compatible chunks for the existing Dify proxy."""
+    started_at = time.perf_counter()
+    succeeded = False
     runtime_agent = None
     interpreter_session = None
+    memory_session_manager = None
+    usage_payload = None
     text_parts: list[str] = []
-    active_steps: dict[str, str] = {}
-    current_user = ""
+    active_steps: dict[str, dict[str, Any]] = {}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
     try:
-        runtime_agent, interpreter_session, prompt, current_user = await asyncio.to_thread(
+        runtime_agent, interpreter_session, memory_session_manager, prompt = await asyncio.to_thread(
             _prepare, request
         )
         async for event in runtime_agent.stream_async(prompt):
@@ -355,30 +652,72 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             tool_use = event.get("current_tool_use") or {}
             tool_id = str(tool_use.get("toolUseId") or "")
             tool_name = tool_use.get("name")
-            if tool_id and tool_name and tool_id not in active_steps:
-                safe_name = _safe_tool_name(tool_name)
-                active_steps[tool_id] = safe_name
-                yield {
-                    "event": "agent_step",
-                    "step": {"type": "tool", "name": safe_name, "status": "started"},
-                }
+            if tool_id and tool_name:
+                step_state = active_steps.setdefault(
+                    tool_id,
+                    {"name": tool_name, "input": _DETAIL_MISSING, "started": False},
+                )
+                if "input" in tool_use:
+                    step_state["input"] = tool_use["input"]
+                if not step_state["started"]:
+                    parsed_input, input_complete = _parsed_tool_input(
+                        step_state["input"]
+                    )
+                    if input_complete:
+                        step_state["started"] = True
+                        yield _agent_step(
+                            tool_id,
+                            step_state["name"],
+                            "started",
+                            tool_input=parsed_input,
+                        )
 
-        for safe_name in active_steps.values():
-            yield {
-                "event": "agent_step",
-                "step": {"type": "tool", "name": safe_name, "status": "completed"},
-            }
-        text = "".join(text_parts)
-        if request.actor_id:
-            await asyncio.to_thread(
-                memory.save_turn,
-                request.actor_id,
-                request.session_id,
-                current_user,
-                text,
+            for tool_result in _event_tool_results(event):
+                result_tool_id = str(tool_result.get("toolUseId") or "")
+                step_state = active_steps.pop(result_tool_id, None)
+                if not result_tool_id or step_state is None:
+                    continue
+                parsed_input, _ = _parsed_tool_input(step_state["input"])
+                result_status = tool_result.get("status")
+                if not step_state["started"]:
+                    yield _agent_step(
+                        result_tool_id,
+                        step_state["name"],
+                        "started",
+                        tool_input=parsed_input,
+                    )
+                yield _agent_step(
+                    result_tool_id,
+                    step_state["name"],
+                    "completed" if result_status == "success" else "failed",
+                    tool_input=parsed_input,
+                    output=tool_result.get("content", []),
+                )
+
+        # Compatibility fallback if a future/older Strands version omits the
+        # dedicated tool_result event from the public async event stream.
+        for tool_id, step_state in active_steps.items():
+            parsed_input, _ = _parsed_tool_input(step_state["input"])
+            yield _agent_step(
+                tool_id,
+                step_state["name"],
+                "completed",
+                tool_input=parsed_input,
             )
+        active_steps.clear()
+        succeeded = True
     except Exception as error:
         logger.exception("Strands streaming invocation failed")
+        for tool_id, step_state in active_steps.items():
+            parsed_input, _ = _parsed_tool_input(step_state["input"])
+            yield _agent_step(
+                tool_id,
+                step_state["name"],
+                "failed",
+                tool_input=parsed_input,
+                output={"error": str(error)},
+            )
+        active_steps.clear()
         error_text = f"\n\n[error] {error}"
         text_parts.append(error_text)
         yield {
@@ -395,7 +734,21 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             ],
         }
     finally:
-        await asyncio.to_thread(_cleanup, runtime_agent, interpreter_session)
+        usage_payload = _log_model_usage(
+            request,
+            runtime_agent,
+            started_at=started_at,
+            succeeded=succeeded,
+        )
+        await asyncio.to_thread(
+            _cleanup,
+            runtime_agent,
+            interpreter_session,
+            memory_session_manager,
+        )
+
+    if usage_payload is not None:
+        yield usage_payload
 
     yield {
         "id": completion_id,
