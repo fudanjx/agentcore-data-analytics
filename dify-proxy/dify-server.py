@@ -17,6 +17,7 @@ file intentionally contains no OpenWebUI, native Dify App API, or file-upload
 proxy routes.
 """
 
+import base64
 import json
 import logging
 import mimetypes
@@ -34,7 +35,6 @@ from botocore.config import Config
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
-
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
@@ -86,6 +86,11 @@ MAX_ARTIFACT_MARKER_BYTES = 64 * 1024
 DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _STATUS_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
+_STATUS_ID_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._:\-]")
+RUNTIME_STEP_DETAIL_MAX_CHARS = min(
+    1_000_000,
+    max(1_000, int(os.environ.get("RUNTIME_STEP_DETAIL_MAX_CHARS", "500000"))),
+)
 _DIFY_CONVERSATION_ID_RE = re.compile(
     r"\s*<C_ID>"
     r"([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})"
@@ -575,11 +580,17 @@ class _RuntimeUsage:
 
 
 class _BufferedRuntimeResult:
-    __slots__ = ("text", "usage")
+    __slots__ = ("agent_steps", "text", "usage")
 
-    def __init__(self, text: str, usage: _RuntimeUsage | None):
+    def __init__(
+        self,
+        text: str,
+        usage: _RuntimeUsage | None,
+        agent_steps: list[dict] | None = None,
+    ):
         self.text = text
         self.usage = usage
+        self.agent_steps = agent_steps or []
 
 
 def _usage_token_count(value) -> int | None:
@@ -692,25 +703,65 @@ def _invoke_runtime_buffered(
     """Collect a Runtime SSE response for an OpenAI non-streaming request."""
     parts = []
     usage = None
+    agent_steps = []
     for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id):
         if isinstance(event, _RuntimeUsage):
             usage = event
         elif isinstance(event, _RuntimeStatus):
+            agent_steps.append(event.as_dict())
             parts.append(_format_runtime_status(event))
         else:
             parts.append(event)
-    return _BufferedRuntimeResult("".join(parts), usage)
+    return _BufferedRuntimeResult("".join(parts), usage, agent_steps)
 
 
 class _RuntimeStatus:
     """Validated status metadata received from a Runtime sideband SSE event."""
 
-    __slots__ = ("kind", "name", "status")
+    __slots__ = ("details", "kind", "name", "status", "step_id")
 
-    def __init__(self, kind: str, name: str, status: str):
+    def __init__(
+        self,
+        kind: str,
+        name: str,
+        status: str,
+        step_id: str = "",
+        details: dict | None = None,
+    ):
         self.kind = kind
         self.name = name
         self.status = status
+        self.step_id = step_id
+        self.details = details or {}
+
+    def as_dict(self) -> dict:
+        step = {
+            "type": self.kind,
+            "name": self.name,
+            "status": self.status,
+        }
+        if self.step_id:
+            step["id"] = self.step_id
+        if self.details:
+            step["details"] = self.details
+        return step
+
+
+def _runtime_step_details(value) -> dict:
+    """Validate and independently bound untrusted Runtime detail metadata."""
+    if not isinstance(value, dict):
+        return {}
+    try:
+        rendered = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except (TypeError, ValueError):
+        return {}
+    if len(rendered) <= RUNTIME_STEP_DETAIL_MAX_CHARS:
+        return json.loads(rendered)
+    return {
+        "preview": rendered[:RUNTIME_STEP_DETAIL_MAX_CHARS],
+        "original_chars": len(rendered),
+        "truncated": True,
+    }
 
 
 def _runtime_status(step) -> _RuntimeStatus | None:
@@ -730,17 +781,39 @@ def _runtime_status(step) -> _RuntimeStatus | None:
     name = _STATUS_NAME_UNSAFE_RE.sub("", " ".join(name.split())).strip()[:120]
     if not name:
         return None
-    return _RuntimeStatus(kind, name, status)
+    step_id = step.get("id")
+    if isinstance(step_id, str):
+        step_id = _STATUS_ID_UNSAFE_RE.sub("", step_id).strip()[:200]
+    else:
+        step_id = ""
+    return _RuntimeStatus(
+        kind,
+        name,
+        status,
+        step_id,
+        _runtime_step_details(step.get("details")),
+    )
 
 
 def _format_runtime_status(event: _RuntimeStatus) -> str:
+    """Render the summary and, only when present, details that survive Dify."""
     label = "Skill" if event.kind == "skill" else "Tool"
     state = {
         "started": "running",
         "completed": "completed",
         "failed": "failed",
     }[event.status]
-    return f"> **{label}:** `{event.name}` - {state}\n\n"
+    summary = f"> **{label}:** `{event.name}` - {state}\n\n"
+    if not event.details:
+        return summary
+    encoded_step = base64.b64encode(
+        json.dumps(
+            event.as_dict(),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+    return summary + f"<!--agentcore-step:{encoded_step}-->\n\n"
 
 
 class _ArtifactStreamSanitizer:
@@ -1147,7 +1220,7 @@ def _sse_artifact_stream(
     request_started_at = time.time()
     usage = None
 
-    def stream_chunk(content: str) -> str:
+    def stream_chunk(content: str, agent_step: dict | None = None) -> str:
         chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -1160,6 +1233,11 @@ def _sse_artifact_stream(
                 }
             ],
         }
+        # OpenAI clients ignore unknown top-level extensions. Direct consumers
+        # can use this structured field, while the hidden content marker below
+        # carries the same data through Dify's text-only model-provider layer.
+        if agent_step is not None:
+            chunk["agent_step"] = agent_step
         return f"data: {json.dumps(chunk)}\n\n"
 
     try:
@@ -1168,7 +1246,7 @@ def _sse_artifact_stream(
                 usage = item
                 continue
             if isinstance(item, _RuntimeStatus):
-                yield stream_chunk(_format_runtime_status(item))
+                yield stream_chunk(_format_runtime_status(item), item.as_dict())
                 continue
             for content in sanitizer.feed(item):
                 if content:
@@ -1256,6 +1334,7 @@ async def _build_completion(
     )
     request_started_at = time.time()
     usage = None
+    agent_steps = []
     if backend_type == "runtime":
         if stream:
             return StreamingResponse(
@@ -1285,6 +1364,7 @@ async def _build_completion(
         )
         result_text = runtime_result.text
         usage = runtime_result.usage
+        agent_steps = runtime_result.agent_steps
     else:
         if stream:
             return StreamingResponse(
@@ -1337,6 +1417,8 @@ async def _build_completion(
     }
     if usage is not None:
         completion["usage"] = usage.as_openai()
+    if agent_steps:
+        completion["agent_steps"] = agent_steps
     return completion
 
 

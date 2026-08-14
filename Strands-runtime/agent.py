@@ -76,6 +76,13 @@ ENABLE_GATEWAYS = os.environ.get("ENABLE_GATEWAYS", "true").lower() not in {"0",
 ENABLE_CODE_INTERPRETER = os.environ.get(
     "ENABLE_CODE_INTERPRETER", "true"
 ).lower() not in {"0", "false", "no"}
+ENABLE_TOOL_DETAILS = os.environ.get(
+    "ENABLE_TOOL_DETAILS", "false"
+).lower() in {"1", "true", "yes", "on"}
+TOOL_DETAIL_MAX_CHARS = min(
+    1_000_000,
+    max(1_000, int(os.environ.get("TOOL_DETAIL_MAX_CHARS", "200000"))),
+)
 
 
 @dataclass(frozen=True)
@@ -480,6 +487,7 @@ def run(request: InvocationRequest) -> dict:
 
 
 _STEP_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
+_DETAIL_MISSING = object()
 
 
 def _safe_tool_name(value: Any) -> str:
@@ -493,6 +501,120 @@ def _safe_tool_name(value: Any) -> str:
     return (raw or "Agent tool")[:120]
 
 
+def _tool_kind(raw_name: Any) -> str:
+    """Classify native skill operations separately for frontend presentation."""
+    skill_tools = {"skills", "read_skill_resource"}
+    return "skill" if str(raw_name or "") in skill_tools else "tool"
+
+
+def _step_display_name(raw_name: Any, tool_input: Any) -> Any:
+    """Use the activated skill/resource name instead of the generic tool name."""
+    if not isinstance(tool_input, dict):
+        return raw_name
+    if str(raw_name or "") == "skills":
+        return tool_input.get("skill_name") or raw_name
+    if str(raw_name or "") == "read_skill_resource":
+        skill_name = tool_input.get("skill_name")
+        resource_path = tool_input.get("resource_path")
+        if skill_name and resource_path:
+            return f"{skill_name}: {resource_path}"
+        return skill_name or resource_path or raw_name
+    return raw_name
+
+
+def _parsed_tool_input(value: Any) -> tuple[Any, bool]:
+    """Parse Strands' incrementally assembled JSON tool input when complete."""
+    if not isinstance(value, str):
+        return value, True
+    if not value.strip():
+        # Strands may emit an empty first input delta before the JSON arguments.
+        # Wait for the real payload so skill events use the selected skill name.
+        return {}, False
+    try:
+        return json.loads(value), True
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return value, False
+
+
+def _json_safe_detail(value: Any) -> Any:
+    """Return a JSON-safe copy without allowing binary payloads into the stream."""
+
+    def fallback(item: Any) -> Any:
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            return {"type": "binary", "bytes": len(item)}
+        return str(item)
+
+    return json.loads(json.dumps(value, ensure_ascii=False, default=fallback))
+
+
+def _bounded_detail(value: Any) -> tuple[Any, bool]:
+    """Bound one frontend detail while retaining structured JSON when it fits."""
+    safe_value = _json_safe_detail(value)
+    rendered = json.dumps(safe_value, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= TOOL_DETAIL_MAX_CHARS:
+        return safe_value, False
+    return {
+        "preview": rendered[:TOOL_DETAIL_MAX_CHARS],
+        "original_chars": len(rendered),
+    }, True
+
+
+def _agent_step(
+    tool_id: str,
+    raw_name: Any,
+    status: str,
+    *,
+    tool_input: Any = _DETAIL_MISSING,
+    output: Any = _DETAIL_MISSING,
+) -> dict[str, Any]:
+    """Build a bounded sideband event that a frontend can selectively render."""
+    details: dict[str, Any] = {}
+    if ENABLE_TOOL_DETAILS:
+        truncated = False
+        if tool_input is not _DETAIL_MISSING:
+            bounded_input, input_truncated = _bounded_detail(tool_input)
+            details["input"] = bounded_input
+            truncated = truncated or input_truncated
+        if output is not _DETAIL_MISSING:
+            bounded_output, output_truncated = _bounded_detail(output)
+            details["output"] = bounded_output
+            truncated = truncated or output_truncated
+        if truncated:
+            details["truncated"] = True
+
+    step: dict[str, Any] = {
+        "id": tool_id[:200],
+        "type": _tool_kind(raw_name),
+        "name": _safe_tool_name(_step_display_name(raw_name, tool_input)),
+        "status": status,
+    }
+    if details:
+        step["details"] = details
+    return {"event": "agent_step", "step": step}
+
+
+def _event_tool_results(event: dict[str, Any]) -> list[dict[str, Any]]:
+    """Read direct and message-wrapped Strands tool-result event shapes."""
+    results: list[dict[str, Any]] = []
+    direct_result = event.get("tool_result")
+    if isinstance(direct_result, dict):
+        results.append(direct_result)
+
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return results
+    content = message.get("content")
+    if not isinstance(content, list):
+        return results
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        message_result = block.get("toolResult")
+        if isinstance(message_result, dict):
+            results.append(message_result)
+    return results
+
+
 async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     """Stream OpenAI-compatible chunks for the existing Dify proxy."""
     started_at = time.perf_counter()
@@ -502,7 +624,7 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     memory_session_manager = None
     usage_payload = None
     text_parts: list[str] = []
-    active_steps: dict[str, str] = {}
+    active_steps: dict[str, dict[str, Any]] = {}
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
     try:
@@ -530,22 +652,72 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             tool_use = event.get("current_tool_use") or {}
             tool_id = str(tool_use.get("toolUseId") or "")
             tool_name = tool_use.get("name")
-            if tool_id and tool_name and tool_id not in active_steps:
-                safe_name = _safe_tool_name(tool_name)
-                active_steps[tool_id] = safe_name
-                yield {
-                    "event": "agent_step",
-                    "step": {"type": "tool", "name": safe_name, "status": "started"},
-                }
+            if tool_id and tool_name:
+                step_state = active_steps.setdefault(
+                    tool_id,
+                    {"name": tool_name, "input": _DETAIL_MISSING, "started": False},
+                )
+                if "input" in tool_use:
+                    step_state["input"] = tool_use["input"]
+                if not step_state["started"]:
+                    parsed_input, input_complete = _parsed_tool_input(
+                        step_state["input"]
+                    )
+                    if input_complete:
+                        step_state["started"] = True
+                        yield _agent_step(
+                            tool_id,
+                            step_state["name"],
+                            "started",
+                            tool_input=parsed_input,
+                        )
 
-        for safe_name in active_steps.values():
-            yield {
-                "event": "agent_step",
-                "step": {"type": "tool", "name": safe_name, "status": "completed"},
-            }
+            for tool_result in _event_tool_results(event):
+                result_tool_id = str(tool_result.get("toolUseId") or "")
+                step_state = active_steps.pop(result_tool_id, None)
+                if not result_tool_id or step_state is None:
+                    continue
+                parsed_input, _ = _parsed_tool_input(step_state["input"])
+                result_status = tool_result.get("status")
+                if not step_state["started"]:
+                    yield _agent_step(
+                        result_tool_id,
+                        step_state["name"],
+                        "started",
+                        tool_input=parsed_input,
+                    )
+                yield _agent_step(
+                    result_tool_id,
+                    step_state["name"],
+                    "completed" if result_status == "success" else "failed",
+                    tool_input=parsed_input,
+                    output=tool_result.get("content", []),
+                )
+
+        # Compatibility fallback if a future/older Strands version omits the
+        # dedicated tool_result event from the public async event stream.
+        for tool_id, step_state in active_steps.items():
+            parsed_input, _ = _parsed_tool_input(step_state["input"])
+            yield _agent_step(
+                tool_id,
+                step_state["name"],
+                "completed",
+                tool_input=parsed_input,
+            )
+        active_steps.clear()
         succeeded = True
     except Exception as error:
         logger.exception("Strands streaming invocation failed")
+        for tool_id, step_state in active_steps.items():
+            parsed_input, _ = _parsed_tool_input(step_state["input"])
+            yield _agent_step(
+                tool_id,
+                step_state["name"],
+                "failed",
+                tool_input=parsed_input,
+                output={"error": str(error)},
+            )
+        active_steps.clear()
         error_text = f"\n\n[error] {error}"
         text_parts.append(error_text)
         yield {

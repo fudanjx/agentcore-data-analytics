@@ -151,6 +151,8 @@ Most users should omit these variables and keep the packaged defaults. Change th
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | Raise or lower the prompt-object size limit |
 | `ENABLE_GATEWAYS`, `ENABLE_CODE_INTERPRETER` | Emergency override switches; normally leave them at `true` because an empty primary identifier already disables the capability |
 | `CODE_INTERPRETER_REGION`, `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS`, `CODE_INTERPRETER_MAX_RESULT_CHARS` | Nonstandard interpreter Region, session duration, or context limit |
+| `ENABLE_TOOL_DETAILS` | Set to `true` only for projects whose frontend should receive tool and skill inputs/results; defaults to `false` |
+| `TOOL_DETAIL_MAX_CHARS` | Maximum streamed frontend detail for each tool input or result; the default is `200000` characters |
 | `MEMORY_REGION`, `MEMORY_BATCH_SIZE`, `MEMORY_TOP_K`, `MEMORY_RELEVANCE_SCORE` | Nonstandard Memory Region or retrieval/persistence tuning |
 | `SKILLS_LOCAL_DIR`, `SKILLS_MAX_OBJECT_BYTES`, `SKILLS_MAX_SYNC_BYTES`, `SKILLS_MAX_RESOURCE_CHARS` | Local cache location and skill size limits |
 

@@ -23,6 +23,7 @@ def _load_agent_module(
     agent_description=None,
 ):
     for name in (
+        "ENABLE_TOOL_DETAILS",
         "ENABLE_MODEL_USAGE_LOGS",
         "MODEL_PRICING_LABEL",
         "MODEL_INPUT_PRICE_PER_MTOK_USD",
@@ -377,6 +378,166 @@ def test_stream_emits_model_usage_before_final_chunk(monkeypatch):
     assert events[-2]["total_input_tokens"] == 7_000
     assert events[-2]["output_tokens"] == 100
     assert events[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_stream_emits_skill_input_and_full_result_details(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", True)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(accumulated_usage={})
+
+        async def stream_async(self, _prompt):
+            yield {
+                "type": "tool_use_stream",
+                "current_tool_use": {
+                    "toolUseId": "skill-use-1",
+                    "name": "skills",
+                    "input": '{"skill_name":"admission-analysis"}',
+                },
+            }
+            yield {
+                "message": {
+                    "role": "user",
+                    "content": [
+                        {
+                            "toolResult": {
+                                "toolUseId": "skill-use-1",
+                                "status": "success",
+                                "content": [
+                                    {"text": "Complete SKILL.md instructions"}
+                                ],
+                            }
+                        }
+                    ],
+                },
+            }
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+
+    async def collect():
+        return [event async for event in agent.stream(request)]
+
+    events = asyncio.run(collect())
+    steps = [event["step"] for event in events if event.get("event") == "agent_step"]
+
+    assert steps == [
+        {
+            "id": "skill-use-1",
+            "type": "skill",
+            "name": "admission-analysis",
+            "status": "started",
+            "details": {"input": {"skill_name": "admission-analysis"}},
+        },
+        {
+            "id": "skill-use-1",
+            "type": "skill",
+            "name": "admission-analysis",
+            "status": "completed",
+            "details": {
+                "input": {"skill_name": "admission-analysis"},
+                "output": [{"text": "Complete SKILL.md instructions"}],
+            },
+        },
+    ]
+
+
+def test_stream_waits_for_complete_skill_input_before_started_event(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", True)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(accumulated_usage={})
+
+        async def stream_async(self, _prompt):
+            yield {
+                "type": "tool_use_stream",
+                "current_tool_use": {
+                    "toolUseId": "skill-use-1",
+                    "name": "skills",
+                    "input": "",
+                },
+            }
+            yield {
+                "type": "tool_use_stream",
+                "current_tool_use": {
+                    "toolUseId": "skill-use-1",
+                    "name": "skills",
+                    "input": '{"skill_name":"admission-analysis"}',
+                },
+            }
+            yield {
+                "type": "tool_result",
+                "tool_result": {
+                    "toolUseId": "skill-use-1",
+                    "status": "success",
+                    "content": [{"text": "Skill instructions"}],
+                },
+            }
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+
+    async def collect():
+        return [event async for event in agent.stream(request)]
+
+    events = asyncio.run(collect())
+    steps = [event["step"] for event in events if event.get("event") == "agent_step"]
+
+    assert [step["status"] for step in steps] == ["started", "completed"]
+    assert [step["name"] for step in steps] == [
+        "admission-analysis",
+        "admission-analysis",
+    ]
+
+
+def test_agent_step_omits_details_when_disabled(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", False)
+
+    event = agent._agent_step(
+        "skill-use-1",
+        "skills",
+        "completed",
+        tool_input={"skill_name": "admission-analysis"},
+        output=[{"text": "Skill instructions"}],
+    )
+
+    assert event["step"] == {
+        "id": "skill-use-1",
+        "type": "skill",
+        "name": "admission-analysis",
+        "status": "completed",
+    }
 
 
 def test_prepare_keeps_caller_history_when_memory_is_disabled(monkeypatch):

@@ -1,11 +1,11 @@
 import asyncio
+import base64
 import importlib.util
 import json
 import pathlib
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
-
 
 MODULE_PATH = (
     pathlib.Path(__file__).parents[1] / "dify-proxy" / "dify-server.py"
@@ -207,10 +207,15 @@ class DifyRuntimeTests(unittest.TestCase):
     def test_runtime_stream_extracts_sanitized_agent_status_events(self):
         client = FakeRuntimeClient(
             [
-                b'data: {"event":"agent_step","step":{"type":"skill",'
-                b'"name":"admission-analysis","status":"started"}}',
-                b'data: {"event":"agent_step","step":{"type":"tool",'
-                b'"name":"NUH: query data<script>","status":"completed"}}',
+                (
+                    b'data: {"event":"agent_step","step":{"type":"skill",'
+                    b'"id":"tool-1","name":"admission-analysis","status":"started",'
+                    b'"details":{"input":{"skill_name":"admission-analysis"}}}}'
+                ),
+                (
+                    b'data: {"event":"agent_step","step":{"type":"tool",'
+                    b'"name":"NUH: query data<script>","status":"completed"}}'
+                ),
                 b'data: {"choices":[{"delta":{"content":"Answer"}}]}',
                 b"data: [DONE]",
             ]
@@ -233,6 +238,11 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertIsInstance(events[0], dify_server._RuntimeStatus)
         self.assertEqual(events[0].kind, "skill")
         self.assertEqual(events[0].name, "admission-analysis")
+        self.assertEqual(events[0].step_id, "tool-1")
+        self.assertEqual(
+            events[0].details,
+            {"input": {"skill_name": "admission-analysis"}},
+        )
         self.assertEqual(events[1].name, "NUH: query datascript")
         self.assertEqual(events[2], "Answer")
 
@@ -277,7 +287,16 @@ class DifyRuntimeTests(unittest.TestCase):
     def test_artifact_stream_renders_runtime_status_as_visible_markdown(self):
         events = iter(
             [
-                dify_server._RuntimeStatus("skill", "admission-analysis", "started"),
+                dify_server._RuntimeStatus(
+                    "skill",
+                    "admission-analysis",
+                    "completed",
+                    "tool-1",
+                    {
+                        "input": {"skill_name": "admission-analysis"},
+                        "output": [{"text": "Complete SKILL.md instructions"}],
+                    },
+                ),
                 dify_server._RuntimeStatus("tool", "NUH: query data", "completed"),
                 "Answer",
             ]
@@ -298,6 +317,38 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertIn("**Skill:** `admission-analysis`", response)
         self.assertIn("**Tool:** `NUH: query data`", response)
         self.assertIn("Answer", response)
+
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.splitlines()
+            if line.startswith("data: {")
+        ]
+        skill_chunk = chunks[0]
+        self.assertEqual(
+            skill_chunk["agent_step"]["details"]["input"],
+            {"skill_name": "admission-analysis"},
+        )
+        content = skill_chunk["choices"][0]["delta"]["content"]
+        encoded = content.split("<!--agentcore-step:", 1)[1].split("-->", 1)[0]
+        decoded = json.loads(base64.b64decode(encoded).decode("utf-8"))
+        self.assertEqual(decoded, skill_chunk["agent_step"])
+        self.assertEqual(
+            decoded["details"]["output"],
+            [{"text": "Complete SKILL.md instructions"}],
+        )
+        tool_chunk = chunks[1]
+        self.assertNotIn(
+            "<!--agentcore-step:",
+            tool_chunk["choices"][0]["delta"]["content"],
+        )
+        self.assertEqual(
+            tool_chunk["agent_step"],
+            {
+                "type": "tool",
+                "name": "NUH: query data",
+                "status": "completed",
+            },
+        )
 
     def test_artifact_stream_emits_final_openai_usage_chunk(self):
         events = iter(
@@ -344,6 +395,14 @@ class DifyRuntimeTests(unittest.TestCase):
                 return_value=dify_server._BufferedRuntimeResult(
                     "runtime answer",
                     dify_server._RuntimeUsage(7000, 100),
+                    [
+                        {
+                            "id": "tool-1",
+                            "type": "skill",
+                            "name": "admission-analysis",
+                            "status": "completed",
+                        }
+                    ],
                 ),
             ) as invoke_runtime,
             patch.object(
@@ -376,6 +435,7 @@ class DifyRuntimeTests(unittest.TestCase):
             response["choices"][0]["message"]["content"],
             "runtime answer with artifacts",
         )
+        self.assertEqual(response["agent_steps"][0]["id"], "tool-1")
         self.assertEqual(
             response["usage"],
             {

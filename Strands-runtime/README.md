@@ -54,7 +54,13 @@ The blocking response is:
 }
 ```
 
-With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE objects with `choices[0].delta.content`, sanitized `agent_step` sideband events, a final `model_usage` sideband event, and a final stop chunk. Tool inputs and results are not exposed in status events. The Dify proxy converts `model_usage` into an OpenAI usage chunk so Dify can persist aggregate prompt and completion tokens. Cache-read, cache-write, and estimated-cost details remain in the Runtime's `MODEL_USAGE` CloudWatch record because Dify's standard message schema only supports aggregate token counts. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
+With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE objects with `choices[0].delta.content`, structured `agent_step` sideband events, a final `model_usage` sideband event, and a final stop chunk. Every `agent_step` includes a stable tool-use ID plus sanitized type/name and lifecycle status. When `ENABLE_TOOL_DETAILS=true`, it also includes parsed input and bounded result content; native `skills` results therefore carry the activated skill's complete instructions unless the configured detail limit truncates them. Tool details are disabled by default so one universal bundle can serve projects with different disclosure requirements.
+
+The Dify proxy exposes each step as an `agent_step` OpenAI response extension. When a step contains `details`, the proxy also embeds the same JSON as a base64-encoded `<!--agentcore-step:...-->` content marker, because Dify's model-provider layer otherwise retains only text. Status-only steps do not receive a base64 marker. A frontend can remove a detail marker, decode it as UTF-8 JSON, and decide whether to hide, summarize, or expand the details. The visible Markdown status line is retained for clients that do not parse markers.
+
+The proxy converts `model_usage` into an OpenAI usage chunk so Dify can persist aggregate prompt and completion tokens. Cache-read, cache-write, and estimated-cost details remain in the Runtime's `MODEL_USAGE` CloudWatch record because Dify's standard message schema only supports aggregate token counts. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
+
+The Dify proxy independently limits accepted serialized step details with `RUNTIME_STEP_DETAIL_MAX_CHARS` (default `500000`, constrained to 1,000-1,000,000). Keep that value at least as large as twice `TOOL_DETAIL_MAX_CHARS` when both a maximum-size input and result must fit in one completed step.
 
 ## Configuration
 
@@ -81,6 +87,8 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | `ENABLE_CODE_INTERPRETER` | `true` | Enable interpreter tools |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | Session timeout, constrained to 60-28,800 seconds |
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Tool-result context limit |
+| `ENABLE_TOOL_DETAILS` | `false` | Include bounded tool/skill inputs and results in streamed `agent_step` events |
+| `TOOL_DETAIL_MAX_CHARS` | `200000` | Maximum serialized characters exposed for each streamed tool input or result, constrained to 1,000-1,000,000 |
 | `MEMORY_ID` | Empty | AgentCore Memory resource; empty or unset disables Memory |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
 | `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
