@@ -69,6 +69,13 @@ SUM(CASE WHEN "DDATE"::date - "ADATE"::date = 0 THEN 1
 
 It includes episodes admitted in earlier months; inspect the row grain first.
 
+## OU grouping and reconciliation
+
+For department, cluster, MOH-specialty, or subspecialty reporting, read
+`subspec-mapping.md`. Inspect the live inpatient schema to identify the OU field;
+the mapping document does not prescribe its exact column name. Do not invent or
+manually reconstruct mapped result rows. Use fresh SQL output for reconciliation.
+
 ## Additional fields
 
 `TYPE_GRP`: `EM` Emergency, `EL` Elective, `TA` Transfer-In, `MA` Maternity;
@@ -87,4 +94,5 @@ null is unclassified older SAP data.
 
 Validate monthly roll-up, the April-to-May transition (investigate over 5%),
 correct era-specific categories and keys, and Paying plus Subsidised plus stated
-Unclassified equals total discharges.
+Unclassified equals total discharges. After any mapped load, check the SQL row
+count, total, and unique OU count before reporting.

@@ -1,62 +1,81 @@
 ---
 name: nuh-analytics-soc
-description: Column reference and SQL guidance for NUH soc. Use when analyzing specialist outpatient visits, new versus repeat visits, private versus subsidised activity, clinics, or specialties across 2023 to June 2026.
+description: Column reference and SQL guidance for NUH soc. Use when analyzing specialist outpatient visits, new versus repeat visits, private versus subsidised activity, clinics, specialties, departments, clusters, or subspecialties.
 ---
 
 # NUH Analytics — soc
 
-**One row is one actualised SOC visit. Primary date: `SOC_VISIT_DATE`. Coverage:
-January 2023–June 2026.** Do not add an `APPT_STATUS` filter.
+**One row is one actualised SOC visit. Primary date: `SOC_VISIT_DATE`.** Count
+rows; no deduplication or additional global filter is required for total SOC
+visits. Use a half-open `SOC_VISIT_DATE` range. For department, cluster, MOH,
+or subspecialty reporting, also read `subspec-mapping.md`.
 
-## New / repeat hybrid logic
+## Locked new / repeat classification
 
-For CY2024 onward, use native `VISIT_TYPE_GRP`. For CY2023 and earlier, derive
-from `VISIT_TYPE`:
-
-```sql
-CASE
-  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01' THEN "VISIT_TYPE_GRP"
-  WHEN "VISIT_TYPE" IN ('FV','PA','FD','FW','DF','TM','FS','GF') THEN 'New'
-  WHEN "VISIT_TYPE" IN ('RV','RD','DR','RW') THEN 'Repeat'
-  ELSE 'Unclassified'
-END AS visit_type_grp_derived
-```
-
-Use this logic rather than `NEW_REPEAT`, which has an `Other` category.
-
-## Private / subsidised hybrid logic
-
-For CY2024 onward, use native `PTE_SUB_GRP`. For CY2023 and earlier, derive
-from `PATIENT_CLASS`:
+The older SAP code mapping and the newer Epic native field are the approved
+hybrid rule. Do not use the superseded `NEW_REPEAT` logic.
 
 ```sql
 CASE
-  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01' THEN "PTE_SUB_GRP"
-  WHEN "PATIENT_CLASS" IN ('PTE','NR','PTRF','PTEP','A','B1','AP','ARF',
-                            'NRB1','CRF','B1P','B1RF','B2RF') THEN 'Private Patients'
-  WHEN "PATIENT_CLASS" IN ('SUB','SUBP','B2','C','B2P','CP') THEN 'Subsidised Patients'
-  ELSE 'Unclassified'
-END AS pte_sub_grp_derived
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01' AND "VISIT_TYPE" IN ('N','B') THEN 'New'
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01' THEN 'Repeat'
+  ELSE "VISIT_TYPE_GRP"
+END AS visit_type_group
 ```
 
-Flag unclassified records before reporting. The approved mappings have zero
-unclassified CY2023 records.
+For CY2023 and earlier, `N` (New Patient) and `B` (Pre-Admission) are New;
+`R`, `T`, `S`, `A`, and every other SAP value are Repeat. From CY2024 use the
+native `VISIT_TYPE_GRP` value directly. State null or unexpected native values
+separately rather than recoding them.
 
-## Other fields
+## Locked private / subsidised classification
 
-Use `TREATMENT_OU_CLINIC` for clinic-level analysis and `MOH_SPEC_DESC` for
-specialty. Do not apply the old 2025-only `CLUSTER` rule unless the user
-specifically needs that legacy view.
+The current rule replaces the older `PTE_SUB_GRP` and extended SAP-class lists.
 
-## Locked benchmarks
+```sql
+CASE
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01' AND "PATIENT_CLASS" IN ('P','E')
+    THEN 'Private'
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01' AND "PATIENT_CLASS" IN ('A','B','C')
+    THEN 'Subsidised'
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01' THEN 'Unclassified'
+  ELSE "PAY_CAT"
+END AS paying_group
+```
 
-| Period | Total | New | Repeat | Private | Subsidised |
-|---|---:|---:|---:|---:|---:|
-| CY2023 | 917,990 | 210,571 | 707,419 | 217,358 | 700,632 |
-| CY2024 | 945,716 | 211,891 | 733,825 | 210,407 | 735,309 |
-| CY2025 | 978,083 | 220,081 | 758,002 | 209,300 | 768,783 |
-| H1 2026 | 497,978 | 111,209 | 386,769 | 104,160 | 393,818 |
+For CY2024 onward, use the native `PAY_CAT` value directly. Do not substitute
+`PTE_SUB_GRP`; report null or unexpected values separately.
 
-For every period, calculate in SQL and confirm New plus Repeat equals total and
-Private plus Subsidised equals total. Confirm the annual value is the sum of the
-same monthly rows displayed.
+## OU and grouping fields
+
+`ATTENDING_OU` is the subspecialty OU join key for all periods.
+
+| Reporting grouping | CY2023 | CY2024–2025 | CY2026 onward |
+|---|---|---|---|
+| Subspecialty name | Mapping lookup | `ATTENDING_OU_DESC` | `ATTENDING_OU_DESC` |
+| Cluster | `CLUSTER` | `CLUSTER` | `CLUSTER` |
+| MOH specialty | `MOH_SPEC_DESC` | `MOH_SPEC_DESC` | `MOH_SPEC_DESC` |
+| Clinical department | Mapping lookup | Mapping lookup | `DEPT_MAPPING` |
+
+Do not use `EPIC_CDEPT_MAPPING` for Clinical Department: it has an `Other`
+catch-all and a non-comparable naming scheme. `MED_DIV_GRP` is a CY2026+
+Medicine subdivision, not a replacement for Department Grouping.
+
+## Locked total-visit benchmarks
+
+| Period | Total SOC visits |
+|---|---:|
+| CY2023 | 917,919 |
+| CY2024 | 945,716 |
+| CY2025 | 978,083 |
+
+The CY2023 total is the corrected August 2026 reference; do not use the earlier
+917,990 figure or older new/repeat and paying/subsidised benchmark splits.
+
+## QC
+
+Compute totals in SQL and verify that monthly rows roll up to the same annual
+total. For native groupings, report null or unexpected values separately before
+asserting a subtotal equals total. Never manually reconstruct SQL results; use
+fresh SQL output for reconciliation. For mapped reports, validate source row
+count, total visits, and unique OU count after loading the SQL result.

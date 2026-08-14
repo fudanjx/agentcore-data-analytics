@@ -1,6 +1,6 @@
 ---
 name: hospital-data-analyst-nuh
-description: Analyze National University Hospital (NUH) operational data in the nuh-analytics database. Use when answering questions about NUH emergency-department attendance, PACS, admissions or arrival mode; inpatient admissions, discharges, patient days, ALOS or paying status; specialist outpatient clinic activity; surgical procedures; or NUH time-series reports, charts, and dashboards.
+description: Analyze National University Hospital (NUH) operational data in the nuh-analytics database. Use when answering questions about NUH emergency-department attendance, PACS, admissions or arrival mode; inpatient admissions, discharges, patient days, ALOS or paying status; specialist outpatient clinic activity; surgical procedures; department, cluster, subspecialty, or MOH-specialty workload; or NUH time-series reports, charts, and dashboards.
 ---
 
 # NUH data analytics
@@ -16,8 +16,9 @@ Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
    - Inpatient admissions, discharges, patient days, ALOS, `TYPE_GRP`, or paying/subsidised status: `references/inpatient-movement.md`
    - SOC visits, new/repeat, private/subsidised, specialty, or clinic activity: `references/soc.md`
    - Procedures, surgical category, normal delivery, emergency/elective, or surgical paying status: `references/surgery.md`
+   - Department, cluster, subspecialty, MOH-specialty, or OU-level reporting for SOC, inpatient, or surgery: also read `references/subspec-mapping.md`.
    - A dashboard or self-contained HTML report: also read `references/dashboard.md`.
-3. Apply the documented base filters, source-era rules, distinct keys, and classifications exactly. Do not copy AH logic into NUH queries.
+3. Apply the documented base filters, source-era rules, distinct keys, mapping rules, and classifications exactly. Do not copy AH logic into NUH queries.
 
 ## Query discipline
 
@@ -25,7 +26,8 @@ Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
 - Use a half-open primary-date range: `>= DATE 'YYYY-MM-DD' AND < DATE 'next-period-start'`. Never use `<=` on a timestamp endpoint or `YEAR()`.
 - Do not use `UID`, `Hosp_ABBR`, or `Period` as a general date-range filter. In `surgery`, use `UID` only inside the documented hybrid classification CASE; never use it to remove an era.
 - Compute totals and displayed subtotals programmatically from the same grouped result. For a complete year, verify monthly values roll up to the annual total.
-- Treat table-specific reference documents as authoritative for their own metric logic and benchmarks. If a dashboard source number conflicts with a table reference, report the conflict and do not silently substitute it.
+- Never reconstruct or manually type analytical result rows. Use fresh SQL output as the reconciliation source; validate row count, total, and unique OU count after a mapped data load.
+- Treat the current table-specific references and `subspec-mapping.md` as authoritative for their subject areas. If an older dashboard instruction or benchmark conflicts, report the conflict and do not silently substitute it.
 - State the table, date field, filters, classification, distinct key (when applicable), and QC status with every result.
 
 ## Outputs

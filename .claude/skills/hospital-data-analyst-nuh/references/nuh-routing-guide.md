@@ -11,10 +11,12 @@ description: Route questions to the correct NUH table in nuh-analytics and apply
 |---|---|---|---|
 | ED attendance, PACS, arrival mode, disposition, or ED admission | `emd` | `EMD_VISIT_DATE` | ED visit |
 | Inpatient admissions, discharges, patient days, ALOS, or patient class | `inpatient_movement` | `CURRENT_DATE` snapshot | Metric-specific |
-| SOC visits, new/repeat, private/subsidised, clinic, or specialty | `soc` | `SOC_VISIT_DATE` | Actualised SOC visit |
+| SOC visits, new/repeat, private/subsidised, clinic, specialty, or subspecialty | `soc` | `SOC_VISIT_DATE` | Actualised SOC visit |
 | Surgical workload, category, normal delivery, or emergency/elective | `surgery` | `SVISITDATE` | Procedure, not case |
+| Department, cluster, MOH specialty, or subspecialty report | Relevant SOC, inpatient, or surgery table + `subspec-mapping.md` | Table-specific | Source row mapped by OU |
 
-Read the matching reference plus `dashboard.md` for dashboard requests.
+Read the matching table reference. For a SOC, inpatient, or surgery OU grouping, also
+read `subspec-mapping.md`; for dashboard requests, also read `dashboard.md`.
 
 ## Universal controls
 
@@ -24,6 +26,7 @@ Read the matching reference plus `dashboard.md` for dashboard requests.
 4. Do not filter a date-range query by `UID` or `Hosp_ABBR`. In surgery, `UID` is an era discriminator inside the hybrid CASE only.
 5. Generate annual totals and table subtotals programmatically. A yearly total must equal the same monthly rows displayed.
 6. Use a table reference's own benchmark only when every documented filter, period, and classification exactly matches.
+7. Never manually reconstruct SQL result rows. For mapped outputs, validate the SQL row count, total, and unique OU count, and report unmatched source OUs.
 
 ## Coverage and source-era limits
 
@@ -32,4 +35,4 @@ Read the matching reference plus `dashboard.md` for dashboard requests.
 - `surgery`: January 2023–June 2026; SAP is `UID IS NULL` through January 2024 and Epic is `UID IS NOT NULL` from February 2024.
 - `inpatient_movement`: use `CASE_NO` before May 2025 and `EPIC_CSN` from May 2025 for the validated 2025 snapshot measures.
 
-The source documents do not define safe cross-table join keys or cardinalities. Inspect the live schema and establish row grain before joining tables.
+The source documents do not define safe cross-table join keys or cardinalities. Inspect the live schema and establish row grain before joining tables. The supplied subspecialty mapping is a lookup, not evidence that an OU has source records.

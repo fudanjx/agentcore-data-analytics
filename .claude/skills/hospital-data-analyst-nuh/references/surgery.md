@@ -47,6 +47,13 @@ For private/subsidised analysis, use `PATIENT_CLASS IN ('SP','RP','AC','AP','EP'
 as Private in CY2023; all other CY2023 values are Subsidised. From CY2024, use
 `"Patient_Class_Grp" = 'Private'` as Private and all other values as Subsidised.
 
+## OU grouping and reconciliation
+
+For department, cluster, MOH-specialty, or subspecialty reporting, read
+`subspec-mapping.md`. Inspect the live surgery schema to identify the OU field;
+the mapping document does not prescribe its exact column name. Do not manually
+reconstruct mapped result rows; use fresh SQL output to reconcile them.
+
 ## Locked annual benchmarks
 
 | Period | Day surgery | Normal delivery | Inpatient surgery | Total | Emergency |
@@ -59,4 +66,5 @@ as Private in CY2023; all other CY2023 values are Subsidised. From CY2024, use
 QC: category total equals procedure total; Emergency plus Elective equals total;
 monthly totals roll to annual total; and no `Unclassified` category exists. For
 CY2025, Elective is 112,145. Investigate a Feb–Sep 2024 total below 7,000 as a
-likely source-filter error.
+likely source-filter error. After any mapped load, check the SQL row count, total,
+and unique OU count before reporting.

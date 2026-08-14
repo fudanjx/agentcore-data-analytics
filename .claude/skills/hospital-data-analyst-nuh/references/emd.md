@@ -52,10 +52,10 @@ records (0.15%), mainly at the P2/P3 boundary. Segment totals must remain equal.
 Identify ED admissions with `"CASE_END_TYPE_DESC" LIKE 'Admit%'`; do not list
 individual admission subtypes.
 
-For arrival-mode reports, normalise raw `ARRIVAL_MODE` before grouping. In
-particular, `06`, `6`, and `6.0` are the same Walk In category. Inspect live
-distinct values to complete any additional mapping, then verify the resulting
-groups sum to total ED attendance. A null raw arrival mode should be investigated.
+For arrival-mode reports, use the current documented `ARRIVAL_MODE_DESC` field.
+Inspect distinct values and nulls, and verify the resulting groups sum to the
+base-filtered ED attendance. Do not carry forward an undocumented raw
+`ARRIVAL_MODE` code normalisation from older instructions.
 
 ## Example: monthly PACS attendance
 
@@ -96,4 +96,5 @@ segment attendance denominator; the cited adult and children references are abou
 
 For a matching period, confirm: monthly roll-up equals annual total; segment total
 equals the grand total; PACS P1–P4 plus separately stated null PACS equals segment
-total; and arrival-mode groups equal total attendance.
+total; and arrival-mode groups equal total attendance. Pipe SQL output directly
+into analysis; do not manually reconstruct results, and re-query SQL when reconciling.

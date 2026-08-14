@@ -13,8 +13,9 @@ this guide controls dashboard construction, rendering, and cross-table QC.
 - Use half-open primary-date ranges and double-quoted NUH columns.
 - Do not use `UID`, `Hosp_ABBR`, or `Period` as a date-range filter. Keep surgery's
   `UID` only inside its approved hybrid category CASE.
-- Use the hybrid SOC and surgery classifications for any range that includes CY2023.
-- Normalise EMD `ARRIVAL_MODE` before grouping; its groups must total the base-filtered EMD count.
+- Use the current SOC and surgery hybrid classifications for any range that includes CY2023.
+- Group ED arrival mode with `ARRIVAL_MODE_DESC`; its groups must total the base-filtered EMD count. Do not use superseded raw-code normalisation rules.
+- For SOC, inpatient, or surgery department/cluster/MOH/subspecialty visuals, read `subspec-mapping.md`, use fresh SQL output, and show unmatched OU records separately before applying the clinical-reporting exclusion.
 - Compute annual totals and every displayed subtotal from the exact monthly values shown. Never manually add them.
 
 ## HTML build rules
@@ -38,4 +39,5 @@ For each included metric: verify table-specific classifications, no unexpected
 unclassified categories, monthly-to-annual roll-up, and the applicable locked
 benchmark. If a dashboard source total conflicts with the responsible table
 reference, show the discrepancy and ask for a data-owner decision rather than
-choosing a value.
+choosing a value. For mapped outputs, also validate source row count, total, and
+unique OU count against the SQL result; never manually rebuild a data array for reconciliation.
