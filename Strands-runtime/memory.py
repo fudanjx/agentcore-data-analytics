@@ -35,7 +35,7 @@ Memory context:
 _LONG_TERM_STRATEGY_TYPES = ("SEMANTIC", "USER_PREFERENCE", "SUMMARIZATION")
 
 _control_client = None
-_strategy_ids: tuple[str, ...] | None = None
+_strategy_namespaces: tuple[tuple[str, str], ...] | None = None
 
 
 def memory_enabled() -> bool:
@@ -98,11 +98,11 @@ def _get_control_client():
     return _control_client
 
 
-def _get_strategy_ids() -> tuple[str, ...]:
-    """Discover and cache active AgentCore long-term-memory strategies."""
-    global _strategy_ids
-    if _strategy_ids is not None:
-        return _strategy_ids
+def _get_strategy_namespaces() -> tuple[tuple[str, str], ...]:
+    """Discover and cache active strategy namespace templates and their IDs."""
+    global _strategy_namespaces
+    if _strategy_namespaces is not None:
+        return _strategy_namespaces
     if not memory_enabled():
         return ()
     try:
@@ -112,7 +112,10 @@ def _get_strategy_ids() -> tuple[str, ...]:
         logger.warning("Memory strategy discovery failed: %s", error)
         return ()
 
-    active: dict[str, list[str]] = {kind: [] for kind in _LONG_TERM_STRATEGY_TYPES}
+    active: dict[str, list[tuple[str, str]]] = {
+        kind: [] for kind in _LONG_TERM_STRATEGY_TYPES
+    }
+    active_strategy_count = 0
     for strategy in response.get("memory", {}).get("strategies", []):
         kind = strategy.get("type")
         strategy_id = strategy.get("strategyId")
@@ -122,26 +125,52 @@ def _get_strategy_ids() -> tuple[str, ...]:
             and isinstance(strategy_id, str)
             and strategy_id
         ):
-            active[kind].append(strategy_id)
+            active_strategy_count += 1
+            templates = strategy.get("namespaceTemplates")
+            if not isinstance(templates, list):
+                # Older control-plane responses may expose the same values as
+                # `namespaces`; this is still resource configuration rather than
+                # a runtime-constructed namespace.
+                templates = strategy.get("namespaces")
+            if not isinstance(templates, list):
+                templates = []
+            valid_templates = [
+                template
+                for template in templates
+                if isinstance(template, str) and template.strip()
+            ]
+            if not valid_templates:
+                logger.warning(
+                    "Memory strategy %s has no usable namespace templates",
+                    strategy_id,
+                )
+                continue
+            active[kind].extend(
+                (template.strip(), strategy_id) for template in valid_templates
+            )
 
-    _strategy_ids = tuple(
-        strategy_id
+    _strategy_namespaces = tuple(
+        namespace
         for kind in _LONG_TERM_STRATEGY_TYPES
-        for strategy_id in active[kind]
+        for namespace in active[kind]
     )
-    logger.info("Memory discovered %d active long-term strategies", len(_strategy_ids))
-    return _strategy_ids
+    logger.info(
+        "Memory discovered %d active long-term strategies with %d namespace templates",
+        active_strategy_count,
+        len(_strategy_namespaces),
+    )
+    return _strategy_namespaces
 
 
 def _retrieval_config() -> dict[str, RetrievalConfig] | None:
-    """Build one actor-scoped retrieval entry for every active strategy."""
+    """Build retrieval entries from the Memory resource's namespace templates."""
     configs = {
-        f"/strategies/{strategy_id}/actors/{{actorId}}/": RetrievalConfig(
+        namespace_template: RetrievalConfig(
             top_k=MEMORY_TOP_K,
             relevance_score=MEMORY_RELEVANCE_SCORE,
             strategy_id=strategy_id,
         )
-        for strategy_id in _get_strategy_ids()
+        for namespace_template, strategy_id in _get_strategy_namespaces()
     }
     return configs or None
 

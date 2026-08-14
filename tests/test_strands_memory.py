@@ -33,6 +33,7 @@ def test_discovers_active_strategies_in_stable_type_order(monkeypatch):
                             "strategyId": "preference-id",
                             "type": "USER_PREFERENCE",
                             "status": "ACTIVE",
+                            "namespaces": ["/preferences/{actorId}/"],
                         },
                         {
                             "strategyId": "inactive-id",
@@ -43,11 +44,18 @@ def test_discovers_active_strategies_in_stable_type_order(monkeypatch):
                             "strategyId": "summary-id",
                             "type": "SUMMARIZATION",
                             "status": "ACTIVE",
+                            "namespaceTemplates": [
+                                "/summaries/{actorId}/{sessionId}/"
+                            ],
                         },
                         {
                             "strategyId": "semantic-id",
                             "type": "SEMANTIC",
                             "status": "ACTIVE",
+                            "namespaceTemplates": [
+                                "/strategies/{memoryStrategyId}/actors/{actorId}/",
+                                "/facts/{actorId}/",
+                            ],
                         },
                     ]
                 }
@@ -55,12 +63,13 @@ def test_discovers_active_strategies_in_stable_type_order(monkeypatch):
 
     monkeypatch.setattr(memory, "MEMORY_ID", "memory-id")
     monkeypatch.setattr(memory, "_control_client", FakeControlClient())
-    monkeypatch.setattr(memory, "_strategy_ids", None)
+    monkeypatch.setattr(memory, "_strategy_namespaces", None)
 
-    assert memory._get_strategy_ids() == (
-        "semantic-id",
-        "preference-id",
-        "summary-id",
+    assert memory._get_strategy_namespaces() == (
+        ("/strategies/{memoryStrategyId}/actors/{actorId}/", "semantic-id"),
+        ("/facts/{actorId}/", "semantic-id"),
+        ("/preferences/{actorId}/", "preference-id"),
+        ("/summaries/{actorId}/{sessionId}/", "summary-id"),
     )
 
 
@@ -81,7 +90,15 @@ def test_creates_native_session_manager_with_retrieval_and_lifecycle_config(
     monkeypatch.setattr(memory, "MEMORY_BATCH_SIZE", 10)
     monkeypatch.setattr(memory, "MEMORY_TOP_K", 5)
     monkeypatch.setattr(memory, "MEMORY_RELEVANCE_SCORE", 0.3)
-    monkeypatch.setattr(memory, "_strategy_ids", ("semantic-id", "preference-id"))
+    monkeypatch.setattr(
+        memory,
+        "_strategy_namespaces",
+        (
+            ("/facts/{actorId}/", "semantic-id"),
+            ("/preferences/{actorId}/", "preference-id"),
+            ("/summaries/{actorId}/{sessionId}/", "summary-id"),
+        ),
+    )
     monkeypatch.setattr(memory, "AgentCoreMemorySessionManager", FakeSessionManager)
 
     manager = memory.create_session_manager(
@@ -102,9 +119,13 @@ def test_creates_native_session_manager_with_retrieval_and_lifecycle_config(
     assert config.context_tag == "memory_context"
     assert config.filter_restored_tool_context is True
     assert list(config.retrieval_config) == [
-        "/strategies/semantic-id/actors/{actorId}/",
-        "/strategies/preference-id/actors/{actorId}/",
+        "/facts/{actorId}/",
+        "/preferences/{actorId}/",
+        "/summaries/{actorId}/{sessionId}/",
     ]
+    assert [
+        retrieval.strategy_id for retrieval in config.retrieval_config.values()
+    ] == ["semantic-id", "preference-id", "summary-id"]
     for retrieval in config.retrieval_config.values():
         assert retrieval.top_k == 5
         assert retrieval.relevance_score == 0.3
