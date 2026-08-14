@@ -62,6 +62,8 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 | --- | --- | --- |
 | `MODEL_ID` / `MODEL_ARN` | Empty | Required Bedrock model ID or application inference profile ARN used by Strands |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
+| `AGENT_NAME` | `data-analyst` | Name passed to the Strands agent |
+| `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Description passed to the Strands agent |
 | `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Emit one `MODEL_USAGE` JSON log after every invocation, without prompt or response content |
 | `MODEL_PRICING_LABEL` | `claude-sonnet-4.6-standard-2026-08` | Label included with estimated-cost logs so the configured rates can be audited |

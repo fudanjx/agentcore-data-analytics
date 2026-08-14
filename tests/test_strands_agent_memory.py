@@ -7,6 +7,11 @@ from pathlib import Path
 import pytest
 
 MODULE_PATH = Path(__file__).parents[1] / "Strands-runtime" / "agent.py"
+DOCUMENT_GUIDANCE = (
+    "When <document_input> tags are present:\n"
+    "Each <document_input> provides the uploaded file’s original filename and S3 "
+    "URL. Use Code Interpreter to download these files"
+)
 
 
 def _load_agent_module(
@@ -14,6 +19,8 @@ def _load_agent_module(
     prompt_cache_ttl=None,
     skills_enabled=True,
     model_id="test-model-id",
+    agent_name=None,
+    agent_description=None,
 ):
     for name in (
         "ENABLE_MODEL_USAGE_LOGS",
@@ -34,6 +41,14 @@ def _load_agent_module(
         monkeypatch.delenv("MODEL_ID", raising=False)
     else:
         monkeypatch.setenv("MODEL_ID", model_id)
+    for name, value in {
+        "AGENT_NAME": agent_name,
+        "AGENT_DESCRIPTION": agent_description,
+    }.items():
+        if value is None:
+            monkeypatch.delenv(name, raising=False)
+        else:
+            monkeypatch.setenv(name, value)
 
     code_interpreter = types.ModuleType("code_interpreter")
     code_interpreter.CODE_INTERPRETER_ID = ""
@@ -97,7 +112,11 @@ def _load_agent_module(
 
 
 def test_prepare_uses_native_session_manager_and_only_current_user_turn(monkeypatch):
-    agent, memory = _load_agent_module(monkeypatch)
+    agent, memory = _load_agent_module(
+        monkeypatch,
+        agent_name="gmio-pcr",
+        agent_description="GMIO PCR intake agent",
+    )
     captured = {}
 
     class FakeMemorySessionManager:
@@ -151,10 +170,12 @@ def test_prepare_uses_native_session_manager_and_only_current_user_turn(monkeypa
     assert prompt == "current question"
     assert captured["memory_factory"] == ("actor-id", "session-id", True)
     assert captured["agent_kwargs"]["session_manager"] is memory_manager
+    assert captured["agent_kwargs"]["name"] == "gmio-pcr"
+    assert captured["agent_kwargs"]["description"] == "GMIO PCR intake agent"
     assert captured["model_kwargs"]["cache_config"].ttl == "5m"
     assert captured["model_kwargs"]["cache_tools"].ttl == "5m"
     assert captured["agent_kwargs"]["system_prompt"] == (
-        "BASE_SYSTEM\nACTIVATE_SKILLS\nMEMORY_GUIDANCE"
+        f"BASE_SYSTEM\n\n{DOCUMENT_GUIDANCE}\nACTIVATE_SKILLS\nMEMORY_GUIDANCE"
         "\n\n---\n\n## Caller-provided system guidance\n\nCALLER_SYSTEM"
     )
 
@@ -241,7 +262,9 @@ def test_prepare_omits_all_skill_components_when_skills_are_disabled(monkeypatch
 
     agent._prepare(request)
 
-    assert captured["system_prompt"] == "BASE_SYSTEM\nMEMORY_GUIDANCE"
+    assert captured["system_prompt"] == (
+        f"BASE_SYSTEM\n\n{DOCUMENT_GUIDANCE}\nMEMORY_GUIDANCE"
+    )
     assert captured["tools"] == ["execute_code"]
     assert captured["plugins"] == []
     assert captured["skill_resource_uri"] is None

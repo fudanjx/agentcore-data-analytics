@@ -40,6 +40,14 @@ MODEL_ID = os.environ.get("MODEL_ID", "").strip() or os.environ.get(
     "MODEL_ARN", ""
 ).strip()
 MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
+AGENT_NAME = os.environ.get("AGENT_NAME", "data-analyst").strip() or "data-analyst"
+AGENT_DESCRIPTION = (
+    os.environ.get(
+        "AGENT_DESCRIPTION",
+        "Data analyst with connected databases and managed code execution",
+    ).strip()
+    or "Data analyst with connected databases and managed code execution"
+)
 PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
 if PROMPT_CACHE_TTL not in {"5m", "1h"}:
     raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h'")
@@ -147,7 +155,7 @@ class InvocationRequest:
             messages=normalized,
             actor_id=str(actor) if actor else None,
             session_id=session_id,
-            model_slug=str(payload.get("model") or "strands-data-analyst"),
+            model_slug=str(payload.get("model") or "strands-agent"),
             # The existing Dify/OpenAI proxy expects Runtime message payloads
             # to stream even though it does not add a downstream `stream` flag.
             # Simple AgentCore console prompts remain blocking by default.
@@ -343,7 +351,11 @@ def _prepare(request: InvocationRequest):
         # retain the caller-provided history as a stateless fallback.
         prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
 
-        base_prompt = system_prompt.load()
+        document_guidance = """When <document_input> tags are present:
+Each <document_input> provides the uploaded file’s original filename and S3 URL. Use Code Interpreter to download these files"""
+        base_prompt = "\n\n".join(
+            part for part in (system_prompt.load(), document_guidance) if part
+        )
         skills_enabled = skills_sync.skills_enabled()
         skills_guidance = skills_sync.ACTIVATION_GUIDANCE if skills_enabled else ""
         memory_guidance = memory.MEMORY_GUIDANCE if memory.memory_enabled() else ""
@@ -389,8 +401,8 @@ def _prepare(request: InvocationRequest):
             session_manager=memory_session_manager,
             system_prompt=system_prompt_text,
             callback_handler=null_callback_handler,
-            name="data-analyst",
-            description="Data analyst with connected databases and managed code execution",
+            name=AGENT_NAME,
+            description=AGENT_DESCRIPTION,
         )
         return (
             runtime_agent,

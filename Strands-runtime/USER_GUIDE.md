@@ -1,6 +1,6 @@
 # Deploy the Strands Agent to Amazon Bedrock AgentCore Runtime
 
-This guide explains how to deploy the ZIP bundle in this directory as your own Amazon Bedrock AgentCore Runtime. It covers S3 source deployment, environment variables, optional Gateway and Code Interpreter integrations, Agent Skills, IAM roles, and verification.
+This guide starts with a prebuilt Runtime ZIP that has already been uploaded to S3. Use the same ZIP to create separate Amazon Bedrock AgentCore Runtime configurations for different use cases. Each Runtime gets its own environment variables, IAM permissions, optional tools, Memory, and skills without rebuilding the ZIP.
 
 The examples use these placeholders:
 
@@ -11,21 +11,22 @@ The examples use these placeholders:
 | `MODEL_REGION` | `us-east-1` |
 | `RUNTIME_NAME` | `my_strands_agent` |
 | `CODE_BUCKET` | `my-agentcore-code-123456789012` |
+| `ZIP_S3_URI` | `s3://my-agentcore-code-123456789012/releases/strands_agent.zip` |
 | `CONFIG_BUCKET` | `my-agent-config-123456789012` |
 
 Replace every placeholder and sample ARN before using a command or policy.
 
 ## What you will create
 
-You will create or select:
+You will select or create:
 
-1. An S3 bucket and ZIP object containing the Runtime source bundle.
+1. The existing S3 ZIP object supplied by the bundle owner.
 2. A Bedrock model or application inference profile.
 3. An AgentCore Runtime execution role.
 4. Optional AgentCore Gateways that expose MCP tools.
 5. An optional custom AgentCore Code Interpreter and its separate execution role.
 6. An optional AgentCore Memory resource.
-7. An S3 prefix containing Agent Skills.
+7. An optional S3 bucket or prefix containing Agent Skills.
 8. An AgentCore Runtime and endpoint.
 
 The Runtime creates one Strands `Agent` for each invocation. Dify can provide the application system prompt in an OpenAI-style system message. Gateway and Code Interpreter tools are added only when their corresponding environment configuration is present.
@@ -34,29 +35,32 @@ The Runtime creates one Strands `Agent` for each invocation. Dify can provide th
 
 - Access to the AWS account and selected Region.
 - Permission to create or update AgentCore Runtime resources and pass the Runtime execution role.
-- Permission to upload the deployment ZIP and skills to S3.
+- The complete S3 URI of the uploaded Runtime ZIP.
+- Permission for AgentCore to read that ZIP object, including `kms:Decrypt` when it uses a customer-managed KMS key.
+- Permission to upload skills only when this Runtime will use Agent Skills.
 - Access to the configured Bedrock model or inference profile.
-- Docker Desktop for building the Linux ARM64 dependency bundle on Windows.
 - AWS CLI credentials if you use the command examples.
 
 For production, use least-privilege policies rather than broad managed policies. The identity performing the deployment is different from the Runtime execution role. The deployment identity needs AgentCore control-plane permissions and `iam:PassRole`; the Runtime execution role is assumed by AgentCore while the agent runs.
 
-## 1. Build the deployment ZIP
+## 1. Start from the uploaded ZIP
 
-The supplied build script installs the pinned dependencies for Linux ARM64/Python 3.13, verifies imports, and creates the required ZIP structure.
+Obtain the full S3 URI from the bundle owner. For example:
 
-From PowerShell:
-
-```powershell
-Set-Location .\Strands-runtime
-
-powershell.exe -NoProfile -ExecutionPolicy Bypass `
-  -File .\build_agentcore_bundle.ps1 `
-  -OutputPath .\dist\strands_agent_v0.0.5.zip `
-  -Force
+```text
+s3://my-agentcore-code-123456789012/releases/v0.0.5/strands_agent.zip
 ```
 
-The ZIP must contain:
+Do not extract, modify, or repackage it. Record these hosting settings:
+
+| Setting | Value |
+| --- | --- |
+| Source | S3 ZIP object |
+| Runtime | Python 3.13 |
+| Entry point | `strands_agent/main.py` |
+| Architecture | Linux ARM64 |
+
+The supplied ZIP already contains the application and its vendored dependencies in this structure:
 
 ```text
 strands_agent/
@@ -72,36 +76,11 @@ strands_agent/
   ...vendored dependencies...
 ```
 
-Important settings for this bundle:
+Do not configure an `opentelemetry-instrument` entry-point prefix unless the bundle owner explicitly provides a ZIP containing that executable. If the ZIP bucket uses a customer-managed KMS key, the role AgentCore uses to read the archive also needs `kms:Decrypt` on that key.
 
-- Runtime: `PYTHON_3_13`
-- Entry point: `strands_agent/main.py`
-- Architecture: Linux ARM64
-- Do not configure an `opentelemetry-instrument` entry-point prefix unless that executable has been added to the bundle.
+## 2. Create one configuration per use case
 
-AWS currently limits direct-code deployment packages to 250 MB compressed and 750 MB uncompressed. The build script creates its staging tree outside the packaged `strands_agent/` directory.
-
-## 2. Upload the ZIP to S3
-
-Create or select a versioned S3 bucket in the same AWS account. Upload each release under a unique key so that rollback remains possible.
-
-```powershell
-$env:AWS_DEFAULT_REGION = "ap-southeast-1"
-$codeBucket = "my-agentcore-code-123456789012"
-$bundle = ".\dist\strands_agent_v0.0.5.zip"
-$objectKey = "my-strands-agent/releases/v0.0.5/strands_agent.zip"
-
-aws s3 cp $bundle "s3://$codeBucket/$objectKey"
-aws s3api head-object --bucket $codeBucket --key $objectKey
-```
-
-Record the complete location:
-
-```text
-s3://my-agentcore-code-123456789012/my-strands-agent/releases/v0.0.5/strands_agent.zip
-```
-
-If the bucket uses a customer-managed KMS key, add `kms:Decrypt` for that key to the role that AgentCore uses to read the archive.
+Reuse the same `ZIP_S3_URI`, but create a separate Runtime configuration for each use case. Give each one its own Runtime name, agent identity, prompt strategy, optional integrations, and least-privilege Runtime role. Environment variables are read when a Runtime container starts; changing them requires a new Runtime version or restarted container and does not change an already-running container per request.
 
 ## 3. Decide which optional capabilities to enable
 
@@ -121,9 +100,61 @@ For maximum prompt flexibility, leave `BASE_SYSTEM_PROMPT` empty and place the a
 
 The Dify system prompt remains part of the Bedrock cacheable prompt prefix. Cache reuse requires identical preceding content, the model's minimum cacheable token count, and another request within the configured TTL.
 
-## 4. Configure every Runtime environment variable
+## 4. Configure environment variables by importance
 
-Environment variable values in the AgentCore console are strings. The following table lists every application setting read by this Runtime.
+Environment variable values in the AgentCore console are strings. Do not copy every variable into every Runtime. Start with the compulsory setting, add the recommended identity settings, and configure optional capabilities only when the use case needs them.
+
+### Compulsory
+
+| Variable | Why it is required |
+| --- | --- |
+| `MODEL_ID` or `MODEL_ARN` | Exactly one must identify the Bedrock model or application inference profile. The Runtime rejects an invocation when both are empty or absent. |
+
+The selected Runtime role must also have `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` access to the configured model resources. These permissions are compulsory but are IAM settings, not environment variables.
+
+### Recommended for each Runtime configuration
+
+These are not required by the code, but set them so logs and agent metadata clearly identify the use case.
+
+| Variable | Recommended value |
+| --- | --- |
+| `AWS_DEFAULT_REGION` | Region containing the Runtime and most AgentCore resources |
+| `AGENT_NAME` | Short use-case name, such as `gmio-pcr` |
+| `AGENT_DESCRIPTION` | Brief role description, such as `GMIO PCR intake agent` |
+| `MODEL_REGION` | Set when the model is in a different Region; an inference-profile ARN otherwise supplies it automatically |
+
+### Optional capabilities
+
+Omit these variables, or leave their primary identifier empty, when the capability is not needed.
+
+| Capability | Primary environment variable | Result when empty or omitted |
+| --- | --- | --- |
+| Runtime-owned base prompt | `BASE_SYSTEM_PROMPT` | No base prompt is loaded; Dify can supply the system message |
+| Gateway MCP tools | `AGENTCORE_GATEWAYS_JSON` | No Gateway clients or Gateway tools are added |
+| Code Interpreter | `CODE_INTERPRETER_ID` | No Code Interpreter session or tools are added |
+| AgentCore Memory | `MEMORY_ID` | No Memory session, API calls, or Memory guidance are added |
+| Agent Skills | `SKILLS_BUCKET` | No skill sync, guidance, plugin, or skill resource tools are added |
+| Skills subfolder | `SKILLS_PREFIX` | When the bucket is configured, empty means skills are stored at its root |
+
+Each enabled capability also requires the corresponding IAM permissions described later in this guide. Do not grant Gateway, Code Interpreter, Memory, prompt-bucket, or skills-bucket access to a Runtime that does not use that capability.
+
+### Advanced settings — normally not important
+
+Most users should omit these variables and keep the packaged defaults. Change them only for tuning, troubleshooting, nonstandard Regions, or accurate cost estimates.
+
+| Variables | Why you might change them |
+| --- | --- |
+| `AWS_REGION` | Normally supplied by AgentCore; do not override it routinely |
+| `PROMPT_CACHE_TTL` | Select `1h` instead of the default `5m` only when the model supports it and longer reuse is useful |
+| `ENABLE_MODEL_USAGE_LOGS` | Disable the default usage log only when operational policy requires it |
+| `MODEL_PRICING_LABEL` and all `MODEL_*_PRICE_PER_MTOK_USD` variables | Update estimated-cost logs when using another model or pricing basis; they do not change AWS billing |
+| `BASE_SYSTEM_PROMPT_MAX_BYTES` | Raise or lower the prompt-object size limit |
+| `ENABLE_GATEWAYS`, `ENABLE_CODE_INTERPRETER` | Emergency override switches; normally leave them at `true` because an empty primary identifier already disables the capability |
+| `CODE_INTERPRETER_REGION`, `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS`, `CODE_INTERPRETER_MAX_RESULT_CHARS` | Nonstandard interpreter Region, session duration, or context limit |
+| `MEMORY_REGION`, `MEMORY_BATCH_SIZE`, `MEMORY_TOP_K`, `MEMORY_RELEVANCE_SCORE` | Nonstandard Memory Region or retrieval/persistence tuning |
+| `SKILLS_LOCAL_DIR`, `SKILLS_MAX_OBJECT_BYTES`, `SKILLS_MAX_SYNC_BYTES`, `SKILLS_MAX_RESOURCE_CHARS` | Local cache location and skill size limits |
+
+The following reference tables document the exact defaults and accepted values.
 
 ### Region, model, caching, and usage
 
@@ -134,6 +165,8 @@ Environment variable values in the AgentCore console are strings. The following 
 | `MODEL_ID` | Empty | Required unless `MODEL_ARN` is set; use a Bedrock model ID or application inference profile ARN |
 | `MODEL_ARN` | Empty | Alternative to `MODEL_ID`; do not set both |
 | `MODEL_REGION` | Parsed from an ARN, otherwise `AWS_DEFAULT_REGION` | Set explicitly when the model is in a different Region |
+| `AGENT_NAME` | `data-analyst` | Set the Strands agent's name, for example `gmio-pcr` |
+| `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Briefly describe the agent's role and available capabilities |
 | `PROMPT_CACHE_TTL` | `5m` | `5m` or `1h`; the model must support the selected TTL |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Use `true` to emit one content-free `MODEL_USAGE` record per invocation |
 | `MODEL_PRICING_LABEL` | Project pricing label | Set an auditable label for your chosen model and pricing basis |
@@ -191,6 +224,8 @@ Requirements:
 
 Use a custom Code Interpreter when skill resources or user files must be copied from S3. Its execution role is separate from the Runtime execution role; see the IAM examples below.
 
+When a request includes an uploaded file in a `<document_input>` tag, prefer Code Interpreter to download and process the file instead of relying only on its filename or S3 URL. Ensure that the custom Code Interpreter execution role has `s3:GetObject` permission for the uploaded file's S3 location.
+
 ### AgentCore Memory
 
 | Variable | Runtime default | Recommended configuration |
@@ -216,49 +251,23 @@ Memory is used only when the invocation includes both an actor ID and session ID
 
 Skills are enabled when `SKILLS_BUCKET` is non-empty. `SKILLS_PREFIX` is optional; an empty or unset prefix means skill directories are stored at the bucket root. If the bucket is empty or unset, the Runtime performs no S3 skill sync and omits the skill prompt guidance, `AgentSkills` plugin, `read_skill_resource`, and `stage_skill_resource` tools.
 
-### Complete Dify example
+### Minimal Dify Runtime example
 
-This minimal example enables usage logging, lets Dify own the system prompt, and disables Gateway, Code Interpreter, Memory, and skills:
+This is all most Dify-owned, tool-free Runtime configurations need. Omitted optional identifiers disable Gateway, Code Interpreter, Memory, skills, and the S3 base prompt. Dify supplies the application system message at invocation time.
 
 ```text
 AWS_DEFAULT_REGION=ap-southeast-1
 MODEL_ID=arn:aws:bedrock:us-east-1:123456789012:application-inference-profile/your-profile-id
 MODEL_REGION=us-east-1
-PROMPT_CACHE_TTL=5m
-ENABLE_MODEL_USAGE_LOGS=true
-MODEL_PRICING_LABEL=claude-sonnet-standard-2026-08
-MODEL_INPUT_PRICE_PER_MTOK_USD=3.00
-MODEL_OUTPUT_PRICE_PER_MTOK_USD=15.00
-MODEL_CACHE_READ_PRICE_PER_MTOK_USD=0.30
-MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD=3.75
-MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD=6.00
-BASE_SYSTEM_PROMPT=
-BASE_SYSTEM_PROMPT_MAX_BYTES=200000
-AGENTCORE_GATEWAYS_JSON={}
-ENABLE_GATEWAYS=true
-CODE_INTERPRETER_ID=
-CODE_INTERPRETER_REGION=ap-southeast-1
-ENABLE_CODE_INTERPRETER=true
-CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS=1800
-CODE_INTERPRETER_MAX_RESULT_CHARS=200000
-MEMORY_ID=
-MEMORY_REGION=ap-southeast-1
-MEMORY_BATCH_SIZE=10
-MEMORY_TOP_K=5
-MEMORY_RELEVANCE_SCORE=0.2
-SKILLS_BUCKET=
-SKILLS_PREFIX=
-SKILLS_LOCAL_DIR=/tmp/strands-agent-skills
-SKILLS_MAX_OBJECT_BYTES=50000000
-SKILLS_MAX_SYNC_BYTES=250000000
-SKILLS_MAX_RESOURCE_CHARS=100000
+AGENT_NAME=gmio-pcr
+AGENT_DESCRIPTION=GMIO PCR intake agent
 ```
 
-If the console does not accept an empty value, omit `BASE_SYSTEM_PROMPT`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, `SKILLS_BUCKET`, and `SKILLS_PREFIX`. Keep `AGENTCORE_GATEWAYS_JSON={}` because it is unambiguous.
+There is no need to create empty environment-variable entries. Omission disables each optional capability.
 
 ### Full-feature overrides
 
-Starting from the complete example, replace these values to enable all optional integrations:
+Starting from the minimal example, add only the integrations needed by this Runtime:
 
 ```text
 AGENTCORE_GATEWAYS_JSON={"analytics":{"label":"Analytics DB","url":"https://analytics-gateway-id.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com","arn":"arn:aws:bedrock-agentcore:ap-southeast-1:123456789012:gateway/analytics-gateway-id"}}
@@ -278,7 +287,7 @@ Each skill is a directory directly below `SKILLS_PREFIX` and must contain `SKILL
 
 ```text
 skills/
-  hospital-data-analyst/
+  domain-specialist/
     SKILL.md
     references/
       schema.md
@@ -286,23 +295,19 @@ skills/
       validate.py
     assets/
       report-template.xlsx
-  nuhs-ngemr-pcr-clindoc/
-    SKILL.md
-    agents/
-      openai.yaml
 ```
 
 Minimum `SKILL.md`:
 
 ```markdown
 ---
-name: hospital-data-analyst
-description: Analyze hospital data requests. Use when a request requires the hospital analytics schema, governed query workflow, or domain-specific validation.
+name: domain-specialist
+description: Apply the governed domain workflow. Use when a request requires domain-specific rules, references, or validation.
 ---
 
-# Hospital Data Analyst
+# Domain Specialist
 
-Follow the governed schema and validation workflow before querying data.
+Follow the governed references and validation workflow before completing the task.
 ```
 
 Rules:
@@ -567,7 +572,7 @@ AWS console labels can evolve, but the current direct-code flow is:
 1. Open Amazon Bedrock AgentCore in `REGION`.
 2. From the Agents home page, choose **Host Agent**.
 3. Choose **S3 Source - Upload from S3 bucket**.
-4. Select the deployment ZIP object from `CODE_BUCKET`.
+4. Select the existing deployment ZIP object from `ZIP_S3_URI`.
 5. Enter an agent name such as `my_strands_agent`.
 6. Select **Python 3.13**.
 7. Set the entry point to `strands_agent/main.py`.
@@ -707,13 +712,12 @@ Interpretation:
 
 For a code update:
 
-1. Build a ZIP with a new versioned filename.
-2. Upload it under a new S3 key.
-3. In the agent details page, choose **Update hosting**.
-4. Select the new object and review environment variables and role settings.
-5. Create the new Runtime version.
-6. Point the endpoint to the new ready version.
-7. Run smoke tests before retiring the old version.
+1. Obtain the new versioned `ZIP_S3_URI` from the bundle owner.
+2. In the agent details page, choose **Update hosting**.
+3. Select the new S3 object and review environment variables and role settings.
+4. Create the new Runtime version.
+5. Point the endpoint to the new ready version.
+6. Run smoke tests before retiring the old version.
 
 For skills-only changes, upload the skills and start new Runtime sessions or deploy a new version so warm containers do not retain stale synchronized files.
 
@@ -722,7 +726,7 @@ For skills-only changes, upload the skills and start new Runtime sessions or dep
 | Symptom | Likely cause | Resolution |
 | --- | --- | --- |
 | Runtime cannot import `main.py` | Wrong entry point | Use `strands_agent/main.py` for the supplied ZIP |
-| Runtime version fails during startup | Wrong architecture or missing dependency | Rebuild with `build_agentcore_bundle.ps1`; do not ZIP local Windows packages |
+| Runtime version fails during startup | Wrong ZIP, architecture, or missing dependency | Confirm `ZIP_S3_URI`, Python 3.13, and `strands_agent/main.py`; ask the bundle owner for a corrected release rather than repackaging it |
 | `MODEL_ID` validation or invocation error | Empty/incorrect model ID, wrong Region, or missing model permission | Set a valid ID/ARN, `MODEL_REGION`, and matching Bedrock IAM resources |
 | Invalid Gateway configuration | Malformed JSON or URL/ARN mismatch | Use one-line JSON; ensure hostname, ID, and Region match |
 | Gateway `403` | Missing `InvokeGateway` or inbound auth mismatch | Scope `bedrock-agentcore:InvokeGateway` to the configured ARN and use IAM inbound auth |
