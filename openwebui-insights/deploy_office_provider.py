@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Safely add the Office provider to an existing Insights Compose deployment."""
+"""Safely configure the AgentCore runtime providers in an Insights deployment."""
 
 from __future__ import annotations
 
@@ -11,56 +11,94 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-OLD_BASE_URL = (
+LEGACY_BASE_URL = (
     "      OPENAI_API_BASE_URLS: "
     "http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
     "elb.ap-southeast-1.amazonaws.com/insights/v1\n"
 )
-NEW_BASE_URL = (
+OFFICE_BASE_URL = (
     "      OPENAI_API_BASE_URLS: >-\n"
     "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
     "elb.ap-southeast-1.amazonaws.com/insights/v1;\n"
     "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
     "elb.ap-southeast-1.amazonaws.com/insights-office/v1\n"
 )
-OLD_KEYS = "      OPENAI_API_KEYS: private-vpc-poc\n"
-NEW_KEYS = "      OPENAI_API_KEYS: private-vpc-poc;private-vpc-poc\n"
-OLD_CONFIG = (
+RUNTIME_BASE_URLS = (
+    "      OPENAI_API_BASE_URLS: >-\n"
+    "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
+    "elb.ap-southeast-1.amazonaws.com/insights/v1;\n"
+    "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
+    "elb.ap-southeast-1.amazonaws.com/strands/v1;\n"
+    "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
+    "elb.ap-southeast-1.amazonaws.com/insights-office/v1;\n"
+    "        http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
+    "elb.ap-southeast-1.amazonaws.com/gmio-pcr-dev/v1\n"
+)
+LEGACY_KEYS = "      OPENAI_API_KEYS: private-vpc-poc\n"
+OFFICE_KEYS = "      OPENAI_API_KEYS: private-vpc-poc;private-vpc-poc\n"
+RUNTIME_KEYS = (
+    "      OPENAI_API_KEYS: "
+    "private-vpc-poc;private-vpc-poc;private-vpc-poc;private-vpc-poc\n"
+)
+LEGACY_CONFIG = (
     "        {\"0\":{\"enable\":true,\"prefix_id\":\"agentcore\","
     "\"model_ids\":[\"insights\"],\"tags\":[\"agentcore-test\"],"
     "\"connection_type\":\"external\"}}\n"
 )
-NEW_CONFIG = (
+OFFICE_CONFIG = (
     "        {\"0\":{\"enable\":true,\"prefix_id\":\"agentcore\","
     "\"model_ids\":[\"insights\"],\"tags\":[\"agentcore-test\"],"
     "\"connection_type\":\"external\"},\"1\":{\"enable\":true,"
     "\"prefix_id\":\"agentcore-office\",\"model_ids\":[\"insights-office\"],"
     "\"tags\":[\"agentcore-office\"],\"connection_type\":\"external\"}}\n"
 )
+RUNTIME_CONFIG = (
+    "        {\"0\":{\"enable\":true,\"prefix_id\":\"agentcore\","
+    "\"model_ids\":[],\"tags\":[\"agentcore-legacy\"],"
+    "\"connection_type\":\"external\"},\"1\":{\"enable\":true,"
+    "\"prefix_id\":\"agentcore-strands\",\"model_ids\":[],"
+    "\"tags\":[\"agentcore\"],\"connection_type\":\"external\"},"
+    "\"2\":{\"enable\":true,\"prefix_id\":\"agentcore-office\","
+    "\"model_ids\":[],\"tags\":[\"agentcore\"],"
+    "\"connection_type\":\"external\"},\"3\":{\"enable\":true,"
+    "\"prefix_id\":\"agentcore-gmio\",\"model_ids\":[],"
+    "\"tags\":[\"agentcore\"],\"connection_type\":\"external\"}}\n"
+)
 
 
-def replace_once_or_verify(source: str, old: str, new: str, label: str) -> str:
+def replace_any_or_verify(
+    source: str, old_values: tuple[str, ...], new: str, label: str
+) -> str:
     if new in source:
         return source
-    if old not in source:
-        raise ValueError(f"Could not find expected {label} configuration")
-    return source.replace(old, new, 1)
+    for old in old_values:
+        if old in source:
+            return source.replace(old, new, 1)
+    raise ValueError(f"Could not find expected {label} configuration")
 
 
 def update_compose(compose: Path) -> Path | None:
     original = compose.read_text()
-    candidate = replace_once_or_verify(
-        original, OLD_BASE_URL, NEW_BASE_URL, "OpenAI base URL"
+    candidate = replace_any_or_verify(
+        original,
+        (LEGACY_BASE_URL, OFFICE_BASE_URL),
+        RUNTIME_BASE_URLS,
+        "OpenAI base URL",
     )
-    candidate = replace_once_or_verify(candidate, OLD_KEYS, NEW_KEYS, "OpenAI API key")
-    candidate = replace_once_or_verify(
-        candidate, OLD_CONFIG, NEW_CONFIG, "OpenAI provider config"
+    candidate = replace_any_or_verify(
+        candidate, (LEGACY_KEYS, OFFICE_KEYS), RUNTIME_KEYS, "OpenAI API key"
+    )
+    candidate = replace_any_or_verify(
+        candidate,
+        (LEGACY_CONFIG, OFFICE_CONFIG),
+        RUNTIME_CONFIG,
+        "OpenAI provider config",
     )
     if candidate == original:
         return None
 
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    backup = compose.with_name(f"{compose.name}.pre-office-{timestamp}")
+    backup = compose.with_name(f"{compose.name}.pre-runtime-router-{timestamp}")
     shutil.copy2(compose, backup)
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".yml", dir=compose.parent, delete=False

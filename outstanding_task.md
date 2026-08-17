@@ -6,6 +6,21 @@ Rolling backlog of known limitations, deferred work, and follow-ups for this rep
 
 ## OpenWebUI Insights files, identity, and Code Interpreter
 
+Runtime-router enhancement implemented 2026-08-14. `agentcore-proxy` now serves
+OpenWebUI only and resolves canonical slugs from
+`proxy/k8s/runtime-routes-configmap.yaml`:
+
+- `/strands/v1` → `Strands_runtime-mk6uFHBu9d`
+- `/insights-office/v1` → Harness `harness_insights_office-NXyYkHT02U`
+- `/gmio-pcr-dev/v1` → `gmio_pcr_dev-gSuIMZ4u60`
+
+Root `/v1` and temporary `/insights/v1` aliases resolve to Strands. Every route
+requires the trusted OpenWebUI user/chat headers, receives the same owner-scoped
+file manifest, and can register generated CSV/DOCX/XLSX/PPTX/PDF/HTML outputs.
+Runtime and Harness tool lifecycle events stream individually without grouping or a
+synthetic “Preparing final answer” state. Dify remains supported only by the
+independent `dify-proxy/` service.
+
 Shipped 2026-07-20. The isolated OpenWebUI v0.10.2-slim test service at
 `https://insights.bot-alex.com` runs alongside the legacy EC2 deployment with
 its own PostgreSQL database and Docker volume. Browser uploads are
@@ -14,33 +29,29 @@ server-mediated: browser → OpenWebUI → the dedicated bucket
 bucket has private access, SSE-S3, versioning, and a seven-day current-object
 lifecycle expiry.
 
-For the `insights` / `agentcore.insights` and Office models, the OpenWebUI filter
-checks chat ownership, builds a chat-wide manifest of the authenticated user's
-files, and removes raw OpenWebUI file metadata before the request leaves the
-application. The proxy validates each manifest entry's bucket, prefix, owner
-tags, type, and size; then it maps identity to
-`ActorID=openwebui-insights:<user UUID>` and
-`runtimeSessionId=owui-insights-<user UUID>-<chat UUID>`. `/insights/v1` is a
-separate proxy namespace but invokes the existing OpenWebUI harness
-`harness_e52fs-Du2DM0RxvF`. The additive `/insights-office/v1` route invokes
-`harness_insights_office-NXyYkHT02U`. Both Harnesses attach the same converted
-BYO Memory resource, so the same user/chat has continuous memory through
-either model while actor IDs keep users isolated.
+For all configured AgentCore models, the OpenWebUI filter checks chat ownership,
+builds a chat-wide manifest of the authenticated user's files, and removes raw
+OpenWebUI file metadata before the request leaves the application. The proxy
+validates each manifest entry's bucket, prefix, owner tags, type, and size; then
+it maps identity to `openwebui-insights:<user UUID>` and
+`runtimeSessionId=owui-insights-<user UUID>-<chat UUID>`. Each route invokes
+the Runtime or Harness ARN configured for its slug. Memory continuity depends
+on those backends sharing the same AgentCore memory configuration.
 
-The harness receives the validated `s3_uri` manifest and, when analysis is
+The runtime receives the validated `s3_uri` manifest and, when analysis is
 needed, uses the AgentCore Code Interpreter sandbox to copy the named object
 with `aws s3 cp` before inspecting it. Verified end to end with an uploaded
 test file (`E2E_SUM=6`) and a real `.xls` analysis that correlated to a Code
 Interpreter session creation.
 
-The Office Harness uses a distinct SANDBOX Code Interpreter and
-`AgentCoreCodeInterpreterS3Role`. It can read Insights files and may write only
-tagged generated DOCX/XLSX/PPTX/PDF/CSV objects under
+The Code Interpreter uses the S3-enabled SANDBOX execution role
+`AgentCoreCodeInterpreterS3Role`. It can read validated Insights files and may
+write only tagged generated DOCX/XLSX/PPTX/PDF/CSV/HTML objects under
 `openwebui-insights/outputs/<user>/<chat>/`. The proxy validates that exact
 user/chat prefix and tags before the OpenWebUI filter registers a native,
 owner-scoped download link. Generated objects and their links follow the same
-seven-day lifecycle. Office-only stream markers show simple tool progress and
-exclude tool inputs, SQL, S3 URIs, tool results, and reasoning.
+seven-day lifecycle. Stream markers show individual safe runtime lifecycle
+events and exclude tool inputs, SQL, S3 URIs, tool results, and reasoning.
 
 Known gaps:
 
@@ -54,10 +65,8 @@ Known gaps:
   `process=false` on the upload endpoint, so OpenWebUI's extraction/RAG job is
   not started; this does not make the browser upload directly to S3.
 
-- **Dify identity and native-S3 compatibility are deferred.** The Insights
-  actor/chat namespace and chat-wide S3 manifest filter currently apply only
-  to OpenWebUI. Design a Dify-specific trusted identity contract and file
-  manifest in the next phase.
+- **Dify is intentionally separate.** Dify compatibility belongs to
+  `dify-proxy/`; do not add Dify endpoints back to `agentcore-proxy`.
 
 - **Code Interpreter has broad POC read access to the Insights prefix.** The
   proxy enforces owner tags before disclosing a URI, but the shared Code
@@ -70,10 +79,6 @@ Known gaps:
   OpenWebUI owner check control exposure today. Use a credential broker or
   short-lived object-scoped credentials before treating the agent/tool as an
   untrusted security boundary.
-
-- **`runtimeSessionId` must be ≥ 33 chars.**
-  The Dify `/chat-messages` path forwards `conversation_id` verbatim as the harness session id, which AWS rejects if shorter than 33 chars. Dify's UI passes UUIDs so real users don't hit it; curl/scripted callers do.
-  → Pad or hash short `conversation_id`s in `proxy/server.py:_dify_parse` before assigning to `runtimeSessionId`.
 
 - **No S3 upload size streaming.**
   Current handler calls `await file.read()` — loads the whole body into memory before writing to S3. Fine at 50 MB cap but wasteful; use `s3.upload_fileobj` with streaming for larger caps.

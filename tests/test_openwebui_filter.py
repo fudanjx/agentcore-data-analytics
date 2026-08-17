@@ -280,6 +280,37 @@ class OpenWebUIFilterTests(unittest.TestCase):
             ["file-1", "file-2"],
         )
 
+    def test_all_configured_runtime_models_use_the_owned_file_manifest(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        for model in (
+            "agentcore-strands.strands",
+            "agentcore-office.insights-office",
+            "agentcore-gmio.gmio-pcr-dev",
+        ):
+            with self.subTest(model=model):
+                chats = FakeChats(self.chat)
+                files = FakeFiles(dict(self.records))
+                body = {
+                    "model": model,
+                    "messages": [{"role": "user", "content": "Analyze them"}],
+                }
+                with patch.dict(
+                    sys.modules,
+                    self.install_fake_openwebui_modules(chats, files),
+                ):
+                    result = asyncio.run(
+                        module.Filter().inlet(
+                            body,
+                            __user__={"id": USER_ID},
+                            __metadata__={},
+                            __chat_id__=CHAT_ID,
+                        )
+                    )
+                self.assertEqual(
+                    [item["file_id"] for item in result["agentcore_files"]],
+                    ["file-1", "file-2"],
+                )
+
     def test_office_status_marker_becomes_a_native_status_event(self):
         module = load_filter_module(INSIGHTS_FILTER_PATH)
         emitted = []
@@ -312,6 +343,76 @@ class OpenWebUIFilterTests(unittest.TestCase):
             emitted[0]["data"]["description"], "Running Code Interpreter"
         )
 
+    def test_embedded_status_markers_are_removed_without_losing_prose(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        emitted = []
+
+        async def emit(event):
+            emitted.append(event)
+
+        event = {
+            "choices": [
+                {
+                    "delta": {
+                        "content": (
+                            "Preparing dashboard."
+                            '<!--agentcore-status:{"description":"Starting tool: execute code","done":false}-->'
+                            "Dashboard created."
+                            '<!--agentcore-status:{"description":"Completed tool: execute code","done":true}-->'
+                        )
+                    }
+                }
+            ]
+        }
+        result = asyncio.run(
+            module.Filter().stream(
+                event,
+                __event_emitter__=emit,
+                __body__={"model": "agentcore-strands.strands"},
+            )
+        )
+
+        content = result["choices"][0]["delta"]["content"]
+        self.assertEqual(content, "Preparing dashboard.Dashboard created.")
+        self.assertNotIn("agentcore-status", content)
+        self.assertEqual(
+            [item["data"]["description"] for item in emitted],
+            ["Starting tool: execute code", "Completed tool: execute code"],
+        )
+
+    def test_status_markers_are_handled_for_every_runtime_model(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+
+        async def run(model):
+            emitted = []
+
+            async def emit(event):
+                emitted.append(event)
+
+            event = {
+                "choices": [{
+                    "delta": {"content": '<!--agentcore-status:{"description":"Starting tool: SQL query","done":false}-->'}
+                }]
+            }
+            result = await module.Filter().stream(
+                event,
+                __event_emitter__=emit,
+                __body__={"model": model},
+            )
+            return result, emitted
+
+        for model in (
+            "agentcore-strands.strands",
+            "agentcore-office.insights-office",
+            "agentcore-gmio.gmio-pcr-dev",
+        ):
+            with self.subTest(model=model):
+                result, emitted = asyncio.run(run(model))
+                self.assertEqual(result["choices"][0]["delta"]["content"], "")
+                self.assertEqual(
+                    emitted[0]["data"]["description"], "Starting tool: SQL query"
+                )
+
     def test_office_stream_artifact_marker_becomes_owned_download_link(self):
         module = load_filter_module(INSIGHTS_FILTER_PATH)
         files = FakeFiles(self.records)
@@ -340,7 +441,7 @@ class OpenWebUIFilterTests(unittest.TestCase):
         }
         with (
             patch.dict(sys.modules, self.install_fake_openwebui_modules(FakeChats(self.chat), files)),
-            patch.object(module, "_validate_artifacts_with_proxy", return_value=[artifact]),
+            patch.object(module, "_validate_artifacts_with_proxy", return_value=[artifact]) as validate,
         ):
             result = asyncio.run(
                 module.Filter().stream(
@@ -356,6 +457,35 @@ class OpenWebUIFilterTests(unittest.TestCase):
         self.assertIn("/api/v1/files/", content)
         self.assertNotIn("s3://", content)
         self.assertEqual(len(files.records), 3)
+        self.assertEqual(validate.call_args.args[3], "insights-office")
+
+    def test_html_download_link_is_always_an_attachment(self):
+        module = load_filter_module(INSIGHTS_FILTER_PATH)
+        files = FakeFiles(self.records)
+        artifact = {
+            "s3_uri": "s3://agentcore-openwebui-insights-964340114883/"
+            "openwebui-insights/outputs/user-1/chat-1/dashboard.html",
+            "filename": "dashboard.html",
+            "mime_type": "text/html",
+            "size": 120,
+        }
+        marker = base64.urlsafe_b64encode(
+            __import__("json").dumps([artifact], separators=(",", ":")).encode()
+        ).decode()
+        event = {"choices": [{"delta": {"content": f"<!--agentcore-artifacts:{marker}-->"}}]}
+        with (
+            patch.dict(sys.modules, self.install_fake_openwebui_modules(FakeChats(self.chat), files)),
+            patch.object(module, "_validate_artifacts_with_proxy", return_value=[artifact]),
+        ):
+            result = asyncio.run(
+                module.Filter().stream(
+                    event,
+                    __body__={"model": "agentcore-strands.strands"},
+                    __user__={"id": USER_ID},
+                    __metadata__={"chat_id": CHAT_ID},
+                )
+            )
+        self.assertIn("?attachment=true", result["choices"][0]["delta"]["content"])
 
     def test_office_final_chunk_closes_native_status(self):
         module = load_filter_module(INSIGHTS_FILTER_PATH)

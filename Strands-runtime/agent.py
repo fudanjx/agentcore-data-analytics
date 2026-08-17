@@ -21,6 +21,7 @@ from strands import Agent, AgentSkills
 from strands.handlers.callback_handler import null_callback_handler
 from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
 from strands.tools.mcp import MCPClient
+from botocore.config import Config as BotocoreConfig
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +34,17 @@ def _price_env(name: str, default: str) -> float:
         raise ValueError(f"{name} must be a non-negative number") from error
     if not math.isfinite(value) or value < 0:
         raise ValueError(f"{name} must be a non-negative number")
+    return value
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    raw = os.environ.get(name, str(default)).strip()
+    try:
+        value = int(raw)
+    except ValueError as error:
+        raise ValueError(f"{name} must be an integer") from error
+    if not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
     return value
 
 
@@ -82,6 +94,15 @@ ENABLE_TOOL_DETAILS = os.environ.get(
 TOOL_DETAIL_MAX_CHARS = min(
     1_000_000,
     max(1_000, int(os.environ.get("TOOL_DETAIL_MAX_CHARS", "200000"))),
+)
+MODEL_READ_TIMEOUT_SECONDS = _bounded_int_env(
+    "MODEL_READ_TIMEOUT_SECONDS", 900, 60, 900
+)
+MODEL_CONNECT_TIMEOUT_SECONDS = _bounded_int_env(
+    "MODEL_CONNECT_TIMEOUT_SECONDS", 10, 1, 60
+)
+MODEL_RETRY_MAX_ATTEMPTS = _bounded_int_env(
+    "MODEL_RETRY_MAX_ATTEMPTS", 2, 0, 5
 )
 
 
@@ -393,6 +414,11 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         model = BedrockModel(
             model_id=MODEL_ID,
             region_name=_model_region(),
+            boto_client_config=BotocoreConfig(
+                connect_timeout=MODEL_CONNECT_TIMEOUT_SECONDS,
+                read_timeout=MODEL_READ_TIMEOUT_SECONDS,
+                retries={"mode": "standard", "max_attempts": MODEL_RETRY_MAX_ATTEMPTS},
+            ),
             # The default model is an opaque inference-profile ARN, so Strands
             # cannot infer the provider when CacheConfig uses strategy="auto".
             cache_config=CacheConfig(

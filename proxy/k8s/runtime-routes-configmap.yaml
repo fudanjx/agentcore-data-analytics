@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: agentcore-proxy-runtime-routes
+  namespace: agentcore
+data:
+  routes.json: >-
+    {"strands":{"runtime_arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/Strands_runtime-mk6uFHBu9d","model_name":"Strands Runtime"},"insights-office":{"harness_arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U","model_name":"Insights Office"},"gmio-pcr-dev":{"runtime_arn":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/gmio_pcr_dev-gSuIMZ4u60","model_name":"GMIO PCR Dev"}}

@@ -1,61 +1,24 @@
-"""
-AgentCore proxy — OpenAI-compatible + Dify-compatible.
+"""OpenWebUI-to-AgentCore runtime proxy.
 
-Forwards to an AgentCore Runtime or Harness via boto3 (IAM auth via pod IRSA).
-Chat APIs support streaming SSE and non-streaming responses.
-
-Routes are defined by two dimensions:
-  1. Upstream API/application: OpenAI-compatible clients (including OpenWebUI)
-     or the native Dify App API.
-  2. Downstream AgentCore target: selected by `{slug}`.
-
-Path-prefixed routes — OpenAI-compatible API:
+Canonical, configuration-driven routes:
   GET  /{slug}/v1/models
   POST /{slug}/v1/chat/completions
+  POST /{slug}/v1/artifacts/register
 
-  /poc/v1/...       Generic OpenAI client → `agentcore_poc` Runtime
-                     (invoke_agent_runtime). `chat_id` and
-                     `model_item.info.user_id` are optional; absent values
-                     produce a fresh session and no ActorID/runtimeUserId.
+The slug registry is loaded from ``AGENTCORE_RUNTIME_ROUTES_JSON``. All chat
+and artifact routes require trusted OpenWebUI user/chat headers and apply the
+same actor, session, S3-manifest, and generated-artifact isolation policy.
 
-  /harness/v1/...   Legacy OpenWebUI → `harness_e52fs` (invoke_harness).
-                     Uses optional OpenAI body context (`chat_id` and
-                     `model_item.info.user_id`); it neither requires trusted
-                     identity headers nor processes `agentcore_files` S3
-                     manifests.
+Compatibility routes:
+  GET|POST /v1/...          -> ``strands``
+  GET|POST /insights/v1/... -> ``strands`` (temporary alias)
 
-  /insights/v1/...  OpenWebUI Insights → the same `harness_e52fs`
-                     (invoke_harness). Requires the same trusted headers;
-                     maps to isolated `openwebui-insights` / `owui-insights`
-                     ActorID and runtimeSessionId namespaces and validates the
-                     Insights S3 file manifest.
+Common routes:
+  POST /v1/files  OpenAI-compatible proxy-managed upload
+  GET  /health    Liveness/readiness response
 
-  /insights-office/v1/...
-                     OpenWebUI Insights Office → dedicated
-                     `harness_insights_office` (invoke_harness). It preserves
-                     the Insights trusted identity/session namespace and file
-                     validation, adds safe live tool-status markers, and
-                     validates generated Office artifacts before OpenWebUI
-                     registers user-owned download links.
-
-  /dify/v1/...      Generic OpenAI-compatible client → `harness_dify`
-                     (invoke_harness). Body `chat_id` and
-                     `model_item.info.user_id` remain optional.
-
-  /v1/...           Backward-compatible root alias for `/poc/v1/...`.
-
-Path-prefixed routes — native Dify App API:
-  POST /dify/{slug}/v1/chat-messages
-  POST /dify/{slug}/files/upload
-      Dify selects any valid `{slug}` above. Its payload `conversation_id`
-      becomes runtimeSessionId (a UUID is minted when absent), and `user`
-      becomes ActorID/runtimeUserId. The upload route uses the same `user` to
-      scope the file's S3 key.
-
-Additional route:
-  GET  /health      Liveness/readiness response.
-
-The standalone POST /v1/files is the OpenAI-style proxy-managed upload API.
+Backends may be standalone AgentCore Runtimes or harness-managed runtimes. The
+registry selects ``invoke_agent_runtime`` or ``invoke_harness`` explicitly.
 """
 
 import base64
@@ -74,7 +37,7 @@ from urllib.parse import urlparse
 import boto3
 import botocore.exceptions
 from botocore.config import Config
-from fastapi import FastAPI, File, Form, Request, UploadFile, HTTPException
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 from starlette.concurrency import iterate_in_threadpool
@@ -103,20 +66,7 @@ INSIGHTS_OPENWEBUI_SOURCE_PROFILE = {
     "prefix": INSIGHTS_UPLOADS_PREFIX,
     "output_prefix": f"{INSIGHTS_UPLOADS_PREFIX}outputs/",
 }
-DIFY_OFFICE_ARTIFACTS_BUCKET = os.environ.get(
-    "DIFY_OFFICE_ARTIFACTS_BUCKET",
-    "ah-dify",
-)
-DIFY_OFFICE_ARTIFACTS_PREFIX = (
-    os.environ.get("DIFY_OFFICE_ARTIFACTS_PREFIX", "harness_dev/").strip("/")
-    + "/"
-)
-DIFY_OFFICE_SOURCE_PROFILE = {
-    "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
-    "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
-    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
-}
-MAX_UPLOAD_BYTES = 50 * 1024 * 1024  # 50 MB — matches Dify default for non-media
+MAX_UPLOAD_BYTES = 50 * 1024 * 1024
 MAX_FILES_PER_CHAT = 10
 MAX_CHAT_UPLOAD_BYTES = 200 * 1024 * 1024
 ALLOWED_EXTENSIONS = {
@@ -124,37 +74,91 @@ ALLOWED_EXTENSIONS = {
     "pdf", "docx", "pptx",          # documents
     "txt", "md", "json",            # text
 }
-OFFICE_OUTPUT_EXTENSIONS = {"csv", "docx", "xlsx", "pptx", "pdf"}
+OFFICE_OUTPUT_EXTENSIONS = {"csv", "docx", "html", "xlsx", "pptx", "pdf"}
 MAX_OFFICE_ARTIFACTS_PER_RESPONSE = 10
 MAX_OFFICE_ARTIFACT_MARKER_BYTES = 64 * 1024
-DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
+HARNESS_CREDENTIAL_RETRY_DELAYS = (1, 2, 4)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _RUNTIME_SESSION_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]*$")
+_SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
+_RUNTIME_ARN_RE = re.compile(
+    r"^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:runtime/[A-Za-z0-9_-]+$"
+)
+_HARNESS_ARN_RE = re.compile(
+    r"^arn:aws:bedrock-agentcore:[a-z0-9-]+:\d{12}:harness/[A-Za-z0-9_-]+$"
+)
 
-# Runtimes invoked via invoke_agent_runtime
-RUNTIMES = {
-    "poc": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m",
-    "dev": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_dev-CaLENLDE5V"
+DEFAULT_RUNTIME_ROUTES = {
+    "strands": {
+        "runtime_arn": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/Strands_runtime-mk6uFHBu9d",
+        "model_name": "Strands Runtime",
+    },
+    "insights-office": {
+        "harness_arn": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U",
+        "model_name": "Insights Office",
+    },
+    "gmio-pcr-dev": {
+        "runtime_arn": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/gmio_pcr_dev-gSuIMZ4u60",
+        "model_name": "GMIO PCR Dev",
+    },
 }
 
-# Harnesses invoked via invoke_harness (managed runtimes cannot be called directly)
-HARNESSES = {
-    "harness": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
-    "insights": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF",
-    "dify": "arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E",
-    "dify-eks":"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dev-m4cvZIUAYw"
-}
-_insights_office_harness_arn = os.environ.get("INSIGHTS_OFFICE_HARNESS_ARN", "")
-if _insights_office_harness_arn:
-    HARNESSES["insights-office"] = _insights_office_harness_arn
 
-ALL_SLUGS = set(RUNTIMES) | set(HARNESSES)
+def _load_runtime_routes(raw: str | None) -> dict[str, dict[str, str]]:
+    """Parse and validate the deployment-controlled runtime registry."""
+    try:
+        configured = json.loads(raw) if raw else DEFAULT_RUNTIME_ROUTES
+    except json.JSONDecodeError as error:
+        raise RuntimeError("AGENTCORE_RUNTIME_ROUTES_JSON must be valid JSON") from error
+    if not isinstance(configured, dict) or not configured:
+        raise RuntimeError("AGENTCORE_RUNTIME_ROUTES_JSON must be a non-empty object")
+
+    routes: dict[str, dict[str, str]] = {}
+    for slug, entry in configured.items():
+        if not isinstance(slug, str) or not _SLUG_RE.fullmatch(slug):
+            raise RuntimeError(f"Invalid AgentCore runtime slug: {slug!r}")
+        if isinstance(entry, str):
+            entry = {"runtime_arn": entry, "model_name": slug}
+        if not isinstance(entry, dict):
+            raise RuntimeError(f"Runtime route {slug!r} must be an object")
+        runtime_arn = str(entry.get("runtime_arn") or "").strip()
+        harness_arn = str(entry.get("harness_arn") or "").strip()
+        model_name = str(entry.get("model_name") or "").strip()
+        if bool(runtime_arn) == bool(harness_arn):
+            raise RuntimeError(
+                f"Runtime route {slug!r} must configure exactly one backend ARN"
+            )
+        if runtime_arn and not _RUNTIME_ARN_RE.fullmatch(runtime_arn):
+            raise RuntimeError(f"Runtime route {slug!r} has an invalid runtime ARN")
+        if harness_arn and not _HARNESS_ARN_RE.fullmatch(harness_arn):
+            raise RuntimeError(f"Runtime route {slug!r} has an invalid harness ARN")
+        if not model_name or len(model_name) > 100:
+            raise RuntimeError(f"Runtime route {slug!r} has an invalid model name")
+        routes[slug] = {
+            "backend_type": "runtime" if runtime_arn else "harness",
+            "backend_arn": runtime_arn or harness_arn,
+            "model_name": model_name,
+        }
+    if "strands" not in routes:
+        raise RuntimeError("Runtime registry must configure the 'strands' route")
+    return routes
 
 
-app = FastAPI(title="AgentCore Proxy", version="3.0.0")
-_client = None
+RUNTIME_ROUTES = _load_runtime_routes(os.environ.get("AGENTCORE_RUNTIME_ROUTES_JSON"))
+RUNTIME_ALIASES = {"insights": "strands"}
+ALL_SLUGS = set(RUNTIME_ROUTES) | set(RUNTIME_ALIASES)
+
 _harness_session_locks: dict[str, tuple[threading.Lock, int]] = {}
 _harness_session_locks_guard = threading.Lock()
+
+
+def _canonical_slug(slug: str) -> str | None:
+    canonical = RUNTIME_ALIASES.get(slug, slug)
+    return canonical if canonical in RUNTIME_ROUTES else None
+
+
+app = FastAPI(title="AgentCore OpenWebUI Proxy", version="4.0.0")
+_client = None
 
 
 def get_client():
@@ -271,12 +275,9 @@ def _lookup_upload(file_id: str, expected_actor_id: str) -> dict | None:
 def _resolve_file_refs(body: dict, actor_id: str) -> list[dict]:
     """Extract and verify file references from a chat request body.
 
-    Supports three shapes:
+    Supports two shapes:
       - OpenAI-ish   body["files"]        = [{"id": "<upload_key>"}, ...]
       - OpenAI       body["attachments"]  = [{"file_id": "<upload_key>"}, ...]
-      - Dify         body["files"]        = [{"type": "document",
-                                              "transfer_method": "local_file",
-                                              "upload_file_id": "<upload_key>"}, ...]
 
     Only files whose key prefix matches this request's actor_id are returned.
     Silently drops mismatches (logged) so a forged file_id can't leak data.
@@ -606,45 +607,15 @@ def _validate_openwebui_artifact_manifest(
     return validated
 
 
-def _presign_validated_artifacts(artifacts: list[dict]) -> list[dict]:
-    """Create short-lived download URLs only for already validated artifacts."""
-    signed: list[dict] = []
-    for artifact in artifacts:
-        parsed = urlparse(artifact["s3_uri"])
-        filename = _sanitize_filename(artifact["filename"])
-        url = get_s3().generate_presigned_url(
-            "get_object",
-            Params={
-                "Bucket": parsed.netloc,
-                "Key": parsed.path.lstrip("/"),
-                "ResponseContentDisposition": f'attachment; filename="{filename}"',
-                "ResponseContentType": artifact["mime_type"],
-            },
-            ExpiresIn=DIFY_ARTIFACT_URL_TTL_SECONDS,
-        )
-        signed.append({**artifact, "download_url": url})
-    return signed
-
-
-def _format_presigned_artifact_links(artifacts: list[dict]) -> str:
-    lines = ["", "Generated files:"]
-    for artifact in artifacts:
-        lines.append(f"- [{artifact['filename']}]({artifact['download_url']})")
-    lines.append(
-        f"Links expire in {DIFY_ARTIFACT_URL_TTL_SECONDS // 60} minutes."
-    )
-    return "\n".join(lines)
-
-
 def _discover_openwebui_office_artifacts(
     raw_user_id: str,
     chat_id: str,
     source_profile: dict,
     request_started_at: float,
 ) -> list[dict]:
-    """Find newly generated, owner-tagged Office outputs when a marker is absent.
+    """Find newly generated, owner-tagged outputs when a marker is absent.
 
-    The Harness marker is only a convenience hint.  S3 is the source of truth:
+    The runtime marker is only a convenience hint. S3 is the source of truth:
     candidates must be created during this response, live below the current
     user/chat prefix, and pass the same independent ownership validation used
     by the registration endpoint.
@@ -732,7 +703,7 @@ def _inject_openwebui_office_artifact_context(
     source_profile: dict,
     proxy_presigns_outputs: bool = False,
 ) -> list:
-    """Give the Office Harness its exact trusted output location and tags."""
+    """Give a runtime its exact trusted output location and ownership tags."""
     output_prefix = (
         f"s3://{source_profile['bucket']}/{source_profile['output_prefix']}"
         f"{raw_user_id}/{chat_id}/"
@@ -756,7 +727,7 @@ links for the caller.
     allowed_formats = ", ".join(
         extension.upper() for extension in sorted(output_extensions)
     )
-    instruction = f"""## Generated Office files
+    instruction = f"""## Generated files
 
 For this request only, create new files solely under:
 `{output_prefix}`
@@ -772,82 +743,15 @@ Use only these downloadable output formats: {allowed_formats}.
 Before the final answer, confirm each upload completed. Then use the
 `<agentcore-artifacts>` JSON marker required by the system prompt; list only
 the S3 URI and the user-facing filename for each successful output.
+
+When asked to check S3 access, perform the check by writing a small temporary
+file below this exact per-request output prefix with all three tags above. Do
+not test an arbitrary S3 key, omit the tags, or use IAM policy simulation:
+those are outside this access contract and their denial does not indicate that
+the configured Code Interpreter cannot deliver an artifact.
 {delivery_instruction}
 """
     return [*messages, {"role": "system", "content": instruction}]
-
-
-def _extract_session_context(body: dict):
-    """Extract stable session and user identifiers from an OpenWebUI request body.
-
-    Returns (session_id, user_id):
-      session_id — from chat_id (UUID, always ≥33 chars); falls back to new uuid4
-      user_id    — from model_item.info.user_id; None if absent
-    """
-    session_id = body.get("chat_id") or str(uuid.uuid4())
-    user_id = (body.get("model_item") or {}).get("info", {}).get("user_id")
-    return session_id, user_id
-
-
-def _extract_dify_session_context(request_body: dict) -> tuple[str, str, dict[str, Any]]:
-    """
-    Extract mapped user UUID from request body when request is from Dify.
-    Conversation ID not sent from Dify -> Plugin and not sent from Plugin -> Provider.
-    Retrieve ID via regex inserted via system prompt.
-    """
-    DIFY_CONV_ID_PATTERN = r"\s*<C_ID>([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})<C_ID>\s*"
-    try:
-        user_id = uuid.UUID(request_body.get("user"))
-    except (AttributeError, TypeError, ValueError):
-        raise HTTPException(
-            status_code=422,
-            detail={
-                "error": {
-                    "code": "identity_context_required",
-                    "message": "Missing user input in UUID format.",
-                }
-            },
-        )
-    
-    try:
-        messages = request_body.get("messages", [])
-        if not isinstance(messages, list):
-            raise ValueError("messages is not of list/array type.")
-        
-        system_prompt = ""
-        system_prompt_index = -1
-        for index, message in enumerate(messages):
-            if message.get("role") == "system":
-                system_prompt = message.get("content")
-                system_prompt_index = index
-                break
-        
-        if not system_prompt:
-            raise ValueError("System prompt must be included for tracking of conversation id.")
-        
-        session_id = re.search(DIFY_CONV_ID_PATTERN, system_prompt)
-        if not session_id:
-            raise ValueError("No conversation id matching C_ID tag pattern found.")
-        
-    except ValueError as e:
-        raise HTTPException(
-                    status_code=422,
-                    detail={
-                        "error": {
-                            "code": "identity_context_required",
-                            "message": f"{str(e)}",
-                        }
-                    },
-                )
-    
-    # Remove conversation_id from system prompt if found and return new body object
-    if system_prompt_index >= 0:
-        system_prompt_dict: dict[str, str] = messages[system_prompt_index]
-        system_prompt_dict["content"] = system_prompt_dict["content"].replace(session_id.group(0), "", 1)
-        messages[system_prompt_index] = system_prompt_dict
-        request_body["messages"] = messages
-        
-    return session_id.group(1), str(user_id), request_body
 
 
 def _extract_openwebui_context(
@@ -905,7 +809,7 @@ def _extract_openwebui_context(
 
 
 def _prepare_openwebui_messages(messages: list, request_kind: str) -> list:
-    """Avoid replaying frontend history into a stateful foreground Harness session."""
+    """Avoid replaying frontend history into a stateful foreground Runtime session."""
     if request_kind != "chat":
         return messages
 
@@ -945,21 +849,42 @@ def _runtime_kwargs(messages: list, runtime_arn: str, session_id: str = None, us
     return kwargs
 
 
+def _safe_step_name(value: Any) -> str:
+    """Return a compact UI label without markup or control characters."""
+    text = re.sub(r"[\x00-\x1f\x7f<>]", "", str(value or "")).strip()
+    text = re.sub(r"\s+", " ", text)
+    return text[:72] or "Agent tool"
+
+
+def _runtime_step_status(step: dict) -> dict[str, Any]:
+    """Translate one runtime lifecycle event without forwarding its details."""
+    step_type = _safe_step_name(step.get("type") or "tool")
+    label = "MCP" if step_type.lower() == "mcp" else step_type.lower()
+    name = _safe_step_name(step.get("name"))
+    status = str(step.get("status") or "started").lower()
+    if status in {"completed", "complete", "success", "succeeded"}:
+        description = f"Completed {label}: {name}"
+        done = True
+    elif status in {"failed", "failure", "error"}:
+        description = f"Failed {label}: {name}"
+        done = True
+    else:
+        description = f"Starting {label}: {name}"
+        done = False
+    return {"description": description[:120], "done": done, "hidden": False}
+
+
 def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str,
                            user_id: str = None):
-    """Generator: yields text deltas from a streaming AgentCore Runtime response.
+    """Yield ordered ``(kind, value)`` events from an AgentCore Runtime SSE body.
 
-    The Phase 2 container emits text/event-stream with OpenAI-format chunks. We read
-    the botocore StreamingBody line by line, parse `data: {json}` payloads, and
-    forward the delta.content text.
-
-    Retries once on ConnectionClosedError if the error occurs before any token is
-    yielded (cold-start container spin-up window).
+    ``agent_step`` frames become safe status dictionaries; OpenAI delta frames
+    become text. Arguments, results, and all other sideband fields are ignored.
     """
     kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
 
     for attempt in range(2):
-        first_token_sent = False
+        first_event_sent = False
         try:
             resp = get_client().invoke_agent_runtime(**kwargs)
             body = resp["response"]  # botocore StreamingBody
@@ -977,17 +902,21 @@ def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str,
                     obj = json.loads(payload)
                 except Exception:
                     continue
+                if obj.get("event") == "agent_step" and isinstance(obj.get("step"), dict):
+                    first_event_sent = True
+                    yield "status", _runtime_step_status(obj["step"])
+                    continue
                 choices = obj.get("choices") or []
                 if not choices:
                     continue
                 delta = (choices[0].get("delta") or {})
                 text = delta.get("content")
                 if text:
-                    first_token_sent = True
-                    yield text
+                    first_event_sent = True
+                    yield "text", text
             return
         except botocore.exceptions.ConnectionClosedError as e:
-            if attempt == 0 and not first_token_sent:
+            if attempt == 0 and not first_event_sent:
                 logger.warning(
                     "Runtime cold-start disconnect (session=%s), retrying...", session_id
                 )
@@ -995,81 +924,29 @@ def _stream_runtime_events(messages: list, runtime_arn: str, session_id: str,
             raise
 
 
-def _invoke_runtime_buffered(messages: list, runtime_arn: str, session_id: str,
-                             user_id: str = None) -> str:
-    """Non-streaming path: collect all deltas and return the concatenated string."""
-    return "".join(_stream_runtime_events(messages, runtime_arn, session_id, user_id))
-
-
-async def _sse_runtime_stream(messages: list, runtime_arn: str, session_id: str, user_id,
-                              model: str, completion_id: str):
-    """Async generator: yield OpenAI SSE chunks from live runtime stream events.
-
-    Wraps the blocking `_stream_runtime_events` sync iterator via `iterate_in_threadpool`
-    so each `iter_lines()` read runs off the event loop and streamed chunks are flushed
-    to the client immediately (rather than buffered until the generator completes).
-    """
-    try:
-        sync_iter = _stream_runtime_events(messages, runtime_arn, session_id, user_id)
-        async for text in iterate_in_threadpool(sync_iter):
-            chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
-    except Exception as e:
-        logger.error("Runtime stream error (session=%s): %s", session_id, e)
-        yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'stream_error'}})}\n\n"
-
-    final = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
-def _normalize_messages(messages: list) -> tuple[list, list]:
-    """Split OpenAI-style messages for invoke_harness.
-
-    invoke_harness only accepts roles 'user' and 'assistant' — system messages
-    must be hoisted into the separate `systemPrompt` field.
-
-    Returns (harness_messages, system_prompt) where each item is content-normalised
-    to the [{text: "..."}] shape the harness expects.
-    """
-    harness_messages: list = []
-    system_prompt: list = []
-    for m in messages:
-        content = m.get("content", "")
-        if isinstance(content, str):
-            content_blocks = [{"text": content}]
-        else:
-            content_blocks = content
-        role = m.get("role")
-        if role == "system":
+def _normalize_harness_messages(messages: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Hoist system messages into the separate field required by Harness."""
+    harness_messages: list[dict] = []
+    system_prompt: list[dict] = []
+    for message in messages:
+        content = message.get("content", "")
+        content_blocks = [{"text": content}] if isinstance(content, str) else content
+        if message.get("role") == "system":
             system_prompt.extend(content_blocks)
         else:
-            harness_messages.append({"role": role, "content": content_blocks})
+            harness_messages.append(
+                {"role": message.get("role"), "content": content_blocks}
+            )
     return harness_messages, system_prompt
 
 
 @contextmanager
 def _serialized_harness_session(session_id: str):
-    """Serialize one Harness session in this proxy process without leaking locks."""
+    """Prevent concurrent calls from corrupting one stateful Harness session."""
     with _harness_session_locks_guard:
         entry = _harness_session_locks.get(session_id)
-        if entry is None:
-            lock = threading.Lock()
-            users = 0
-        else:
-            lock, users = entry
+        lock, users = entry if entry is not None else (threading.Lock(), 0)
         _harness_session_locks[session_id] = (lock, users + 1)
-
     try:
         with lock:
             yield
@@ -1082,162 +959,193 @@ def _serialized_harness_session(session_id: str):
                 _harness_session_locks[session_id] = (current_lock, users - 1)
 
 
-def _stream_harness_events(messages: list, harness_arn: str, session_id: str, actor_id: str = None):
-    """Generator: yields text strings as contentBlockDelta events arrive from invoke_harness.
-
-    Retries the full call once on cold-start connection close, but only if no token
-    has been yielded yet (safe to retry before the SSE response is committed).
-    After the first token is yielded, any error propagates to the caller.
-    """
-    harness_messages, system_prompt = _normalize_messages(messages)
-    kwargs = dict(
-        harnessArn=harness_arn,
-        runtimeSessionId=session_id,
-        messages=harness_messages,
-    )
-    if system_prompt:
-        kwargs["systemPrompt"] = system_prompt
-    if actor_id:
-        kwargs["actorId"] = actor_id
-
-    with _serialized_harness_session(session_id):
-        for attempt in range(2):
-            first_token_sent = False
-            try:
-                resp = get_client().invoke_harness(**kwargs)
-                for event in resp.get("stream", []):
-                    delta = event.get("contentBlockDelta", {}).get("delta", {})
-                    if "text" in delta:
-                        first_token_sent = True
-                        yield delta["text"]
-                return  # stream complete normally
-            except (
-                botocore.exceptions.ConnectionClosedError,
-                botocore.exceptions.EventStreamError,
-            ) as e:
-                if (
-                    attempt == 0
-                    and not first_token_sent
-                    and "connection" in str(e).lower()
-                ):
-                    logger.warning(
-                        "Harness cold-start disconnect (session=%s), retrying...",
-                        session_id,
-                    )
-                    continue
-                raise
-
-
-def _safe_tool_status(tool_use: dict) -> str:
-    """Return a user-safe status without exposing tool inputs or result data."""
-    name = str(tool_use.get("name") or "").lower()
-    tool_type = str(tool_use.get("type") or "").lower()
-    server_name = str(tool_use.get("serverName") or "").lower()
-    identity = " ".join((name, tool_type, server_name))
-    if "code" in identity or "interpreter" in identity:
-        return "Running Code Interpreter"
-    if "timesfm" in identity or "forecast" in identity:
-        return "Generating forecast"
-    if "gateway" in identity or server_name:
-        return "Calling connected data tool"
-    return "Using analysis tool"
-
-
-def _stream_harness_events_with_progress(
+def _stream_harness_events(
     messages: list,
     harness_arn: str,
     session_id: str,
-    actor_id: str = None,
+    actor_id: str | None = None,
 ):
-    """Yield ``(kind, value)`` for Office-only text and safe tool lifecycle.
-
-    Existing Harness routes retain their text-only adapter.  This adapter never
-    exposes chain-of-thought, tool input, SQL, S3 keys, or tool results.
-    """
-    harness_messages, system_prompt = _normalize_messages(messages)
-    kwargs = dict(
-        harnessArn=harness_arn,
-        runtimeSessionId=session_id,
-        messages=harness_messages,
-    )
+    """Yield ordered text and safe tool/MCP lifecycle events from Harness."""
+    harness_messages, system_prompt = _normalize_harness_messages(messages)
+    kwargs: dict[str, Any] = {
+        "harnessArn": harness_arn,
+        "runtimeSessionId": session_id,
+        "messages": harness_messages,
+    }
     if system_prompt:
         kwargs["systemPrompt"] = system_prompt
     if actor_id:
         kwargs["actorId"] = actor_id
 
     with _serialized_harness_session(session_id):
-        for attempt in range(2):
-            first_text_sent = False
-            active_tools: dict[int, str] = {}
-            result_tools: dict[int, str] = {}
-            last_tool_status = "analysis tool"
+        for attempt in range(len(HARNESS_CREDENTIAL_RETRY_DELAYS) + 1):
+            first_event_sent = False
+            active_tools: dict[int, dict[str, Any]] = {}
             try:
-                resp = get_client().invoke_harness(**kwargs)
-                for event in resp.get("stream", []):
-                    start = event.get("contentBlockStart", {}).get("start", {})
-                    block_index = event.get("contentBlockStart", {}).get(
-                        "contentBlockIndex"
-                    )
-                    if "toolUse" in start:
-                        last_tool_status = _safe_tool_status(start["toolUse"])
+                response = get_client().invoke_harness(**kwargs)
+                for event in response.get("stream", []):
+                    start_event = event.get("contentBlockStart", {})
+                    start = start_event.get("start", {})
+                    block_index = start_event.get("contentBlockIndex")
+                    tool_use = start.get("toolUse")
+                    if isinstance(tool_use, dict):
+                        step = {
+                            "type": "mcp" if tool_use.get("serverName") else "tool",
+                            "name": tool_use.get("name") or tool_use.get("type"),
+                            "status": "started",
+                        }
                         if isinstance(block_index, int):
-                            active_tools[block_index] = last_tool_status
-                        yield "status", last_tool_status
-                    elif "toolResult" in start:
-                        result_status = active_tools.get(block_index, last_tool_status)
-                        if isinstance(block_index, int):
-                            result_tools[block_index] = result_status
-                        yield "status", "Processing tool result"
+                            active_tools[block_index] = step
+                        first_event_sent = True
+                        yield "status", _runtime_step_status(step)
 
                     delta = event.get("contentBlockDelta", {}).get("delta", {})
-                    if "text" in delta:
-                        first_text_sent = True
-                        yield "text", delta["text"]
+                    text = delta.get("text")
+                    if text:
+                        first_event_sent = True
+                        yield "text", text
 
                     stop_index = event.get("contentBlockStop", {}).get(
                         "contentBlockIndex"
                     )
-                    if isinstance(stop_index, int) and stop_index in result_tools:
-                        yield "status", f"Completed {result_tools.pop(stop_index).lower()}"
-                    if "messageStop" in event:
-                        yield "status", "Preparing final answer"
+                    if isinstance(stop_index, int) and stop_index in active_tools:
+                        step = {**active_tools.pop(stop_index), "status": "completed"}
+                        first_event_sent = True
+                        yield "status", _runtime_step_status(step)
                 return
             except (
                 botocore.exceptions.ConnectionClosedError,
                 botocore.exceptions.EventStreamError,
             ) as error:
-                if (
+                error_text = str(error).lower()
+                credential_bootstrap_failure = (
+                    "unable to locate credentials" in error_text
+                    and "failed to start mcp client" in error_text
+                )
+                cold_start_disconnect = (
                     attempt == 0
-                    and not first_text_sent
-                    and "connection" in str(error).lower()
-                ):
-                    logger.warning(
-                        "Office Harness cold-start disconnect (session=%s), retrying...",
-                        session_id,
+                    and (
+                        isinstance(error, botocore.exceptions.ConnectionClosedError)
+                        or "connection" in error_text
                     )
+                )
+                can_retry_credentials = (
+                    credential_bootstrap_failure
+                    and attempt < len(HARNESS_CREDENTIAL_RETRY_DELAYS)
+                )
+                if (
+                    not first_event_sent
+                    and (cold_start_disconnect or can_retry_credentials)
+                ):
+                    delay = (
+                        HARNESS_CREDENTIAL_RETRY_DELAYS[attempt]
+                        if can_retry_credentials
+                        else 0
+                    )
+                    logger.warning(
+                        "Harness pre-response transient (session=%s), "
+                        "retrying in %ss: %s",
+                        session_id,
+                        delay,
+                        error,
+                    )
+                    if delay:
+                        time.sleep(delay)
                     continue
                 raise
 
 
-def _invoke_harness_buffered(messages: list, harness_arn: str, session_id: str, actor_id: str = None) -> str:
-    """Blocking call: collect all harness stream events and return full text. Used for non-streaming."""
-    return "".join(_stream_harness_events(messages, harness_arn, session_id, actor_id))
+def _stream_backend_events(
+    messages: list,
+    backend_type: str,
+    backend_arn: str,
+    session_id: str,
+    user_id: str | None = None,
+):
+    if backend_type == "harness":
+        yield from _stream_harness_events(
+            messages, backend_arn, session_id, user_id
+        )
+        return
+    yield from _stream_runtime_events(messages, backend_arn, session_id, user_id)
 
 
-def _sse_harness_stream(messages: list, harness_arn: str, session_id: str, actor_id, model: str, completion_id: str):
-    """Generator: yield OpenAI SSE chunks from live harness stream events."""
+def _invoke_backend_buffered(
+    messages: list,
+    backend_type: str,
+    backend_arn: str,
+    session_id: str,
+    user_id: str | None = None,
+) -> str:
+    """Non-streaming path: collect all backend text deltas."""
+    return "".join(
+        value
+        for kind, value in _stream_backend_events(
+            messages, backend_type, backend_arn, session_id, user_id
+        )
+        if kind == "text"
+    )
+
+
+async def _sse_runtime_stream(messages: list, backend_type: str, backend_arn: str,
+                              session_id: str, user_id,
+                              model: str, completion_id: str,
+                              artifact_context: tuple[str, str, dict] | None = None):
+    """Stream runtime text, individual tool statuses, and opaque artifacts."""
+    artifact_sanitizer = _OfficeArtifactStreamSanitizer()
+    request_started_at = time.time()
+
+    def stream_chunk(content: str):
+        chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"content": content}, "finish_reason": None}
+            ],
+        }
+        return f"data: {json.dumps(chunk)}\n\n"
+
     try:
-        for text in _stream_harness_events(messages, harness_arn, session_id, actor_id):
-            chunk = {
-                "id": completion_id,
-                "object": "chat.completion.chunk",
-                "model": model,
-                "choices": [{"index": 0, "delta": {"content": text}, "finish_reason": None}],
-            }
-            yield f"data: {json.dumps(chunk)}\n\n"
+        sync_iter = _stream_backend_events(
+            messages, backend_type, backend_arn, session_id, user_id
+        )
+        async for kind, value in iterate_in_threadpool(sync_iter):
+            if kind == "status":
+                yield stream_chunk(_office_status_marker(**value))
+                continue
+            for content in artifact_sanitizer.feed(value):
+                if content:
+                    yield stream_chunk(content)
     except Exception as e:
-        logger.error("Harness stream error (session=%s): %s", session_id, e)
+        logger.error("Runtime stream error (session=%s): %s", session_id, e)
         yield f"data: {json.dumps({'error': {'message': str(e), 'type': 'stream_error'}})}\n\n"
+
+    for content in artifact_sanitizer.finish():
+        if content:
+            yield stream_chunk(content)
+    if not artifact_sanitizer.artifact_emitted and artifact_context:
+        raw_user_id, chat_id, source_profile = artifact_context
+        try:
+            discovered = await run_in_threadpool(
+                _discover_openwebui_office_artifacts,
+                raw_user_id,
+                chat_id,
+                source_profile,
+                request_started_at,
+            )
+            if discovered:
+                yield stream_chunk(_office_artifact_marker(discovered))
+                artifact_sanitizer.artifact_emitted = True
+        except Exception as error:
+            logger.warning(
+                "Artifact fallback discovery failed (session=%s): %s",
+                session_id,
+                error,
+            )
+    if artifact_sanitizer.artifact_problem and not artifact_sanitizer.artifact_emitted:
+        yield stream_chunk(_OFFICE_ARTIFACT_ERROR_MARKER)
+    yield stream_chunk(_office_status_marker("", done=True, hidden=True))
 
     final = {
         "id": completion_id,
@@ -1260,7 +1168,7 @@ def _office_status_marker(
     done: bool = False,
     hidden: bool = False,
 ) -> str:
-    """A private marker consumed by the Office OpenWebUI stream filter."""
+    """A private marker consumed by the trusted OpenWebUI stream filter."""
     data = {"description": description[:120], "done": done, "hidden": hidden}
     return f"<!--agentcore-status:{json.dumps(data, separators=(',', ':'))}-->"
 
@@ -1280,7 +1188,7 @@ def _office_artifact_marker(artifacts: list) -> str:
 class _OfficeArtifactStreamSanitizer:
     """Replace a streamed AgentCore artifact block with an opaque marker.
 
-    A Harness may split either XML-like delimiter across arbitrary streaming
+    A Runtime may split either XML-like delimiter across arbitrary streaming
     chunks. This small state machine holds only the control block until it is
     complete; it never forwards its S3 URI or raw marker to the frontend.
     """
@@ -1386,231 +1294,6 @@ class _OfficeArtifactStreamSanitizer:
         return []
 
 
-def _sse_harness_office_stream(
-    messages: list,
-    harness_arn: str,
-    session_id: str,
-    actor_id: str,
-    model: str,
-    completion_id: str,
-    artifact_context: tuple[str, str, dict] | None = None,
-):
-    """Office stream adapter: safe statuses and opaque artifact control markers."""
-    artifact_sanitizer = _OfficeArtifactStreamSanitizer()
-    request_started_at = time.time()
-
-    def stream_chunk(content: str):
-        chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [
-                {"index": 0, "delta": {"content": content}, "finish_reason": None}
-            ],
-        }
-        return f"data: {json.dumps(chunk)}\n\n"
-
-    try:
-        for kind, value in _stream_harness_events_with_progress(
-            messages, harness_arn, session_id, actor_id
-        ):
-            if kind == "status":
-                yield stream_chunk(_office_status_marker(value))
-                continue
-            for content in artifact_sanitizer.feed(value):
-                if content:
-                    yield stream_chunk(content)
-    except Exception as error:
-        logger.error("Office Harness stream error (session=%s): %s", session_id, error)
-        yield f"data: {json.dumps({'error': {'message': str(error), 'type': 'stream_error'}})}\n\n"
-
-    for content in artifact_sanitizer.finish():
-        yield stream_chunk(content)
-    if not artifact_sanitizer.artifact_emitted and artifact_context:
-        raw_user_id, chat_id, source_profile = artifact_context
-        try:
-            discovered = _discover_openwebui_office_artifacts(
-                raw_user_id,
-                chat_id,
-                source_profile,
-                request_started_at,
-            )
-            if discovered:
-                yield stream_chunk(_office_artifact_marker(discovered))
-                artifact_sanitizer.artifact_emitted = True
-        except Exception as error:
-            logger.warning(
-                "Office artifact fallback discovery failed (session=%s): %s",
-                session_id,
-                error,
-            )
-    if artifact_sanitizer.artifact_problem and not artifact_sanitizer.artifact_emitted:
-        yield stream_chunk(_OFFICE_ARTIFACT_ERROR_MARKER)
-    # OpenWebUI status events are independent of the OpenAI stop chunk. Close
-    # the last live status explicitly so the UI cannot stay on its final label.
-    yield stream_chunk(_office_status_marker("", done=True, hidden=True))
-
-    final = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
-_DIFY_ARTIFACT_ERROR_TEXT = (
-    "\n\nGenerated file could not be made available. Please try again."
-)
-
-
-def _dify_artifact_error_label(error: Exception) -> str:
-    """Return a useful validation code without logging artifact locations."""
-    if isinstance(error, FileManifestError):
-        return f"{type(error).__name__}:{error.code}"
-    return type(error).__name__
-
-
-def _resolve_dify_presigned_artifacts(
-    artifact_sanitizer: _OfficeArtifactStreamSanitizer,
-    artifact_context: tuple[str, str, dict],
-    request_started_at: float,
-) -> list[dict]:
-    user_id, conversation_id, source_profile = artifact_context
-    if artifact_sanitizer.artifacts is not None:
-        validated = _validate_openwebui_artifact_manifest(
-            artifact_sanitizer.artifacts,
-            user_id,
-            conversation_id,
-            source_profile,
-        )
-    else:
-        validated = _discover_openwebui_office_artifacts(
-            user_id,
-            conversation_id,
-            source_profile,
-            request_started_at,
-        )
-    return _presign_validated_artifacts(validated) if validated else []
-
-
-def _render_dify_presigned_artifacts(
-    result_text: str,
-    artifact_context: tuple[str, str, dict],
-    request_started_at: float,
-) -> str:
-    """Replace a buffered artifact manifest with validated download links."""
-    artifact_sanitizer = _OfficeArtifactStreamSanitizer(emit_opaque_marker=False)
-    clean_text = "".join(artifact_sanitizer.feed(result_text))
-    clean_text += "".join(artifact_sanitizer.finish())
-    try:
-        artifacts = _resolve_dify_presigned_artifacts(
-            artifact_sanitizer,
-            artifact_context,
-            request_started_at,
-        )
-    except Exception as error:
-        logger.warning(
-            "Dify artifact delivery failed: %s",
-            _dify_artifact_error_label(error),
-        )
-        return clean_text + _DIFY_ARTIFACT_ERROR_TEXT
-    if artifacts:
-        return clean_text + "\n" + _format_presigned_artifact_links(artifacts)
-    if artifact_sanitizer.artifact_problem:
-        return clean_text + _DIFY_ARTIFACT_ERROR_TEXT
-    return clean_text
-
-
-def _sse_harness_dify_artifact_stream(
-    messages: list,
-    harness_arn: str,
-    session_id: str,
-    actor_id: str,
-    model: str,
-    completion_id: str,
-    artifact_context: tuple[str, str, dict],
-):
-    """Stream normal text, then append proxy-validated Dify download links."""
-    artifact_sanitizer = _OfficeArtifactStreamSanitizer(emit_opaque_marker=False)
-    request_started_at = time.time()
-
-    def stream_chunk(content: str):
-        chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "model": model,
-            "choices": [
-                {"index": 0, "delta": {"content": content}, "finish_reason": None}
-            ],
-        }
-        return f"data: {json.dumps(chunk)}\n\n"
-
-    try:
-        for text in _stream_harness_events(
-            messages, harness_arn, session_id, actor_id
-        ):
-            for content in artifact_sanitizer.feed(text):
-                if content:
-                    yield stream_chunk(content)
-    except Exception as error:
-        logger.error("Dify Harness stream error (session=%s): %s", session_id, error)
-        yield f"data: {json.dumps({'error': {'message': str(error), 'type': 'stream_error'}})}\n\n"
-
-    for content in artifact_sanitizer.finish():
-        if content:
-            yield stream_chunk(content)
-    try:
-        artifacts = _resolve_dify_presigned_artifacts(
-            artifact_sanitizer,
-            artifact_context,
-            request_started_at,
-        )
-        if artifacts:
-            yield stream_chunk("\n" + _format_presigned_artifact_links(artifacts))
-        elif artifact_sanitizer.artifact_problem:
-            yield stream_chunk(_DIFY_ARTIFACT_ERROR_TEXT)
-    except Exception as error:
-        logger.warning(
-            "Dify artifact stream delivery failed (session=%s): %s",
-            session_id,
-            _dify_artifact_error_label(error),
-        )
-        yield stream_chunk(_DIFY_ARTIFACT_ERROR_TEXT)
-
-    final = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
-def _stream_response(result_text: str, model: str, completion_id: str):
-    chunk = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {"role": "assistant", "content": result_text},
-            "finish_reason": None,
-        }],
-    }
-    yield f"data: {json.dumps(chunk)}\n\n"
-    final = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "model": model,
-        "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
-    }
-    yield f"data: {json.dumps(final)}\n\n"
-    yield "data: [DONE]\n\n"
-
-
 async def _build_completion(
     messages: list,
     slug: str,
@@ -1618,56 +1301,50 @@ async def _build_completion(
     stream: bool,
     session_id: str,
     user_id: str = None,
-    office_artifact_context: tuple[str, str, dict] | None = None,
-    presigned_artifact_context: tuple[str, str, dict] | None = None,
+    artifact_context: tuple[str, str, dict] | None = None,
 ):
     logger.info(
         "Request [%s]: model=%s, turns=%d, stream=%s, session=%s, actor=%s",
         slug, model, len(messages), stream, session_id, user_id,
     )
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
-    request_started_at = time.time()
-
-    if slug in HARNESSES:
-        arn = HARNESSES[slug]
-        if stream:
-            stream_args = (messages, arn, session_id, user_id, model, completion_id)
-            if slug == "insights-office":
-                stream_adapter = _sse_harness_office_stream
-                stream_args = (*stream_args, office_artifact_context)
-            elif presigned_artifact_context:
-                stream_adapter = _sse_harness_dify_artifact_stream
-                stream_args = (*stream_args, presigned_artifact_context)
-            else:
-                stream_adapter = _sse_harness_stream
-            # Pipe harness token deltas directly to SSE — no buffering.
-            return StreamingResponse(
-                stream_adapter(*stream_args),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-        result_text = await run_in_threadpool(
-            _invoke_harness_buffered, messages, arn, session_id, user_id
+    backend = RUNTIME_ROUTES[slug]
+    backend_type = backend["backend_type"]
+    backend_arn = backend["backend_arn"]
+    if stream:
+        return StreamingResponse(
+            _sse_runtime_stream(
+                messages,
+                backend_type,
+                backend_arn,
+                session_id,
+                user_id,
+                model,
+                completion_id,
+                artifact_context,
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-        if presigned_artifact_context:
-            result_text = await run_in_threadpool(
-                _render_dify_presigned_artifacts,
-                result_text,
-                presigned_artifact_context,
-                request_started_at,
-            )
-    else:
-        # Runtime path — Phase 2: container emits text/event-stream SSE natively.
-        arn = RUNTIMES[slug]
-        if stream:
-            return StreamingResponse(
-                _sse_runtime_stream(messages, arn, session_id, user_id, model, completion_id),
-                media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-            )
-        result_text = await run_in_threadpool(
-            _invoke_runtime_buffered, messages, arn, session_id, user_id
-        )
+    result_text = await run_in_threadpool(
+        _invoke_backend_buffered,
+        messages,
+        backend_type,
+        backend_arn,
+        session_id,
+        user_id,
+    )
+    # Buffered responses append their one opaque marker below after complete
+    # validation. Suppress the sanitizer's streaming-style marker to avoid a
+    # duplicate download artifact in OpenWebUI background/non-stream replies.
+    sanitizer = _OfficeArtifactStreamSanitizer(emit_opaque_marker=False)
+    clean_text = "".join(sanitizer.feed(result_text))
+    clean_text += "".join(sanitizer.finish())
+    if sanitizer.artifacts is not None:
+        clean_text += _office_artifact_marker(sanitizer.artifacts)
+    elif sanitizer.artifact_problem:
+        clean_text += _OFFICE_ARTIFACT_ERROR_MARKER
+    result_text = clean_text
 
     return {
         "id": completion_id,
@@ -1697,21 +1374,29 @@ def health():
 
 @app.get("/{slug}/v1/models")
 def models_by_slug(slug: str):
-    if slug not in ALL_SLUGS:
+    canonical_slug = _canonical_slug(slug)
+    if canonical_slug is None:
         return JSONResponse(status_code=404, content={"error": f"Unknown runtime: {slug}"})
     return {
         "object": "list",
-        "data": [{"id": slug, "object": "model", "owned_by": "agentcore"}],
+        "data": [{
+            "id": slug,
+            "object": "model",
+            "owned_by": "agentcore",
+            "name": RUNTIME_ROUTES[canonical_slug]["model_name"],
+        }],
     }
 
 
-@app.post("/insights-office/v1/artifacts/register")
-async def register_insights_office_artifacts(request: Request):
-    """Validate Office output metadata before OpenWebUI creates download rows.
+@app.post("/{slug}/v1/artifacts/register")
+async def register_artifacts(slug: str, request: Request):
+    """Validate generated output metadata before OpenWebUI creates file rows.
 
     This endpoint is callable only from the private OpenWebUI server path in
     the POC. Browser clients never receive S3 credentials or a raw S3 URL.
     """
+    if _canonical_slug(slug) is None:
+        return JSONResponse(status_code=404, content={"error": f"Unknown runtime: {slug}"})
     try:
         body = await request.json()
     except Exception:
@@ -1741,7 +1426,8 @@ async def register_insights_office_artifacts(request: Request):
             content={"error": {"code": error.code, "message": error.message}},
         )
     logger.info(
-        "Validated Office artifacts: actor=%s chat=%s count=%d",
+        "Validated artifacts [%s]: actor=%s chat=%s count=%d",
+        slug,
         raw_user_id,
         chat_id,
         len(artifacts),
@@ -1751,7 +1437,8 @@ async def register_insights_office_artifacts(request: Request):
 
 @app.post("/{slug}/v1/chat/completions")
 async def chat_completions_by_slug(slug: str, request: Request):
-    if slug not in ALL_SLUGS:
+    canonical_slug = _canonical_slug(slug)
+    if canonical_slug is None:
         return JSONResponse(status_code=404, content={"error": f"Unknown runtime: {slug}"})
     try:
         body = await request.json()
@@ -1759,95 +1446,48 @@ async def chat_completions_by_slug(slug: str, request: Request):
         return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
 
     
-    logger.info(
-        "Raw payload [%s]: %s",
-        slug,
-        json.dumps(body, ensure_ascii=False, default=str),
-    )
-
     messages = body.get("messages", [])
     if not messages:
         return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
-    office_artifact_context = None
-    presigned_artifact_context = None
-    if slug in {"insights", "insights-office"}:
-        source_profile = INSIGHTS_OPENWEBUI_SOURCE_PROFILE
-        context = _extract_openwebui_context(request, body, source_profile)
-        if isinstance(context, JSONResponse):
-            return context
-        session_id, user_id, raw_user_id, request_kind = context
-        if request_kind == "background":
-            openwebui_files = []
-        else:
-            try:
-                openwebui_files = _validate_openwebui_file_manifest(
-                    body.get("agentcore_files"),
-                    raw_user_id,
-                    source_profile,
-                )
-            except ValueError as error:
-                return JSONResponse(
-                    status_code=400,
-                    content={
-                        "error": {
-                            "code": "invalid_file_manifest",
-                            "message": str(error),
-                        }
-                    },
-                )
-            except FileManifestError as error:
-                return JSONResponse(
-                    status_code=error.status_code,
-                    content={"error": {"code": error.code, "message": error.message}},
-                )
-        logger.info(
-            "Validated OpenWebUI files: kind=%s actor=%s session=%s count=%d files=%s",
-            request_kind,
-            user_id,
-            session_id,
-            len(openwebui_files),
-            [
-                {
-                    "file_id": item["file_id"],
-                    "filename": item["filename"],
-                    "size": item["size"],
-                }
-                for item in openwebui_files
-            ],
-        )
-        messages = _prepare_openwebui_messages(messages, request_kind)
-        messages = _inject_openwebui_file_context(messages, openwebui_files)
-        if slug == "insights-office":
-            chat_id = (request.headers.get("x-openwebui-chat-id") or "").strip()
-            messages = _inject_openwebui_office_artifact_context(
-                messages,
-                raw_user_id,
-                chat_id,
-                source_profile,
-            )
-            if request_kind == "chat":
-                office_artifact_context = (
-                    raw_user_id,
-                    chat_id,
-                    source_profile,
-                )
-    elif slug in ("harness", "dify", "dify-eks"):
-        session_id, user_id, body = _extract_dify_session_context(request_body=body)
-        messages = _inject_openwebui_office_artifact_context(
-            messages,
-            user_id,
-            session_id,
-            DIFY_OFFICE_SOURCE_PROFILE,
-            proxy_presigns_outputs=True,
-        )
-        presigned_artifact_context = (
-            user_id,
-            session_id,
-            DIFY_OFFICE_SOURCE_PROFILE,
-        )
-        
+    source_profile = INSIGHTS_OPENWEBUI_SOURCE_PROFILE
+    context = _extract_openwebui_context(request, body, source_profile)
+    if isinstance(context, JSONResponse):
+        return context
+    session_id, user_id, raw_user_id, request_kind = context
+    if request_kind == "background":
+        openwebui_files = []
     else:
-        session_id, user_id = _extract_session_context(body)
+        try:
+            openwebui_files = _validate_openwebui_file_manifest(
+                body.get("agentcore_files"), raw_user_id, source_profile
+            )
+        except ValueError as error:
+            return JSONResponse(
+                status_code=400,
+                content={"error": {"code": "invalid_file_manifest", "message": str(error)}},
+            )
+        except FileManifestError as error:
+            return JSONResponse(
+                status_code=error.status_code,
+                content={"error": {"code": error.code, "message": error.message}},
+            )
+    logger.info(
+        "Validated OpenWebUI files [%s]: kind=%s actor=%s session=%s count=%d",
+        canonical_slug,
+        request_kind,
+        user_id,
+        session_id,
+        len(openwebui_files),
+    )
+    messages = _prepare_openwebui_messages(messages, request_kind)
+    messages = _inject_openwebui_file_context(messages, openwebui_files)
+    chat_id = (request.headers.get("x-openwebui-chat-id") or "").strip()
+    artifact_context = None
+    if request_kind == "chat":
+        messages = _inject_openwebui_office_artifact_context(
+            messages, raw_user_id, chat_id, source_profile
+        )
+        artifact_context = (raw_user_id, chat_id, source_profile)
 
     # OpenAI-style attachments: body["files"] is a list of {id: <upload_key>}
     # or body["attachments"] with {file_id: ...}. Verify each is owned by this actor.
@@ -1857,8 +1497,13 @@ async def chat_completions_by_slug(slug: str, request: Request):
 
     try:
         return await _build_completion(
-            messages, slug, body.get("model", slug), body.get("stream", False),
-            session_id, user_id, office_artifact_context, presigned_artifact_context,
+            messages,
+            canonical_slug,
+            body.get("model", slug),
+            body.get("stream", False),
+            session_id,
+            user_id,
+            artifact_context,
         )
     except Exception as e:
         logger.error("AgentCore error [%s]: %s", slug, e)
@@ -1866,169 +1511,23 @@ async def chat_completions_by_slug(slug: str, request: Request):
 
 
 # ---------------------------------------------------------------------------
-# Backward-compat bare /v1/* → poc runtime
+# Backward-compatible bare /v1/* -> strands runtime
 # ---------------------------------------------------------------------------
 
 @app.get("/v1/models")
 def models_compat():
-    return {
-        "object": "list",
-        "data": [{"id": "agentcore", "object": "model", "owned_by": "agentcore"}],
-    }
+    return models_by_slug("strands")
 
 
 @app.post("/v1/chat/completions")
 async def chat_completions_compat(request: Request):
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"error": "invalid JSON body"})
-    messages = body.get("messages", [])
-    if not messages:
-        return JSONResponse(status_code=400, content={"error": "messages must not be empty"})
-    session_id, user_id = _extract_session_context(body)
-    files_meta = _resolve_file_refs(body, user_id)
-    if files_meta:
-        messages = _inject_file_refs(messages, files_meta)
-    try:
-        return await _build_completion(
-            messages, "poc", body.get("model", "agentcore"), body.get("stream", False),
-            session_id, user_id,
-        )
-    except Exception as e:
-        logger.error("AgentCore error [compat]: %s", e)
-        return JSONResponse(status_code=502, content={"error": str(e)})
+    return await chat_completions_by_slug("strands", request)
 
 
 # ---------------------------------------------------------------------------
-# Dify Chat App API — /dify/{slug}/v1/chat-messages
+# File uploads — OpenAI Files API compatibility
 #
-# Spec: https://docs.dify.ai/api-reference/chats/send-chat-message
-# Dify sends a single-turn request per HTTP call; conversation history is
-# maintained server-side by echoing conversation_id back to the client.
-# ---------------------------------------------------------------------------
-
-def _dify_parse(body: dict):
-    """Return (query, user, conversation_id, response_mode).
-
-    Mints a fresh conversation_id when the caller sends an empty one, so the
-    first response can echo a stable id the client will reuse on the next turn.
-    """
-    query = (body.get("query") or "").strip()
-    user = body.get("user") or None
-    conversation_id = body.get("conversation_id") or str(uuid.uuid4())
-    response_mode = body.get("response_mode") or "streaming"
-    return query, user, conversation_id, response_mode
-
-
-def _dify_event(event: str, conversation_id: str, message_id: str,
-                task_id: str, **extra) -> str:
-    frame = {
-        "event": event,
-        "conversation_id": conversation_id,
-        "message_id": message_id,
-        "task_id": task_id,
-        "created_at": int(time.time()),
-        **extra,
-    }
-    return f"data: {json.dumps(frame)}\n\n"
-
-
-async def _dify_sse(sync_iter, conversation_id: str, message_id: str, task_id: str):
-    """Wrap a sync text-delta iterator into Dify-format SSE frames.
-
-    Uses iterate_in_threadpool so each blocking read from botocore runs off
-    the event loop — same pattern as _sse_runtime_stream.
-    """
-    try:
-        async for text in iterate_in_threadpool(sync_iter):
-            yield _dify_event("message", conversation_id, message_id, task_id, answer=text)
-    except Exception as e:
-        logger.error("Dify stream error (conv=%s): %s", conversation_id, e)
-        yield _dify_event(
-            "error", conversation_id, message_id, task_id,
-            status=500, code="runtime_error", message=str(e),
-        )
-        return
-
-    yield _dify_event(
-        "message_end", conversation_id, message_id, task_id,
-        metadata={"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
-    )
-
-
-def _dify_blocking_body(answer: str, conversation_id: str, message_id: str, task_id: str) -> dict:
-    return {
-        "event": "message",
-        "task_id": task_id,
-        "id": message_id,
-        "message_id": message_id,
-        "conversation_id": conversation_id,
-        "mode": "chat",
-        "answer": answer,
-        "metadata": {"usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}},
-        "created_at": int(time.time()),
-    }
-
-
-@app.post("/dify/{slug}/v1/chat-messages")
-async def dify_chat_messages(slug: str, request: Request):
-    if slug not in ALL_SLUGS:
-        return JSONResponse(status_code=404, content={"error": f"Unknown backend: {slug}"})
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"code": "invalid_param",
-                                                       "message": "invalid JSON body",
-                                                       "status": 400})
-
-    query, user, conversation_id, response_mode = _dify_parse(body)
-    if not query:
-        return JSONResponse(status_code=400, content={"code": "invalid_param",
-                                                       "message": "query is required",
-                                                       "status": 400})
-
-    message_id = str(uuid.uuid4())
-    task_id = str(uuid.uuid4())
-    messages = [{"role": "user", "content": query}]
-
-    # Resolve any uploaded-file references (Dify sends them in body["files"])
-    files_meta = _resolve_file_refs(body, user)
-    if files_meta:
-        messages = _inject_file_refs(messages, files_meta)
-
-    logger.info("Dify [%s]: mode=%s, conv=%s, user=%s, q_chars=%d",
-                slug, response_mode, conversation_id, user, len(query))
-
-    # Build the sync generator that yields text deltas from the appropriate backend
-    if slug in HARNESSES:
-        def sync_iter():
-            yield from _stream_harness_events(messages, HARNESSES[slug], conversation_id, user)
-    else:
-        def sync_iter():
-            yield from _stream_runtime_events(messages, RUNTIMES[slug], conversation_id, user)
-
-    if response_mode == "blocking":
-        try:
-            answer = await run_in_threadpool(lambda: "".join(sync_iter()))
-            return _dify_blocking_body(answer, conversation_id, message_id, task_id)
-        except Exception as e:
-            logger.error("Dify blocking error [%s] (conv=%s): %s", slug, conversation_id, e)
-            return JSONResponse(status_code=502, content={"code": "runtime_error",
-                                                           "message": str(e),
-                                                           "status": 502})
-
-    return StreamingResponse(
-        _dify_sse(sync_iter(), conversation_id, message_id, task_id),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
-
-
-# ---------------------------------------------------------------------------
-# File uploads — OpenAI Files API compat + Dify /files/upload
-#
-# Both endpoints stream a multipart body to S3 under
+# The endpoint streams a multipart body to S3 under
 #     uploads/{actor_id}/{conversation_id}/{filename}
 # and return a file_id (= S3 key) that the client references in a later
 # chat message. The actor_id/user is the only trust boundary — the proxy
@@ -2071,49 +1570,4 @@ async def upload_file_openai(
         "created_at": int(time.time()),
         "filename": meta["filename"],
         "purpose": purpose,
-    }
-
-
-@app.post("/dify/{slug}/files/upload")
-async def upload_file_dify(
-    slug: str,
-    file: UploadFile = File(...),
-    user: str = Form(...),
-):
-    """Dify App API file upload.
-
-    Dify sends a separate multipart body with `file` and `user`. Returns the
-    Dify metadata schema so the UI can reference the file_id in a later
-    /chat-messages call.
-    """
-    if slug not in ALL_SLUGS:
-        return JSONResponse(status_code=404, content={"code": "not_found",
-                                                       "message": f"Unknown backend: {slug}",
-                                                       "status": 404})
-    # Dify passes conversation_id only in chat-messages, not in the upload call —
-    # use a per-upload uuid so the key is unique. Files are still gathered under
-    # the actor's prefix and lifecycled together.
-    conv = str(uuid.uuid4())
-    try:
-        data = await file.read()
-        meta = await run_in_threadpool(_put_upload, user, conv, file.filename or "unnamed", data)
-    except ValueError as e:
-        return JSONResponse(status_code=400, content={
-            "code": "invalid_param", "message": str(e), "status": 400,
-        })
-    except Exception as e:
-        logger.error("Dify upload failed for slug=%s user=%s: %s", slug, user, e)
-        return JSONResponse(status_code=502, content={
-            "code": "server_error", "message": str(e), "status": 502,
-        })
-    logger.info("Upload [dify/%s] actor=%s file=%s size=%d",
-                slug, user, meta["filename"], meta["size"])
-    return {
-        "id": meta["id"],
-        "name": meta["filename"],
-        "size": meta["size"],
-        "extension": meta["extension"],
-        "mime_type": meta["mime_type"],
-        "created_by": user,
-        "created_at": int(time.time()),
     }

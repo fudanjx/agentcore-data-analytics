@@ -1,5 +1,5 @@
 ---
-# ClusterIP — for DIFY pods within the same EKS cluster
+# ClusterIP — for private callers within the same EKS cluster
 apiVersion: v1
 kind: Service
 metadata:

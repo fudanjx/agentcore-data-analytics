@@ -6,8 +6,8 @@ Four deployable components:
 
 | Component | Where | Purpose |
 |---|---|---|
-| `agentcore-poc` container | AWS AgentCore Runtime (ap-southeast-1) | Claude Agent SDK agent with Gateway MCP + S3 Skills + Memory (path prefix `/poc`) |
-| `agentcore-proxy` container | EKS Fargate (`agentcore` namespace) | Proxy fronting all backends — OpenAI-compatible + Dify App API |
+| AgentCore Runtime containers | AWS AgentCore Runtime (ap-southeast-1) | Configured agents with Gateway MCP, skills, tools, and memory |
+| `agentcore-proxy` container | EKS Fargate (`agentcore` namespace) | OpenWebUI-only, OpenAI-compatible runtime router |
 | MCP Lambdas | Lambda in VPC | Gateway backends: `nuh-analytics-mcp`, `ah-analytics-mcp`, `timesfm-mcp` |
 | `ah-analytics-s3tables-mcp` Lambda | Lambda (no VPC) | Athena-backed MCP for `ah-analytics` S3 Tables |
 | `ah-analytics-s3tables-loader` Lambda | Lambda (container image) | S3-event-triggered: parquet → S3 Tables (Iceberg) |
@@ -15,15 +15,16 @@ Four deployable components:
 
 Plus AWS-console-managed infra (created once via console, referenced by the proxy):
 - AgentCore Gateways (4): `nuh-analytics-db`, `ah-analytics-db`, `ah-analytics-s3tables`, `timesfm-gateway`
-- AgentCore Harnesses (2): `harness_e52fs` (Strands, for OpenWebUI), `harness_dify` (Strands, for Dify)
-- AgentCore Memory: single shared instance keyed off harness_e52fs
+- AgentCore Runtimes: Strands, Insights Office, and GMIO PCR Dev
 - S3 Skills bucket: `s3://ah-data-analytics/skills/` — synced by the poc container on startup
 - RDS PostgreSQL with two databases: `nuh-analytics`, `ah-analytics`
 - S3 Tables bucket: `ah-analytics` (Iceberg, 6 tables mirroring `ah-analytics` RDS) — queried via Athena workgroup `ah-s3tables-wg`, federated Glue catalog `s3tablescatalog/ah-analytics`
 - S3 Uploads bucket: `agentcore-user-uploads-964340114883` — per-actor prefix `uploads/{actor_id}/{conversation_id}/{filename}`, 24-h lifecycle, read by the shared Code Interpreter sandbox
 - Code Interpreter sandbox: `agentcore_user_uploads_ci` — attached to both harnesses; pandas/openpyxl/pypdf/python-docx/python-pptx/matplotlib pre-installed
 
-Proxy exposes three backend slugs — `/poc`, `/harness`, `/dify` — each in two shapes: OpenAI (`/{slug}/v1/chat/completions`) and Dify App (`/dify/{slug}/v1/chat-messages`). File uploads on both surfaces: OpenAI `POST /v1/files` and Dify `POST /dify/{slug}/files/upload`.
+The proxy exposes `/strands`, `/insights-office`, and `/gmio-pcr-dev` through
+OpenAI-compatible OpenWebUI routes. `/insights` and root `/v1` are temporary
+Strands aliases. The separate `dify-proxy/` deployment owns Dify compatibility.
 
 ---
 
@@ -120,7 +121,8 @@ in-flight extraction jobs can create records during or after maintenance.
 ### Step 2 — Verify
 
 AWS Console → Bedrock → AgentCore → `agentcore_poc` → Test with a prompt.
-Or via the proxy: `curl -s http://<proxy-nlb>/poc/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"poc","messages":[{"role":"user","content":"list tables in nuh-analytics"}]}'`.
+Or verify model discovery through the proxy:
+`curl -s http://<proxy-nlb>/strands/v1/models`.
 
 Container logs (CloudWatch: `/aws/bedrock-agentcore/runtimes/agentcore_poc-*-DEFAULT`) should show on startup:
 ```
@@ -134,15 +136,18 @@ Gateway SigV4 proxy listening on 127.0.0.1:9000
 
 ## Part 2 — EKS Proxy
 
-The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore runtimes/harnesses.
-Runtime skill and tool lifecycle events are carried as private sideband SSE
-events. The Dify proxy validates these events and renders user-visible Markdown
-status lines containing only the skill/tool name and state; tool inputs and
-outputs are never forwarded to the user.
+The proxy speaks OpenAI-compatible HTTP and forwards to AgentCore Runtimes.
+Runtime skill/tool lifecycle events are carried as private sideband SSE events
+and become individual native OpenWebUI statuses. Tool inputs and outputs are
+never forwarded to the user.
 
 ### Step 1 — Prep IRSA (one-time)
 
-The role is `agentcore-proxy-irsa`; its trust policy uses the cluster's OIDC provider. Ensure its inline policy includes `bedrock-agentcore:InvokeAgentRuntime`, `InvokeAgentRuntimeForUser`, `InvokeHarness`, and `ListHarnesses`, plus S3/SecretsManager for ETL jobs. `ListHarnesses` lets the Dify proxy dynamically expose each READY harness at `/{harnessName}/v1`; it requires `Resource: "*"`. Use `Resource: "*"` for invocation as well — the IAM check uses endpoint ARN not runtime ARN.
+The role is `agentcore-proxy-irsa`; its trust policy uses the cluster's OIDC
+provider. Ensure its inline policy includes
+`bedrock-agentcore:InvokeAgentRuntime` and `InvokeAgentRuntimeForUser`, plus the
+metadata/tag-only S3 permissions used for file validation. Invocation requires
+the resource scope supported by the AgentCore Runtime API in this account.
 
 If recreating:
 ```bash
@@ -174,6 +179,7 @@ bash proxy/build_and_push.sh       # linux/amd64 (Fargate is amd64)
 ```bash
 kubectl apply -f proxy/k8s/namespace.yaml
 kubectl apply -f proxy/k8s/serviceaccount.yaml
+kubectl apply -f proxy/k8s/runtime-routes-configmap.yaml
 kubectl apply -f proxy/k8s/deployment.yaml
 kubectl apply -f proxy/k8s/service.yaml
 ```
@@ -185,36 +191,23 @@ kubectl get pods -n agentcore
 kubectl get svc -n agentcore
 
 # From within cluster:
-kubectl run test --rm -i --restart=Never --image=curlimages/curl -n dify \
-  -- curl -s http://agentcore-proxy.agentcore.svc.cluster.local/v1/models
+kubectl run test --rm -i --restart=Never --image=curlimages/curl -n agentcore \
+  -- curl -s http://agentcore-proxy.agentcore.svc.cluster.local/strands/v1/models
 ```
 
-### Step 6 — Configure frontends
+### Step 6 — Configure OpenWebUI
 
-Base URL pattern is `<host>/<slug>/v1` where `<slug>` is one of `poc`, `harness`, `dify`.
+The canonical base URLs are `<host>/strands/v1`,
+`<host>/insights-office/v1`, and `<host>/gmio-pcr-dev/v1`. Root `/v1` and
+`/insights/v1` are Strands compatibility aliases.
 
-**DIFY** (Model Provider → OpenAI-API-compatible, same cluster or via NLB):
-- Base URL: `http://agentcore-proxy.agentcore.svc.cluster.local/dify/v1` (dedicated `harness_dify` backend)
-- API Key: any value (proxy ignores it)
-- Model name: `dify` (or anything — passed through as label)
-- Completion mode: Chat, Streaming: on
-- **Do not** use `/dify/dify/v1` — Dify auto-appends `/chat/completions` to whatever you paste.
-
-*(Optional)* If you want to embed us as a Dify **App** rather than as a model provider, hit `POST /dify/dify/v1/chat-messages` directly — that endpoint speaks Dify's App Chat API with `event: message` / `event: message_end` SSE frames.
-
-**Local OpenWebUI** (Docker Desktop through the EC2 Tailscale relay):
-- Base URL: `http://100.79.116.60:18080/harness/v1`
 - Enable `ENABLE_FORWARD_USER_INFO_HEADERS=true`.
-- `/harness` requires `X-OpenWebUI-User-Id` and `X-OpenWebUI-Chat-Id`; missing identity fails closed with `identity_context_required`.
-- Proxy mapping: `actorId=openwebui:<user-id>` and `runtimeSessionId=owui-<user-id>-<chat-id>`.
-- Foreground requests send only the latest user turn because Harness persists chat history. Calls sharing that session are serialized by the single proxy replica.
-- OpenWebUI background tasks use a fresh `owui-bg-*` session, `actorId=openwebui-task:<user-id>`, and no chat file manifest.
-- `openwebui-local/start.sh` idempotently installs the global `agentcore_file_context` filter. It modifies only the AgentCore harness model.
-- Caddy listens only on the EC2 Tailscale address and has request access logging disabled.
-
-If the proxy is scaled above one replica, replace the in-process per-session
-lock with distributed session coordination before accepting concurrent
-foreground calls.
+- Every chat requires `X-OpenWebUI-User-Id` and `X-OpenWebUI-Chat-Id`.
+- Install the v0.10.2 `agentcore_file_context` filter for owner-scoped S3 files,
+  individual runtime statuses, and authenticated generated-file downloads.
+- Configure `AGENTCORE_PROXY_BASE_URL` to the private NLB origin without a slug.
+- Change agents by editing `runtime-routes-configmap.yaml`, applying it, and
+  restarting the Deployment. No image rebuild is required.
 
 ---
 
@@ -332,8 +325,8 @@ aws athena start-query-execution \
 
 ## Part 4c — File uploads + Code Interpreter analysis
 
-Lets a user drag a supported file into Dify or local OpenWebUI and have the
-harness invoke Code Interpreter conditionally when the prompt requires file
+Lets a user drag a supported file into OpenWebUI and have the selected runtime
+invoke Code Interpreter conditionally when the prompt requires file
 processing.
 
 ### 4c.1 Bootstrap (one-off)
@@ -346,8 +339,7 @@ Creates / ensures:
 - S3 bucket `agentcore-user-uploads-964340114883` with layout `uploads/{actor_id}/{conversation_id}/{filename}`, 24-h lifecycle rule, block public access
 - IAM role `agentcore-code-interpreter-role` (S3 GetObject on `uploads/*`)
 - Code Interpreter sandbox `agentcore_user_uploads_ci` (`networkMode=SANDBOX` — S3 only, no public internet)
-- Adds `agentcore_code_interpreter` tool to both `harness_e52fs` and `harness_dify` (existing tools preserved)
-- Grants each harness execution role `bedrock-agentcore:StartCodeInterpreterSession / Invoke*` on the CI ARN
+- Grants configured runtime/tool execution roles the required Code Interpreter actions
 - Grants `agentcore-proxy-irsa` `s3:PutObject` on the uploads bucket
 - Grants the proxy metadata/tag-only validation (prefix-restricted
   `ListBucket`, plus `GetObjectTagging`) on
@@ -359,15 +351,14 @@ Idempotent — re-run safe.
 ### 4c.2 Proxy endpoints
 
 - **OpenAI-compatible**: `POST /v1/files` — multipart `file` + `purpose` + `user` (actor id) + optional `conversation_id`. Returns `{id, object:"file", bytes, filename, purpose}` where `id` is the S3 key.
-- **Dify App API**: `POST /dify/{slug}/files/upload` — multipart `file` + `user`. Returns Dify's schema `{id, name, size, extension, mime_type, created_by, created_at}`.
-
-Both routes stream into `s3://agentcore-user-uploads-964340114883/uploads/{actor_id}/{conversation_id}/{filename}`. The proxy trusts `actor_id` (it authenticated the request) and inserts it into the S3 key.
+The compatibility upload route streams into
+`s3://agentcore-user-uploads-964340114883/uploads/{actor_id}/{conversation_id}/{filename}`.
 
 Allowed extensions: `csv, xlsx, xls, pdf, docx, pptx, txt, md, json`. Max size 50 MB. Bad extension → HTTP 400.
 
 ### 4c.3 Message-injection hook
 
-When a chat request (OpenAI or Dify) contains a `files[]` array referencing an upload id, the proxy:
+When an OpenAI-compatible chat request contains a `files[]` array referencing an upload id, the proxy:
 
 1. **Verifies each file's S3-key prefix matches the requester's `actor_id`** — a mismatch is silently dropped and logged as `Rejected file access: actor=X tried to reference file owned by Y`. Prevents cross-actor data leaks even if a file id is guessed or forged.
 2. Prepends a system-visible line to the user message so the agent knows the S3 URI:
@@ -377,13 +368,13 @@ When a chat request (OpenAI or Dify) contains a `files[]` array referencing an u
    <original user query>
    ```
 
-The harness's Code Interpreter tool downloads from S3 with its own execution role, runs the analysis, and streams the answer back.
+The runtime's Code Interpreter tool downloads from S3 with its own execution role, runs the analysis, and streams the answer back.
 
 ### 4c.4 Local OpenWebUI S3 handoff and isolation
 
 Run `openwebui-local/start.sh`. Its global filter gathers file ids from the
 current chat, resolves each with OpenWebUI's owner-scoped database method, and
-sends `agentcore_files` metadata only for the AgentCore harness request. Native
+sends `agentcore_files` metadata only for the AgentCore runtime request. Native
 RAG fields are removed from that request.
 
 The proxy validates every manifest entry against the allowlisted S3
@@ -397,41 +388,24 @@ Files remain available throughout the same chat while attached, with limits of
 50 MiB per file, 10 files, and 200 MiB combined. Another user—including a
 shared-chat viewer—cannot process the owner's files.
 
-The injected system context tells the harness to access only the validated
+The injected system context tells the runtime to access only the validated
 URIs, treat file content as untrusted data, invoke Code Interpreter only when
 needed, and avoid echoing raw S3 URIs unless requested.
 
 This is trusted-frontend POC isolation. Production must replace the plain
 identity headers with a signed, short-lived JWT and narrow the Code Interpreter
-role to object-scoped access. Dify compatibility remains a separate phase.
+role to object-scoped access. Dify compatibility remains in the independent
+`dify-proxy/` service.
 
 ### 4c.5 Verification
 
 ```bash
-# Health + upload round-trip
+# Health and configured routes
 kubectl -n agentcore port-forward svc/agentcore-proxy 8080:80 &
-curl -X POST http://localhost:8080/dify/harness/files/upload \
-  -F 'file=@sales.csv' -F 'user=alice-test'
-# → {"id":"uploads/alice-test/{uuid}/sales.csv", "name":..., "size":...}
-
-aws s3 ls s3://agentcore-user-uploads-964340114883/uploads/ --recursive
-# → 2026-07-18 11:47:21  63 uploads/alice-test/{uuid}/sales.csv
-
-# End-to-end analysis via the harness (Dify blocking mode)
-curl -X POST http://localhost:8080/dify/harness/v1/chat-messages \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "query":"Use the Code Interpreter to load the uploaded CSV, count rows, sum revenue.",
-    "user":"alice-test",
-    "conversation_id":"conv-<uuid-must-be-33+chars>",
-    "response_mode":"blocking",
-    "files":[{"type":"document","transfer_method":"local_file","upload_file_id":"<id-from-upload>"}]
-  }'
+curl -s http://localhost:8080/strands/v1/models | jq
+curl -s http://localhost:8080/insights-office/v1/models | jq
+curl -s http://localhost:8080/gmio-pcr-dev/v1/models | jq
 ```
-
-Expected: agent returns row count + revenue sum, showing the S3 path it downloaded from.
-
-Note: `runtimeSessionId` (= `conversation_id`) must be ≥ 33 characters — Dify's UI passes UUIDs which meet this; direct curl callers need to pad.
 
 ---
 
@@ -510,9 +484,12 @@ From Open WebUI, ask: *"Based on monthly admissions [100,105,...,145], forecast 
 
 ---
 
-## Part 6 — AgentCore Harnesses + Skills Bucket (AWS Console)
+## Part 6 — Legacy Harnesses + Skills Bucket (AWS Console)
 
-The two harnesses (`harness_e52fs`, `harness_dify`) and the shared memory instance are provisioned through the **AWS console**, not code. This is intentional — the console UI is the only interface that exposes all harness configuration knobs (memory strategies, gateway attachment, skills path, model choice, prompt library).
+This section documents the older Harness resources and the independent Dify
+deployment. Dify Harnesses are not routes in `agentcore-proxy`; the current
+Insights Office Harness is an OpenWebUI route configured through the backend
+ConfigMap.
 
 Steps for each harness:
 
@@ -537,7 +514,9 @@ aws s3 sync .claude/Skills/ s3://ah-data-analytics/skills/
 
 The runtime IAM role provisioned by `infra/deploy.py` already grants `s3:GetObject`/`ListBucket` on this bucket.
 
-After creating each harness, capture the ARN and add it to the proxy's `HARNESSES` dict in `proxy/server.py`, then redeploy the proxy. The proxy is the single place where slug→backend mapping lives; adding a new frontend is one line.
+After creating each Runtime, add its slug, display name, and Runtime ARN to
+`proxy/k8s/runtime-routes-configmap.yaml`, apply the ConfigMap, and roll the
+proxy Deployment. No proxy image rebuild is needed.
 
 ---
 
@@ -598,7 +577,7 @@ Masks phone numbers and street addresses in `emd`, `inpatient_movement`, and any
 | `mcp_lambda/handler.py` (both DBs use same handler) | `python3 mcp_lambda/deploy.py && python3 mcp_lambda/deploy_ah.py` |
 | `timesfm_service/server.py` | `bash timesfm_service/build_and_push.sh && kubectl rollout restart deployment/timesfm-service -n agentcore` |
 | `timesfm_mcp/handler.py` | `NLB_ENDPOINT=http://... python3 timesfm_mcp/deploy.py` |
-| Adding a new frontend/backend | Add a line to `RUNTIMES` or `HARNESSES` in `proxy/server.py`, rebuild + roll the proxy. All routes (`/{slug}/v1/...`, `/dify/{slug}/v1/chat-messages`) auto-mount |
+| Adding a new OpenWebUI agent | Add a ConfigMap registry entry, apply it, and roll the proxy; no image rebuild |
 | Adding Agent Skills to the poc runtime | `aws s3 sync .claude/Skills/ s3://ah-data-analytics/skills/` then restart the runtime (deploy.py or force new revision) |
 | Adding a new tool to a Gateway | Edit `TOOL_SCHEMA` in the deploy script and re-run — `create_gateway_target` is idempotent by name; delete first if updating an existing target |
 
@@ -619,12 +598,10 @@ All deploy scripts are idempotent.
 | `AccessDeniedException: no identity-based policy allows InvokeAgentRuntime` | Policy scoped to runtime ARN but check uses endpoint ARN | Use `Resource: "*"` |
 | Harness "Failed to load tool ... 403 Forbidden" | Harness execution role missing new gateway ARN | Add ARN to `AmazonBedrockAgentCoreHarnessGatewayPolicy_bd7bg` |
 | Harness "Tool name X already exists" | Two Gateway targets named identically | Rename target — tool names are `{target}___{tool}` |
-| Harness 502 "Connection was closed before valid response" | Cold-start disconnect | Proxy catches `ConnectionClosedError` and retries once (was catching wrong exception class before fix) |
-| Dify Model Provider validation "404 Not Found" | Wrong Base URL — Dify auto-appends `/chat/completions` | Set Base URL to `<host>/{slug}/v1`, NOT `<host>/dify/{slug}/v1` |
-| Dify "role failed to satisfy enum [user, assistant]" | Dify sends a `system` message but `invoke_harness` only accepts user/assistant | Fixed — proxy hoists system messages into the harness `systemPrompt` field |
+| Runtime 502 "Connection was closed before valid response" | Cold-start disconnect | Proxy retries once when no event has been sent |
+| Runtime route returns 404 | Slug is not configured | Update the Runtime ConfigMap and roll the proxy |
 | Harness "Skill path 'tree/main/.claude/Skills' not found" | Skills path in harness config is a GitHub URL fragment | Set to plain repo path like `.claude/Skills` |
 | Poc container: `actor=None, session=<random-uuid>` in logs | AgentCore Runtime dropped `runtimeUserId` header; body has no `user_id` | Ensure the caller passes `runtimeUserId` (boto3) or `user_id`/`chat_id` in the JSON body |
-| OpenWebUI cross-chat memory doesn't work on `/poc` | OpenWebUI backend strips `user_id` when calling external OpenAI providers | See REFLECTION.md finding 33 — currently TODO. Use `/harness` or `/dify` for OpenWebUI |
 | Container can't resolve `<gw-id>.gateway.bedrock-agentcore.<region>.amazonaws.com` | Missing VPC endpoint for the `.gateway` subdomain | Create `com.amazonaws.<region>.bedrock-agentcore.gateway` — different from the plain `bedrock-agentcore` endpoint |
 | MCP tool returns `An internal error occurred` on describe_table | `datetime`/`Decimal` not JSON-serialisable | Redeploy Lambda — handler round-trips through `json.dumps` with `_json_default` |
 | MCP tool "Missing 'tool' field" | Gateway sends args directly, not wrapped in `{tool, arguments}` | Handler infers tool from event shape |
@@ -644,10 +621,9 @@ All deploy scripts are idempotent.
 
 | Resource | ID / ARN |
 |---|---|
-| AgentCore poc runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/agentcore_poc-iumXW8638m` |
-| AgentCore harness (OpenWebUI) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_e52fs-Du2DM0RxvF` |
-| AgentCore harness (DIFY) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_dify-LViqrsm86E` |
-| Shared memory (both harnesses + poc) | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:memory/harness_harness_e52fs_8d3d-vtE3DJC9ia` |
+| Strands runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/Strands_runtime-mk6uFHBu9d` |
+| Insights Office harness | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U` |
+| GMIO PCR Dev runtime | `arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:runtime/gmio_pcr_dev-gSuIMZ4u60` |
 | S3 Skills bucket (poc runtime) | `s3://ah-data-analytics/skills/` |
 | Inference profile | `arn:aws:bedrock:us-east-1:964340114883:application-inference-profile/ji5jakx5lho3` |
 | RDS endpoint | `jinxin-postgres.cf7in3efovlt.ap-southeast-1.rds.amazonaws.com` |

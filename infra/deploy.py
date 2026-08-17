@@ -42,10 +42,6 @@ GATEWAY_CONFIGS = load_gateway_configs()
 GATEWAY_ARNS = [config.arn for config in GATEWAY_CONFIGS.values()]
 AGENTCORE_GATEWAYS_JSON = serialize_gateway_configs(GATEWAY_CONFIGS)
 
-# S3 skills bucket the agent reads on startup
-SKILLS_BUCKET = "ah-data-analytics"
-SKILLS_PREFIX = "skills/"
-
 # Managed Code Interpreter exposed to the Claude Agent SDK as an MCP tool.
 CODE_INTERPRETER_ID = os.environ.get(
     "CODE_INTERPRETER_ID",
@@ -116,15 +112,6 @@ def ensure_runtime_role() -> str:
                 "Resource": [
                     code_interpreter_arn,
                     f"{code_interpreter_arn}/*",
-                ],
-            },
-            {
-                # Read Agent Skills from S3 at container startup
-                "Effect": "Allow",
-                "Action": ["s3:GetObject", "s3:ListBucket"],
-                "Resource": [
-                    f"arn:aws:s3:::{SKILLS_BUCKET}",
-                    f"arn:aws:s3:::{SKILLS_BUCKET}/{SKILLS_PREFIX}*",
                 ],
             },
             {

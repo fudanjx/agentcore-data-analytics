@@ -55,7 +55,25 @@ volumes:
         self.assertIn("mem_limit: 900m", fragment)
         self.assertIn("openwebui-insights-964340114883", fragment)
         self.assertIn("/insights-office/v1", fragment)
-        self.assertIn('"insights-office"', fragment)
+        self.assertIn('"prefix_id":"agentcore-office"', fragment)
+        self.assertIn("/strands/v1", fragment)
+        self.assertIn("/gmio-pcr-dev/v1", fragment)
+        self.assertIn("AGENTCORE_PROXY_BASE_URL", fragment)
+
+    def test_proxy_runtime_registry_contains_only_approved_agents(self):
+        registry = (
+            ROOT / "proxy" / "k8s" / "runtime-routes-configmap.yaml"
+        ).read_text()
+        deployment = (ROOT / "proxy" / "k8s" / "deployment.yaml").read_text()
+
+        self.assertIn('"strands"', registry)
+        self.assertIn('"insights-office"', registry)
+        self.assertIn('"gmio-pcr-dev"', registry)
+        self.assertNotIn('"dify"', registry.lower())
+        self.assertIn("AGENTCORE_RUNTIME_ROUTES_JSON", deployment)
+        self.assertIn("agentcore-proxy-runtime-routes", deployment)
+        self.assertNotIn("DIFY_", deployment)
+        self.assertNotIn("INSIGHTS_OFFICE_HARNESS_ARN", deployment)
 
     def test_existing_insights_service_is_migrated_behind_upload_proxy(self):
         module = load_deploy_module()
@@ -96,7 +114,7 @@ volumes:
         self.assertIn("/api/v1/files/?process=true", smoke_test)
         self.assertIn("upload_processing=not_started", smoke_test)
 
-    def test_office_provider_update_is_idempotent(self):
+    def test_runtime_provider_update_is_idempotent(self):
         spec = importlib.util.spec_from_file_location(
             "insights_office_deploy_test", OFFICE_DEPLOY_PATH
         )
@@ -106,29 +124,43 @@ volumes:
             "services:\n"
             "  open-webui-insights:\n"
             "    environment:\n"
-            + module.OLD_BASE_URL
-            + module.OLD_KEYS
+            + module.OFFICE_BASE_URL
+            + module.OFFICE_KEYS
             + "      OPENAI_API_CONFIGS: >-\n"
-            + module.OLD_CONFIG
+            + module.OFFICE_CONFIG
         )
         with tempfile.TemporaryDirectory() as directory:
             compose = Path(directory) / "docker-compose.yml"
             compose.write_text(original)
             # Exercise pure replacement logic here; Docker validation belongs
             # to the EC2 deployment smoke path.
-            updated = module.replace_once_or_verify(
-                compose.read_text(), module.OLD_BASE_URL, module.NEW_BASE_URL, "base"
+            updated = module.replace_any_or_verify(
+                compose.read_text(),
+                (module.LEGACY_BASE_URL, module.OFFICE_BASE_URL),
+                module.RUNTIME_BASE_URLS,
+                "base",
             )
-            updated = module.replace_once_or_verify(
-                updated, module.OLD_KEYS, module.NEW_KEYS, "key"
+            updated = module.replace_any_or_verify(
+                updated,
+                (module.LEGACY_KEYS, module.OFFICE_KEYS),
+                module.RUNTIME_KEYS,
+                "key",
             )
-            updated = module.replace_once_or_verify(
-                updated, module.OLD_CONFIG, module.NEW_CONFIG, "config"
+            updated = module.replace_any_or_verify(
+                updated,
+                (module.LEGACY_CONFIG, module.OFFICE_CONFIG),
+                module.RUNTIME_CONFIG,
+                "config",
             )
+            self.assertIn("/strands/v1", updated)
             self.assertIn("/insights-office/v1", updated)
+            self.assertIn("/gmio-pcr-dev/v1", updated)
             self.assertEqual(
-                module.replace_once_or_verify(
-                    updated, module.OLD_BASE_URL, module.NEW_BASE_URL, "base"
+                module.replace_any_or_verify(
+                    updated,
+                    (module.LEGACY_BASE_URL, module.OFFICE_BASE_URL),
+                    module.RUNTIME_BASE_URLS,
+                    "base",
                 ),
                 updated,
             )

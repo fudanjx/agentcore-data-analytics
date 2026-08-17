@@ -18,7 +18,9 @@ docker compose up -d --no-deps open-webui-insights
 ```
 
 The service is memory-limited, bypasses local embedding and retrieval, disables
-Ollama, and uses the private AgentCore `/insights/v1` endpoint.
+Ollama, and uses the private `/strands/v1`, `/insights-office/v1`, and
+`/gmio-pcr-dev/v1` AgentCore endpoints. `/insights/v1` remains a temporary
+compatibility provider for existing chats.
 
 ### Upload processing bypass
 
@@ -41,12 +43,12 @@ re-applies `ENABLE_SIGNUP=true` and `DEFAULT_USER_ROLE=pending` from Compose.
 
 ## File and identity handoff
 
-The global `agentcore_file_context` filter applies only to
-`agentcore.insights`. It resolves files from the authenticated user's stored
-chat, rejects an inaccessible chat or file, and forwards the owned manifest to
-the private `/insights/v1` proxy route. The proxy independently validates the
-S3 bucket, prefix, object metadata, object tags, file id, and owner before
-calling AgentCore.
+The global `agentcore_file_context` filter applies to Strands, Insights Office,
+GMIO PCR Dev, and the temporary Insights alias. It resolves files from the
+authenticated user's stored chat, rejects an inaccessible chat or file, and
+forwards the owned manifest to the selected private proxy route. The proxy
+independently validates the S3 bucket, prefix, object metadata, object tags,
+file id, and owner before calling AgentCore.
 
 Foreground AgentCore identities use separate namespaces:
 
@@ -68,6 +70,16 @@ aws s3 cp "$S3_URI" "/tmp/$FILENAME" \
 
 It must not try public HTTP, an OpenWebUI API URL, or `pandas`/`s3fs` directly
 against the S3 URI.
+
+Each agent may generate CSV, DOCX, XLSX, PPTX, PDF, or HTML files under the
+current user/chat output prefix. The filter validates each candidate through
+`/{slug}/v1/artifacts/register`, creates an owner-scoped OpenWebUI File row,
+and renders `/api/v1/files/<id>/content?attachment=true`. HTML is therefore
+downloaded rather than executed in the OpenWebUI origin.
+
+Structured runtime tool events are emitted individually as transient native
+OpenWebUI statuses. The filter never displays tool arguments or raw results,
+and the final stream chunk closes any remaining status.
 
 ## Verification
 

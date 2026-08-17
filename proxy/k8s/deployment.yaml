@@ -18,7 +18,7 @@ spec:
       serviceAccountName: agentcore-proxy
       containers:
         - name: proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.0.7
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-proxy:v0.1.6
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -33,12 +33,11 @@ spec:
               value: agentcore-openwebui-insights-964340114883
             - name: INSIGHTS_UPLOADS_PREFIX
               value: openwebui-insights/
-            - name: DIFY_OFFICE_ARTIFACTS_BUCKET
-              value: ah-dify
-            - name: DIFY_OFFICE_ARTIFACTS_PREFIX
-              value: harness_dev/
-            - name: INSIGHTS_OFFICE_HARNESS_ARN
-              value: arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:harness/harness_insights_office-NXyYkHT02U
+            - name: AGENTCORE_RUNTIME_ROUTES_JSON
+              valueFrom:
+                configMapKeyRef:
+                  name: agentcore-proxy-runtime-routes
+                  key: routes.json
           resources:
             requests:
               cpu: 256m

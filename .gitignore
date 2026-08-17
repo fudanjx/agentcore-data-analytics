@@ -38,3 +38,4 @@ him_scripts/
 #Strands-runtime
 Strands-runtime/.bundle-build/
 Strands-runtime/dist/
+/tests/

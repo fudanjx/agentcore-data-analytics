@@ -1,14 +1,15 @@
 """
 title: AgentCore Chat File Context
 author: AgentCore POC
-version: 1.2.0
-description: Isolate OpenWebUI tasks and forward actor-owned chat files to AgentCore.
+version: 2.0.0
+description: Isolate OpenWebUI tasks, files, statuses, and artifacts for AgentCore.
 """
 
 import asyncio
 import base64
 import json
 import mimetypes
+import os
 import re
 import urllib.error
 import urllib.request
@@ -16,27 +17,27 @@ import uuid
 from typing import Any
 
 
-AGENTCORE_MODELS = {
-    "insights",
-    "agentcore.insights",
-    "insights-office",
-    "agentcore.insights-office",
-    "agentcore-office.insights-office",
+MODEL_SLUGS = {
+    "strands": "strands",
+    "agentcore-strands.strands": "strands",
+    "insights": "insights",
+    "agentcore.insights": "insights",
+    "insights-office": "insights-office",
+    "agentcore-office.insights-office": "insights-office",
+    "gmio-pcr-dev": "gmio-pcr-dev",
+    "agentcore-gmio.gmio-pcr-dev": "gmio-pcr-dev",
 }
-OFFICE_MODELS = {
-    "insights-office",
-    "agentcore.insights-office",
-    "agentcore-office.insights-office",
-}
-OFFICE_ARTIFACTS_URL = (
+AGENTCORE_MODELS = set(MODEL_SLUGS)
+AGENTCORE_PROXY_BASE_URL = os.environ.get(
+    "AGENTCORE_PROXY_BASE_URL",
     "http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb."
-    "elb.ap-southeast-1.amazonaws.com/insights-office/v1/artifacts/register"
-)
+    "elb.ap-southeast-1.amazonaws.com",
+).rstrip("/")
 _ARTIFACT_MARKER = re.compile(
     r"\s*<agentcore-artifacts>\s*(\[.*?\])\s*</agentcore-artifacts>\s*",
     re.DOTALL,
 )
-_STATUS_MARKER = re.compile(r"^<!--agentcore-status:(\{.*\})-->$")
+_STATUS_MARKER = re.compile(r"<!--agentcore-status:(\{.*?\})-->", re.DOTALL)
 _ARTIFACT_EVENT_MARKER = re.compile(
     r"^<!--agentcore-artifacts:([A-Za-z0-9_-]+={0,2})-->$"
 )
@@ -139,8 +140,10 @@ class Filter:
         __user__: dict | None = None,
         __metadata__: dict | None = None,
     ) -> dict:
-        """Turn Office-only proxy markers into status events and download links."""
-        if ((__body__ or {}).get("model")) not in OFFICE_MODELS:
+        """Turn AgentCore proxy markers into statuses and owned file links."""
+        model = ((__body__ or {}).get("model"))
+        slug = MODEL_SLUGS.get(model)
+        if not slug:
             return event
         try:
             choice = (event.get("choices") or [{}])[0]
@@ -160,22 +163,32 @@ class Filter:
                     )
                 return event
 
-            match = _STATUS_MARKER.match(content) if isinstance(content, str) else None
-            if match:
-                status = json.loads(match.group(1))
-                description = str(status.get("description") or "Working")[:120]
-                if __event_emitter__:
-                    await __event_emitter__(
-                        {
-                            "type": "status",
-                            "data": {
-                                "description": description,
-                                "done": bool(status.get("done")),
-                                "hidden": bool(status.get("hidden")),
-                            },
-                        }
-                    )
-                delta["content"] = ""
+            status_matches = (
+                list(_STATUS_MARKER.finditer(content))
+                if isinstance(content, str)
+                else []
+            )
+            if status_matches:
+                for match in status_matches:
+                    try:
+                        status = json.loads(match.group(1))
+                    except json.JSONDecodeError:
+                        continue
+                    description = str(status.get("description") or "Working")[:120]
+                    if __event_emitter__:
+                        await __event_emitter__(
+                            {
+                                "type": "status",
+                                "data": {
+                                    "description": description,
+                                    "done": bool(status.get("done")),
+                                    "hidden": bool(status.get("hidden")),
+                                },
+                            }
+                        )
+                # Strands may append status control markers to ordinary text in
+                # the same SSE delta. Always remove them from user-visible prose.
+                delta["content"] = _STATUS_MARKER.sub("", content)
                 return event
 
             if content == _ARTIFACT_EVENT_ERROR_MARKER:
@@ -208,13 +221,14 @@ class Filter:
                 user_id,
                 chat_id,
                 candidate_artifacts,
+                slug,
             )
             links = []
             for artifact in artifacts:
                 file_id = str(
                     uuid.uuid5(
                         uuid.NAMESPACE_URL,
-                        f"agentcore-office:{artifact['s3_uri']}",
+                        f"agentcore-artifact:{artifact['s3_uri']}",
                     )
                 )
                 await _ensure_openwebui_file(user_id, file_id, artifact)
@@ -239,7 +253,8 @@ class Filter:
 
     async def outlet(self, body: dict, __user__: dict) -> dict:
         """Replace validated artifact markers with authenticated file links."""
-        if body.get("model") not in OFFICE_MODELS:
+        slug = MODEL_SLUGS.get(body.get("model"))
+        if not slug:
             return body
         user_id = str((__user__ or {}).get("id") or "").strip()
         chat_id = str(body.get("chat_id") or "").strip()
@@ -252,24 +267,31 @@ class Filter:
             content = message.get("content")
             if not isinstance(content, str):
                 continue
-            match = _ARTIFACT_MARKER.search(content)
-            if not match:
+            xml_match = _ARTIFACT_MARKER.search(content)
+            opaque_match = _ARTIFACT_EVENT_MARKER.search(content)
+            if not xml_match and not opaque_match:
                 continue
             replacement = "\n\nGenerated file could not be made available. Please try again."
             try:
-                candidate_artifacts = json.loads(match.group(1))
+                if opaque_match:
+                    candidate_artifacts = json.loads(
+                        base64.urlsafe_b64decode(opaque_match.group(1)).decode("utf-8")
+                    )
+                else:
+                    candidate_artifacts = json.loads(xml_match.group(1))
                 artifacts = await asyncio.to_thread(
                     _validate_artifacts_with_proxy,
                     user_id,
                     chat_id,
                     candidate_artifacts,
+                    slug,
                 )
                 links = []
                 for artifact in artifacts:
                     file_id = str(
                         uuid.uuid5(
                             uuid.NAMESPACE_URL,
-                            f"agentcore-office:{artifact['s3_uri']}",
+                            f"agentcore-artifact:{artifact['s3_uri']}",
                         )
                     )
                     await _ensure_openwebui_file(user_id, file_id, artifact)
@@ -283,7 +305,8 @@ class Filter:
                 # Do not leave a raw S3 URI in the saved chat if registration
                 # or validation fails.
                 pass
-            message["content"] = _ARTIFACT_MARKER.sub(replacement, content, count=1)
+            marker = _ARTIFACT_EVENT_MARKER if opaque_match else _ARTIFACT_MARKER
+            message["content"] = marker.sub(replacement, content, count=1)
         return body
 
 
@@ -291,10 +314,11 @@ def _validate_artifacts_with_proxy(
     user_id: str,
     chat_id: str,
     artifacts: Any,
+    slug: str,
 ) -> list[dict]:
     payload = json.dumps({"artifacts": artifacts}).encode("utf-8")
     request = urllib.request.Request(
-        OFFICE_ARTIFACTS_URL,
+        f"{AGENTCORE_PROXY_BASE_URL}/{slug}/v1/artifacts/register",
         data=payload,
         method="POST",
         headers={
@@ -307,10 +331,10 @@ def _validate_artifacts_with_proxy(
         with urllib.request.urlopen(request, timeout=20) as response:
             result = json.loads(response.read())
     except (urllib.error.URLError, urllib.error.HTTPError, json.JSONDecodeError) as error:
-        raise RuntimeError("Office artifact validation failed") from error
+        raise RuntimeError("AgentCore artifact validation failed") from error
     validated = result.get("artifacts") if isinstance(result, dict) else None
     if not isinstance(validated, list) or not validated:
-        raise RuntimeError("Office artifact validation returned no artifacts")
+        raise RuntimeError("AgentCore artifact validation returned no artifacts")
     return validated
 
 
