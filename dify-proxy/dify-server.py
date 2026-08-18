@@ -136,7 +136,6 @@ _RUNTIME_INTERRUPTED_TEXT = (
 
 app = FastAPI(title="AgentCore Dify Proxy", version="1.1.0")
 
-_agentcore_client = None
 _agentcore_control_client = None
 _s3_client = None
 _runtime_discovery_lock = threading.Lock()
@@ -150,18 +149,17 @@ _session_locks_guard = threading.Lock()
 
 
 def get_agentcore_client():
-    global _agentcore_client
-    if _agentcore_client is None:
-        _agentcore_client = boto3.client(
-            "bedrock-agentcore",
-            region_name=REGION,
-            config=Config(
-                read_timeout=DIFY_RUNTIME_READ_TIMEOUT_SECONDS,
-                connect_timeout=10,
-                retries={"max_attempts": 0},
-            ),
-        )
-    return _agentcore_client
+    """Create an invocation client with a new HTTP connection pool."""
+    return boto3.client(
+        "bedrock-agentcore",
+        region_name=REGION,
+        config=Config(
+            read_timeout=DIFY_RUNTIME_READ_TIMEOUT_SECONDS,
+            connect_timeout=10,
+            # Do not automatically duplicate a stateful agent invocation.
+            retries={"max_attempts": 0},
+        ),
+    )
 
 
 def get_agentcore_control_client():

@@ -38,6 +38,26 @@ class FakeRuntimeClient:
         return {"response": FakeStreamingBody(self.lines)}
 
 
+def test_agentcore_invocation_client_is_not_cached():
+    first_client = object()
+    second_client = object()
+
+    with patch.object(
+        dify_server.boto3,
+        "client",
+        side_effect=[first_client, second_client],
+    ) as client_factory:
+        assert dify_server.get_agentcore_client() is first_client
+        assert dify_server.get_agentcore_client() is second_client
+
+    assert client_factory.call_count == 2
+    first_call = client_factory.call_args_list[0]
+    assert first_call.args == ("bedrock-agentcore",)
+    assert first_call.kwargs["region_name"] == dify_server.REGION
+    config = first_call.kwargs["config"]
+    assert config.retries["max_attempts"] == 0
+
+
 class FailingStreamingBody(FakeStreamingBody):
     def iter_lines(self):
         raise dify_server.botocore.exceptions.ResponseStreamingError(
