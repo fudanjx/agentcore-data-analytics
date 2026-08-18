@@ -207,3 +207,8 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -OutputPath .\dist\strands_agent_v0.0.5.zip `
     -Force
 ```
+git archive `
+    --format=zip `
+    --prefix=strands_agent/ `
+    --output=.\Strands-runtime\dist\strands_agent_v0.0.5.zip `
+    HEAD:Strands-runtime
