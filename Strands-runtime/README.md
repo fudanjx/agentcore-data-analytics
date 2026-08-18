@@ -184,7 +184,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_agentcore_bundle
   -OutputPath .\dist\strands_agent_bundle.zip
 ```
 
-Pass `-Force` to replace an existing output file. The script keeps the existing artifact until its replacement passes validation. It installs every exact requirement pin in a clean ARM64 container, verifies the package versions and runtime imports, and copies only the application files into the `strands_agent/` directory expected by AgentCore:
+Pass `-Force` to replace an existing output file. The script installs the requirements in a clean ARM64 container and copies only the application files into the `strands_agent/` directory expected by AgentCore. It does not run package, import, or ZIP-content validation:
 
 ```text
 strands_agent/main.py
@@ -207,8 +207,3 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -OutputPath .\dist\strands_agent_v0.0.5.zip `
     -Force
 ```
-git archive `
-    --format=zip `
-    --prefix=strands_agent/ `
-    --output=.\Strands-runtime\dist\strands_agent_v0.0.5.zip `
-    HEAD:Strands-runtime

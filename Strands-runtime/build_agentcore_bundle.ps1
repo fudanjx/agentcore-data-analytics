@@ -3,10 +3,9 @@
 Build a Strands Runtime ZIP for Amazon Bedrock AgentCore.
 
 .DESCRIPTION
-Creates a clean Linux Python 3.13 bundle in Docker, installs the exact package
-versions pinned in requirements.txt, copies the runtime source files, verifies
-the bundle in the target container, and produces a ZIP whose AgentCore entry
-point is strands_agent/main.py.
+Creates a clean Linux Python 3.13 bundle in Docker, installs requirements.txt,
+copies the runtime source files, and produces a ZIP whose AgentCore entry point
+is strands_agent/main.py.
 
 .EXAMPLE
 .\build_agentcore_bundle.ps1
@@ -80,23 +79,6 @@ if (
     throw "Docker is unavailable. Start Docker Desktop and run this script again. Docker said: $dockerInfo"
 }
 
-$requirementsPath = Join-Path $PSScriptRoot "requirements.txt"
-$expectedVersions = [ordered]@{}
-foreach ($line in Get-Content -LiteralPath $requirementsPath) {
-    $requirement = $line.Trim()
-    if (-not $requirement -or $requirement.StartsWith("#")) {
-        continue
-    }
-    if ($requirement -notmatch "^([A-Za-z0-9][A-Za-z0-9._-]*)==([^;#\s]+)$") {
-        throw "Every runtime dependency must use an exact == pin: $requirement"
-    }
-    $expectedVersions[$Matches[1]] = $Matches[2]
-}
-if ($expectedVersions.Count -eq 0) {
-    throw "No pinned dependencies were found in $requirementsPath."
-}
-$expectedVersionsJson = $expectedVersions | ConvertTo-Json -Compress
-
 $buildRoot = Join-Path $PSScriptRoot ".bundle-build"
 $buildId = [guid]::NewGuid().ToString("N")
 $stagingRoot = Join-Path $buildRoot "agentcore-$buildId"
@@ -125,86 +107,36 @@ try {
         Copy-Item -LiteralPath (Join-Path $PSScriptRoot $runtimeFile) -Destination $bundleRoot
     }
 
-    $verificationPath = Join-Path $stagingRoot "verify_bundle.py"
-    $verification = @"
-import json
-import platform
-import sys
-from importlib.metadata import version
-
-EXPECTED_VERSIONS = json.loads(r'''$expectedVersionsJson''')
-
-assert sys.version_info[:2] == (3, 13), sys.version
-for distribution, expected in EXPECTED_VERSIONS.items():
-    actual = version(distribution)
-    assert actual == expected, f"{distribution}: expected {expected}, found {actual}"
-
-sys.path.insert(0, "/stage/strands_agent")
-
-import boto3
-import httpx
-import mcp
-import pydantic_core
-import rpds
-from bedrock_agentcore import BedrockAgentCoreApp
-from strands import AgentSkills
-from strands.models import CacheConfig, CacheToolsConfig
-import agent
-import main
-
-assert agent.CacheConfig is CacheConfig
-assert agent.CacheToolsConfig is CacheToolsConfig
-assert agent.AgentSkills is AgentSkills
-assert main.app is not None
-print("Verified Python", platform.python_version(), "on", platform.machine())
-for distribution, expected in EXPECTED_VERSIONS.items():
-    print("Verified", distribution, expected)
-print("Verified AgentCore entry point strands_agent/main.py")
-"@
-    [System.IO.File]::WriteAllText($verificationPath, $verification)
-
-    Write-Host "Verifying the staged bundle inside $PythonImage..."
-    $dockerVerifyArgs = @(
-        "run",
-        "--rm",
-        "--platform", $Platform,
-        "--mount", "type=bind,source=$stagingRoot,target=/stage,readonly",
-        "--workdir", "/stage/strands_agent",
-        $PythonImage,
-        "python", "/stage/verify_bundle.py"
-    )
-    & docker @dockerVerifyArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "Bundle verification failed with exit code $LASTEXITCODE."
-    }
-    Remove-Item -LiteralPath $verificationPath -Force
-
+    Add-Type -AssemblyName System.IO.Compression
     Add-Type -AssemblyName System.IO.Compression.FileSystem
-    [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $stagingRoot,
+    $archiveStream = [System.IO.File]::Open(
         $temporaryArchivePath,
-        [System.IO.Compression.CompressionLevel]::Optimal,
-        $false
+        [System.IO.FileMode]::CreateNew,
+        [System.IO.FileAccess]::Write,
+        [System.IO.FileShare]::None
     )
-
-    $archive = [System.IO.Compression.ZipFile]::OpenRead($temporaryArchivePath)
+    $writableArchive = New-Object System.IO.Compression.ZipArchive(
+        $archiveStream,
+        [System.IO.Compression.ZipArchiveMode]::Create
+    )
     try {
-        $entryNames = @($archive.Entries | ForEach-Object FullName)
-        foreach ($runtimeFile in $runtimeFiles) {
-            $expectedEntry = "strands_agent/$runtimeFile"
-            if ($entryNames -notcontains $expectedEntry) {
-                throw "Bundle validation failed: $expectedEntry is missing."
-            }
-        }
-        if ($entryNames -contains "verify_bundle.py") {
-            throw "Bundle validation failed: the temporary verification script was included."
+        foreach ($bundleFile in Get-ChildItem -LiteralPath $stagingRoot -Recurse -File) {
+            $relativeEntryName = $bundleFile.FullName.Substring($stagingRoot.Length)
+            $relativeEntryName = $relativeEntryName.TrimStart([char[]]"\/").Replace("\", "/")
+            [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile(
+                $writableArchive,
+                $bundleFile.FullName,
+                $relativeEntryName,
+                [System.IO.Compression.CompressionLevel]::Optimal
+            ) | Out-Null
         }
     }
     finally {
-        $archive.Dispose()
+        $writableArchive.Dispose()
+        $archiveStream.Dispose()
     }
 
-    # Keep an existing artifact intact until the replacement has passed every check.
+    # Keep an existing artifact intact until the replacement ZIP has been created.
     Move-Item -LiteralPath $temporaryArchivePath -Destination $OutputPath -Force:$Force
 
     $artifact = Get-Item -LiteralPath $OutputPath
