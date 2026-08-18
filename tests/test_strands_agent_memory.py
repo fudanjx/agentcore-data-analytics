@@ -457,6 +457,32 @@ def test_stream_emits_heartbeat_while_waiting_for_strands(monkeypatch):
     assert asyncio.run(first_event()) == {"event": "heartbeat"}
 
 
+def test_heartbeat_wrapper_consumes_stream_in_one_task(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    monkeypatch.setattr(agent, "RUNTIME_STREAM_HEARTBEAT_SECONDS", 0.01)
+
+    producer_tasks = []
+
+    async def source_events():
+        for index in range(3):
+            producer_tasks.append(asyncio.current_task())
+            yield {"data": str(index)}
+            await asyncio.sleep(0)
+
+    async def collect():
+        return [
+            event
+            async for event in agent._events_with_heartbeats(source_events())
+        ]
+
+    assert asyncio.run(collect()) == [
+        {"data": "0"},
+        {"data": "1"},
+        {"data": "2"},
+    ]
+    assert len({id(task) for task in producer_tasks}) == 1
+
+
 def test_stream_emits_skill_input_and_full_result_details(monkeypatch):
     agent, _ = _load_agent_module(monkeypatch)
     monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", True)
