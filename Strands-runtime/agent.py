@@ -646,38 +646,80 @@ def _event_tool_results(event: dict[str, Any]) -> list[dict[str, Any]]:
 
 async def _events_with_heartbeats(events: AsyncIterator[dict]) -> AsyncIterator[dict]:
     """Keep the AgentCore response active while Strands awaits a model or tool."""
-    iterator = events.__aiter__()
-    pending = None
+    queue: asyncio.Queue[tuple[str, Any]] = asyncio.Queue(maxsize=1)
+
+    async def consume_events() -> None:
+        try:
+            async for event in events:
+                await queue.put(("event", event))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            await queue.put(("error", error))
+        else:
+            await queue.put(("done", None))
+
+    # Consume the complete Strands iterator in one task. Advancing the same
+    # async generator from a new task for each event breaks OpenTelemetry's
+    # ContextVar tokens and can prevent Strands from completing its stream.
+    producer = asyncio.create_task(consume_events())
+    pending_get = None
     try:
         while True:
-            pending = asyncio.create_task(iterator.__anext__())
-            while True:
-                done, _ = await asyncio.wait(
-                    {pending},
-                    timeout=RUNTIME_STREAM_HEARTBEAT_SECONDS,
-                )
-                if done:
-                    break
+            pending_get = asyncio.create_task(queue.get())
+            done, _ = await asyncio.wait(
+                {pending_get, producer},
+                timeout=RUNTIME_STREAM_HEARTBEAT_SECONDS,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if not done:
+                pending_get.cancel()
+                try:
+                    await pending_get
+                except asyncio.CancelledError:
+                    pass
+                pending_get = None
                 yield {"event": "heartbeat"}
-            try:
-                event = pending.result()
-            except StopAsyncIteration:
+                continue
+
+            if pending_get in done:
+                item_type, payload = pending_get.result()
+                pending_get = None
+            else:
+                # A cancelled or failed producer has no queue item to wake the
+                # consumer. Propagate it immediately instead of heartbeating
+                # forever. A normally completed producer always queues its
+                # terminal item, so wait for that already-scheduled delivery.
+                if producer.cancelled() or producer.exception() is not None:
+                    pending_get.cancel()
+                    try:
+                        await pending_get
+                    except asyncio.CancelledError:
+                        pass
+                    pending_get = None
+                    await producer
+                    return
+                item_type, payload = await pending_get
+                pending_get = None
+
+            if item_type == "done":
                 return
-            pending = None
-            yield event
+            if item_type == "error":
+                raise payload
+            yield payload
     finally:
-        if pending is not None:
-            if not pending.done():
-                pending.cancel()
+        if pending_get is not None and not pending_get.done():
+            pending_get.cancel()
             try:
-                await pending
-            except (asyncio.CancelledError, StopAsyncIteration):
+                await pending_get
+            except asyncio.CancelledError:
                 pass
-            except Exception:
-                logger.debug("Discarding event after stream cancellation", exc_info=True)
-        close = getattr(iterator, "aclose", None)
-        if close is not None:
-            await close()
+        if not producer.done():
+            producer.cancel()
+        try:
+            await producer
+        except asyncio.CancelledError:
+            pass
 
 
 async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
