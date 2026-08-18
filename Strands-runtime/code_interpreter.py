@@ -2,7 +2,6 @@
 
 import asyncio
 import hashlib
-import json
 import logging
 import os
 import re
@@ -12,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 import boto3
+import code_interpreter_result
 from botocore.config import Config
 from strands import tool
 
@@ -29,7 +29,38 @@ SESSION_TIMEOUT_SECONDS = min(
 MAX_RESULT_CHARS = max(
     1_000, int(os.environ.get("CODE_INTERPRETER_MAX_RESULT_CHARS", "200000"))
 )
+RESULT_MODE = os.environ.get("CODE_INTERPRETER_RESULT_MODE", "semantic").strip().lower()
+if RESULT_MODE not in {"semantic", "legacy"}:
+    raise ValueError("CODE_INTERPRETER_RESULT_MODE must be 'semantic' or 'legacy'")
+SEMANTIC_MAX_RESULT_CHARS = min(
+    20_000,
+    max(2_000, int(os.environ.get("CODE_INTERPRETER_SEMANTIC_MAX_CHARS", "10000"))),
+)
 _client = None
+
+
+SEMANTIC_RESULT_GUIDANCE = """
+## Code Interpreter result contract
+
+When you use Code Interpreter, keep bulk data, full logs, and generated file
+contents inside the sandbox or S3. Do not print full dataframes, raw SQL
+results, broad recursive listings, or long logs. Aggregate and calculate in
+the sandbox instead.
+
+For every successful code or shell task, print one final single-line marker:
+`AGENTCORE_RESULT_JSON=<JSON object>`. The JSON object must include boolean
+`ok` and a concise `summary`. It may include `row_count`, up to 20 `columns`,
+up to 20 scalar `metrics`, up to 30 `sample_rows` (each with up to 20 scalar
+fields), up to 20 `artifacts` (`s3_uri`, `filename`, `content_type`), and
+`warnings`. For failures, print the same marker with `ok: false`, a concise
+summary, and an actionable `error`. Put complete results in an artifact and
+return its metadata rather than embedding file content in the result.
+""".strip()
+
+
+def system_guidance() -> str:
+    """Return stable semantic-result instructions for the model prompt."""
+    return SEMANTIC_RESULT_GUIDANCE if RESULT_MODE == "semantic" else ""
 
 
 def get_client():
@@ -82,12 +113,6 @@ def stop_session(session_id: str) -> None:
         )
 
 
-def _json_default(value: Any):
-    if isinstance(value, (bytes, bytearray)):
-        return {"binaryBytes": len(value)}
-    return str(value)
-
-
 def _invoke_and_collect(session_id: str, name: str, arguments: dict) -> str:
     response = get_client().invoke_code_interpreter(
         codeInterpreterIdentifier=_require_identifier(),
@@ -95,11 +120,13 @@ def _invoke_and_collect(session_id: str, name: str, arguments: dict) -> str:
         name=name,
         arguments=arguments,
     )
-    events = [event.get("result", event) for event in response["stream"]]
-    rendered = json.dumps(events, default=_json_default, separators=(",", ":"))
-    if len(rendered) > MAX_RESULT_CHARS:
-        rendered = rendered[:MAX_RESULT_CHARS] + "\n[tool result truncated]"
-    return rendered
+    if RESULT_MODE == "legacy":
+        return code_interpreter_result.render_legacy_events(
+            response["stream"], MAX_RESULT_CHARS
+        )
+    return code_interpreter_result.render_semantic_events(
+        response["stream"], SEMANTIC_MAX_RESULT_CHARS
+    )
 
 
 async def _invoke_tool(session_id: str, name: str, arguments: dict) -> str:
@@ -107,26 +134,16 @@ async def _invoke_tool(session_id: str, name: str, arguments: dict) -> str:
         return await asyncio.to_thread(_invoke_and_collect, session_id, name, arguments)
     except Exception as error:
         logger.exception("Code Interpreter tool failed: %s", name)
+        if RESULT_MODE == "semantic":
+            return code_interpreter_result.render_runtime_error(
+                error, SEMANTIC_MAX_RESULT_CHARS
+            )
         return f"Code Interpreter {name} failed: {error}"
 
 
 def _tool_result_is_error(rendered: str) -> bool:
     """Return whether a rendered AgentCore tool response reports a failure."""
-    try:
-        results = json.loads(rendered)
-    except (TypeError, json.JSONDecodeError):
-        return True
-    if not isinstance(results, list) or not results:
-        return True
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        if result.get("isError") is True:
-            return True
-        structured = result.get("structuredContent")
-        if isinstance(structured, dict) and structured.get("exitCode") not in {None, 0}:
-            return True
-    return False
+    return code_interpreter_result.result_is_error(rendered)
 
 
 def _skill_resource_destination(skill_name: str, resource_path: str) -> str:
@@ -149,7 +166,10 @@ def build_tools(
         description=(
             "Execute code in managed AgentCore Code Interpreter. Use Python for "
             "uploaded-file analysis, calculations, transformation, statistics, "
-            "forecasting, machine learning, and chart generation."
+            "forecasting, machine learning, and chart generation. Return concise "
+            "aggregates and representative samples, not full datasets. End with "
+            "one AGENTCORE_RESULT_JSON marker containing ok, summary, and only "
+            "bounded optional metrics, sample rows, warnings, or artifact metadata."
         ),
     )
     async def execute_code(code: str, language: str = "python") -> str:
@@ -165,7 +185,9 @@ def build_tools(
         description=(
             "Execute a shell command in managed AgentCore Code Interpreter. Use this "
             "to download a request-provided S3 URI, inspect files, or upload a "
-            "generated artifact. Operate only on paths and S3 URIs from this request."
+            "generated artifact. Operate only on paths and S3 URIs from this request. "
+            "Avoid broad listings and long logs. End with one AGENTCORE_RESULT_JSON "
+            "marker containing a concise result, errors, and artifact metadata."
         ),
     )
     async def execute_command(command: str) -> str:

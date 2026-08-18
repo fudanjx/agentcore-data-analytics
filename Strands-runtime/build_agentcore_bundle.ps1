@@ -29,6 +29,7 @@ $ErrorActionPreference = "Stop"
 $runtimeFiles = @(
     "agent.py",
     "code_interpreter.py",
+    "code_interpreter_result.py",
     "gateway_config.py",
     "gateway_proxy.py",
     "main.py",
@@ -96,7 +97,7 @@ try {
         "--mount", "type=bind,source=$bundleRoot,target=/bundle",
         $PythonImage,
         "sh", "-lc",
-        "python -m pip install --disable-pip-version-check --no-cache-dir --target /bundle -r /src/requirements.txt"
+        "python -m pip install --disable-pip-version-check --no-cache-dir --no-compile --target /bundle -r /src/requirements.txt"
     )
     & docker @dockerInstallArgs
     if ($LASTEXITCODE -ne 0) {
