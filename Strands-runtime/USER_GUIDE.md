@@ -170,6 +170,10 @@ The following reference tables document the exact defaults and accepted values.
 | `AGENT_NAME` | `data-analyst` | Set the Strands agent's name, for example `gmio-pcr` |
 | `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Briefly describe the agent's role and available capabilities |
 | `PROMPT_CACHE_TTL` | `5m` | `5m` or `1h`; the model must support the selected TTL |
+| `MODEL_CONNECT_TIMEOUT_SECONDS` | `10` | Bedrock model connection timeout in seconds, constrained to 1-60 |
+| `MODEL_READ_TIMEOUT_SECONDS` | `900` | Bedrock model response read timeout in seconds, constrained to 60-900 |
+| `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Bedrock model retry attempts, constrained to 0-5 |
+| `RUNTIME_STREAM_HEARTBEAT_SECONDS` | `15` | Heartbeat interval while waiting for a model or tool, constrained to 5-300 seconds |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Use `true` to emit one content-free `MODEL_USAGE` record per invocation |
 | `MODEL_PRICING_LABEL` | Project pricing label | Set an auditable label for your chosen model and pricing basis |
 | `MODEL_INPUT_PRICE_PER_MTOK_USD` | `3.00` | Current uncached-input rate per million tokens |

@@ -3,6 +3,7 @@ import base64
 import importlib.util
 import json
 import pathlib
+import threading
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
@@ -18,9 +19,13 @@ SPEC.loader.exec_module(dify_server)
 class FakeStreamingBody:
     def __init__(self, lines):
         self.lines = lines
+        self.closed = False
 
     def iter_lines(self):
         return iter(self.lines)
+
+    def close(self):
+        self.closed = True
 
 
 class FakeRuntimeClient:
@@ -31,6 +36,28 @@ class FakeRuntimeClient:
     def invoke_agent_runtime(self, **kwargs):
         self.calls.append(kwargs)
         return {"response": FakeStreamingBody(self.lines)}
+
+
+class FailingStreamingBody(FakeStreamingBody):
+    def iter_lines(self):
+        raise dify_server.botocore.exceptions.ResponseStreamingError(
+            error=OSError("incomplete response")
+        )
+
+
+class BlockingStreamingBody(FakeStreamingBody):
+    def __init__(self):
+        super().__init__([])
+        self.release = threading.Event()
+
+    def iter_lines(self):
+        self.release.wait(timeout=2)
+        if not self.closed:
+            yield b"data: [DONE]"
+
+    def close(self):
+        super().close()
+        self.release.set()
 
 
 class FakePaginator:
@@ -284,6 +311,55 @@ class DifyRuntimeTests(unittest.TestCase):
             },
         )
 
+    def test_runtime_stream_does_not_replay_transport_failure(self):
+        body = FailingStreamingBody([])
+        client = FakeRuntimeClient([])
+        client.invoke_agent_runtime = lambda **kwargs: (
+            client.calls.append(kwargs) or {"response": body}
+        )
+
+        with patch.object(
+            dify_server,
+            "get_agentcore_client",
+            return_value=client,
+        ):
+            with self.assertRaises(
+                dify_server.botocore.exceptions.ResponseStreamingError
+            ):
+                list(
+                    dify_server._stream_runtime_events(
+                        [{"role": "user", "content": "hello"}],
+                        "arn:runtime",
+                        "session-id",
+                        "user-id",
+                    )
+                )
+
+        self.assertEqual(len(client.calls), 1)
+        self.assertTrue(body.closed)
+
+    def test_runtime_stream_emits_heartbeat_and_closes_upstream(self):
+        body = BlockingStreamingBody()
+        client = FakeRuntimeClient([])
+        client.invoke_agent_runtime = lambda **kwargs: (
+            client.calls.append(kwargs) or {"response": body}
+        )
+
+        with (
+            patch.object(dify_server, "get_agentcore_client", return_value=client),
+            patch.object(dify_server, "DIFY_RUNTIME_HEARTBEAT_SECONDS", 0.01),
+        ):
+            events = dify_server._stream_runtime_events(
+                [{"role": "user", "content": "hello"}],
+                "arn:runtime",
+                "session-id",
+                "user-id",
+            )
+            self.assertIsInstance(next(events), dify_server._RuntimeHeartbeat)
+            events.close()
+
+        self.assertTrue(body.closed)
+
     def test_artifact_stream_renders_runtime_status_as_visible_markdown(self):
         events = iter(
             [
@@ -384,6 +460,55 @@ class DifyRuntimeTests(unittest.TestCase):
                 "total_tokens": 7100,
             },
         )
+        self.assertTrue(response.endswith("data: [DONE]\n\n"))
+
+    def test_artifact_stream_heartbeat_is_valid_sse_comment(self):
+        events = iter([dify_server._RuntimeHeartbeat(), "Answer"])
+
+        with patch.object(dify_server, "_resolve_artifacts", return_value=[]):
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    events,
+                    "runtime",
+                    "session-id",
+                    "dev",
+                    "chatcmpl-test",
+                    ("user-id", "session-id", {}),
+                )
+            )
+
+        self.assertTrue(response.startswith(": keep-alive\n\n"))
+        self.assertTrue(response.endswith("data: [DONE]\n\n"))
+
+    def test_interrupted_stream_skips_artifacts_and_finishes_openai_stream(self):
+        def interrupted_events():
+            yield "Partial answer"
+            raise dify_server.botocore.exceptions.ResponseStreamingError(
+                error=OSError("incomplete response")
+            )
+
+        with patch.object(dify_server, "_resolve_artifacts") as resolve:
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    interrupted_events(),
+                    "runtime",
+                    "session-id",
+                    "dev",
+                    "chatcmpl-test",
+                    ("user-id", "session-id", {}),
+                )
+            )
+
+        resolve.assert_not_called()
+        self.assertIn("Partial answer", response)
+        self.assertIn("[stream interrupted]", response)
+        self.assertNotIn('data: {"error"', response)
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.splitlines()
+            if line.startswith("data: {")
+        ]
+        self.assertEqual(chunks[-1]["choices"][0]["finish_reason"], "stop")
         self.assertTrue(response.endswith("data: [DONE]\n\n"))
 
     def test_non_streaming_completion_dispatches_to_runtime(self):

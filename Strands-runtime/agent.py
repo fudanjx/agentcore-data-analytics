@@ -104,6 +104,9 @@ MODEL_CONNECT_TIMEOUT_SECONDS = _bounded_int_env(
 MODEL_RETRY_MAX_ATTEMPTS = _bounded_int_env(
     "MODEL_RETRY_MAX_ATTEMPTS", 2, 0, 5
 )
+RUNTIME_STREAM_HEARTBEAT_SECONDS = _bounded_int_env(
+    "RUNTIME_STREAM_HEARTBEAT_SECONDS", 15, 5, 300
+)
 
 
 @dataclass(frozen=True)
@@ -641,6 +644,42 @@ def _event_tool_results(event: dict[str, Any]) -> list[dict[str, Any]]:
     return results
 
 
+async def _events_with_heartbeats(events: AsyncIterator[dict]) -> AsyncIterator[dict]:
+    """Keep the AgentCore response active while Strands awaits a model or tool."""
+    iterator = events.__aiter__()
+    pending = None
+    try:
+        while True:
+            pending = asyncio.create_task(iterator.__anext__())
+            while True:
+                done, _ = await asyncio.wait(
+                    {pending},
+                    timeout=RUNTIME_STREAM_HEARTBEAT_SECONDS,
+                )
+                if done:
+                    break
+                yield {"event": "heartbeat"}
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                return
+            pending = None
+            yield event
+    finally:
+        if pending is not None:
+            if not pending.done():
+                pending.cancel()
+            try:
+                await pending
+            except (asyncio.CancelledError, StopAsyncIteration):
+                pass
+            except Exception:
+                logger.debug("Discarding event after stream cancellation", exc_info=True)
+        close = getattr(iterator, "aclose", None)
+        if close is not None:
+            await close()
+
+
 async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     """Stream OpenAI-compatible chunks for the existing Dify proxy."""
     started_at = time.perf_counter()
@@ -657,7 +696,12 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
         runtime_agent, interpreter_session, memory_session_manager, prompt = await asyncio.to_thread(
             _prepare, request
         )
-        async for event in runtime_agent.stream_async(prompt):
+        async for event in _events_with_heartbeats(
+            runtime_agent.stream_async(prompt)
+        ):
+            if event.get("event") == "heartbeat":
+                yield event
+                continue
             data = event.get("data")
             if isinstance(data, str) and data:
                 text_parts.append(data)
@@ -732,6 +776,12 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
             )
         active_steps.clear()
         succeeded = True
+    except asyncio.CancelledError:
+        logger.warning(
+            "Strands streaming invocation cancelled (session=%s)",
+            request.session_id,
+        )
+        raise
     except Exception as error:
         logger.exception("Strands streaming invocation failed")
         for tool_id, step_state in active_steps.items():

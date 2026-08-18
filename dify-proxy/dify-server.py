@@ -22,6 +22,7 @@ import json
 import logging
 import mimetypes
 import os
+import queue
 import re
 import threading
 import time
@@ -40,6 +41,28 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
+
+
+def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
+    value = int(os.environ.get(name, str(default)))
+    return min(maximum, max(minimum, value))
+
+
+# Keep the AgentCore socket open longer than the Runtime's normal 3600-second
+# idle-session window. Heartbeats below keep Dify-facing connections active;
+# they do not alter the upstream boto socket timeout.
+DIFY_RUNTIME_READ_TIMEOUT_SECONDS = _bounded_int_env(
+    "DIFY_RUNTIME_READ_TIMEOUT_SECONDS", 3900, 60, 28800
+)
+DIFY_RUNTIME_HEARTBEAT_SECONDS = _bounded_int_env(
+    "DIFY_RUNTIME_HEARTBEAT_SECONDS", 20, 5, 300
+)
+DIFY_ARTIFACT_CONNECT_TIMEOUT_SECONDS = _bounded_int_env(
+    "DIFY_ARTIFACT_CONNECT_TIMEOUT_SECONDS", 3, 1, 30
+)
+DIFY_ARTIFACT_READ_TIMEOUT_SECONDS = _bounded_int_env(
+    "DIFY_ARTIFACT_READ_TIMEOUT_SECONDS", 10, 1, 60
+)
 
 # READY runtimes discovered through the AgentCore control plane, keyed by
 # agentRuntimeName. Names beginning with ``agentcore_`` also receive a short
@@ -106,6 +129,10 @@ _ARTIFACT_END = "</agentcore-artifacts>"
 _ARTIFACT_ERROR_TEXT = (
     "\n\nGenerated file could not be made available. Please try again."
 )
+_RUNTIME_INTERRUPTED_TEXT = (
+    "\n\n[stream interrupted] The upstream agent stream ended before completion. "
+    "Please retry the request."
+)
 
 app = FastAPI(title="AgentCore Dify Proxy", version="1.1.0")
 
@@ -129,7 +156,7 @@ def get_agentcore_client():
             "bedrock-agentcore",
             region_name=REGION,
             config=Config(
-                read_timeout=15 * 60,
+                read_timeout=DIFY_RUNTIME_READ_TIMEOUT_SECONDS,
                 connect_timeout=10,
                 retries={"max_attempts": 0},
             ),
@@ -297,7 +324,15 @@ def get_dify_backend(slug: str) -> tuple[str, str] | None:
 def get_s3_client():
     global _s3_client
     if _s3_client is None:
-        _s3_client = boto3.client("s3", region_name=REGION)
+        _s3_client = boto3.client(
+            "s3",
+            region_name=REGION,
+            config=Config(
+                connect_timeout=DIFY_ARTIFACT_CONNECT_TIMEOUT_SECONDS,
+                read_timeout=DIFY_ARTIFACT_READ_TIMEOUT_SECONDS,
+                retries={"mode": "standard", "total_max_attempts": 1},
+            ),
+        )
     return _s3_client
 
 
@@ -579,6 +614,25 @@ class _RuntimeUsage:
         }
 
 
+class _RuntimeHeartbeat:
+    """Internal marker rendered as an SSE comment for downstream keepalive."""
+
+
+class _RuntimeStreamFailure:
+    __slots__ = ("error",)
+
+    def __init__(self, error: Exception):
+        self.error = error
+
+
+_RUNTIME_STREAM_DONE = object()
+_RUNTIME_TRANSPORT_ERRORS = (
+    botocore.exceptions.ConnectionClosedError,
+    botocore.exceptions.ReadTimeoutError,
+    botocore.exceptions.ResponseStreamingError,
+)
+
+
 class _BufferedRuntimeResult:
     __slots__ = ("agent_steps", "text", "usage")
 
@@ -641,14 +695,55 @@ def _stream_runtime_events(
     session_id: str,
     user_id: str,
 ):
-    """Yield text deltas from a Runtime's OpenAI-compatible SSE response."""
+    """Yield Runtime events and periodic keepalives without replaying requests."""
     kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
+    items: queue.Queue = queue.Queue(maxsize=256)
+    stop_requested = threading.Event()
+    state = {"body": None}
 
-    for attempt in range(2):
-        first_token_sent = False
+    def enqueue(item) -> bool:
+        while not stop_requested.is_set():
+            try:
+                items.put(item, timeout=0.25)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def put_event_items(event: dict) -> None:
+        if event.get("event") == "model_usage":
+            usage = _runtime_usage(event.get("usage") or event)
+            if usage is not None:
+                enqueue(usage)
+            return
+        if event.get("usage") is not None:
+            usage = _runtime_usage(event.get("usage"))
+            if usage is not None:
+                enqueue(usage)
+        if event.get("event") == "heartbeat":
+            enqueue(_RuntimeHeartbeat())
+            return
+        if event.get("event") == "agent_step":
+            status = _runtime_status(event.get("step"))
+            if status is not None:
+                enqueue(status)
+            return
+        choices = event.get("choices") or []
+        if not choices:
+            return
+        text = (choices[0].get("delta") or {}).get("content")
+        if text:
+            enqueue(text)
+
+    def read_response() -> None:
+        body = None
         try:
             response = get_agentcore_client().invoke_agent_runtime(**kwargs)
-            for raw_line in response["response"].iter_lines():
+            body = response["response"]
+            state["body"] = body
+            for raw_line in body.iter_lines():
+                if stop_requested.is_set():
+                    return
                 if not raw_line:
                     continue
                 line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
@@ -661,37 +756,48 @@ def _stream_runtime_events(
                     event = json.loads(payload)
                 except (TypeError, ValueError, json.JSONDecodeError):
                     continue
-                if event.get("event") == "model_usage":
-                    usage = _runtime_usage(event.get("usage") or event)
-                    if usage is not None:
-                        yield usage
-                    continue
-                if event.get("usage") is not None:
-                    usage = _runtime_usage(event.get("usage"))
-                    if usage is not None:
-                        yield usage
-                if event.get("event") == "agent_step":
-                    status = _runtime_status(event.get("step"))
-                    if status is not None:
-                        first_token_sent = True
-                        yield status
-                    continue
-                choices = event.get("choices") or []
-                if not choices:
-                    continue
-                text = (choices[0].get("delta") or {}).get("content")
-                if text:
-                    first_token_sent = True
-                    yield text
-            return
-        except botocore.exceptions.ConnectionClosedError:
-            if attempt == 0 and not first_token_sent:
-                logger.warning(
-                    "Runtime cold-start disconnect (session=%s), retrying",
-                    session_id,
-                )
+                if isinstance(event, dict):
+                    put_event_items(event)
+        except _RUNTIME_TRANSPORT_ERRORS as error:
+            enqueue(_RuntimeStreamFailure(error))
+        except Exception as error:
+            enqueue(_RuntimeStreamFailure(error))
+        finally:
+            if body is not None:
+                try:
+                    body.close()
+                except Exception:
+                    logger.debug("Unable to close Runtime response body", exc_info=True)
+            state["body"] = None
+            enqueue(_RUNTIME_STREAM_DONE)
+
+    reader = threading.Thread(
+        target=read_response,
+        name=f"agentcore-stream-{session_id[:8]}",
+        daemon=True,
+    )
+    reader.start()
+    try:
+        while True:
+            try:
+                item = items.get(timeout=DIFY_RUNTIME_HEARTBEAT_SECONDS)
+            except queue.Empty:
+                yield _RuntimeHeartbeat()
                 continue
-            raise
+            if item is _RUNTIME_STREAM_DONE:
+                return
+            if isinstance(item, _RuntimeStreamFailure):
+                raise item.error
+            yield item
+    finally:
+        stop_requested.set()
+        body = state.get("body")
+        if body is not None:
+            try:
+                body.close()
+            except Exception:
+                logger.debug("Unable to cancel Runtime response body", exc_info=True)
+        reader.join(timeout=1)
 
 
 def _invoke_runtime_buffered(
@@ -707,6 +813,8 @@ def _invoke_runtime_buffered(
     for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id):
         if isinstance(event, _RuntimeUsage):
             usage = event
+        elif isinstance(event, _RuntimeHeartbeat):
+            continue
         elif isinstance(event, _RuntimeStatus):
             agent_steps.append(event.as_dict())
             parts.append(_format_runtime_status(event))
@@ -1219,6 +1327,7 @@ def _sse_artifact_stream(
     sanitizer = _ArtifactStreamSanitizer()
     request_started_at = time.time()
     usage = None
+    stream_failed = False
 
     def stream_chunk(content: str, agent_step: dict | None = None) -> str:
         chunk = {
@@ -1245,6 +1354,9 @@ def _sse_artifact_stream(
             if isinstance(item, _RuntimeUsage):
                 usage = item
                 continue
+            if isinstance(item, _RuntimeHeartbeat):
+                yield ": keep-alive\n\n"
+                continue
             if isinstance(item, _RuntimeStatus):
                 yield stream_chunk(_format_runtime_status(item), item.as_dict())
                 continue
@@ -1258,32 +1370,29 @@ def _sse_artifact_stream(
             session_id,
             error,
         )
-        yield (
-            "data: "
-            + json.dumps(
-                {"error": {"message": str(error), "type": "stream_error"}}
-            )
-            + "\n\n"
-        )
+        stream_failed = True
+        usage = None
+        yield stream_chunk(_RUNTIME_INTERRUPTED_TEXT)
 
     sanitizer.finish()
-    try:
-        artifacts = _resolve_artifacts(
-            sanitizer,
-            artifact_context,
-            request_started_at,
-        )
-        if artifacts:
-            yield stream_chunk("\n" + _format_artifacts(artifacts, output_urls))
-        elif sanitizer.artifact_problem:
+    if not stream_failed:
+        try:
+            artifacts = _resolve_artifacts(
+                sanitizer,
+                artifact_context,
+                request_started_at,
+            )
+            if artifacts:
+                yield stream_chunk("\n" + _format_artifacts(artifacts, output_urls))
+            elif sanitizer.artifact_problem:
+                yield stream_chunk(_ARTIFACT_ERROR_TEXT)
+        except Exception as error:
+            logger.warning(
+                "Dify artifact stream delivery failed (session=%s): %s",
+                session_id,
+                _artifact_error_label(error),
+            )
             yield stream_chunk(_ARTIFACT_ERROR_TEXT)
-    except Exception as error:
-        logger.warning(
-            "Dify artifact stream delivery failed (session=%s): %s",
-            session_id,
-            _artifact_error_label(error),
-        )
-        yield stream_chunk(_ARTIFACT_ERROR_TEXT)
 
     final = {
         "id": completion_id,
@@ -1301,6 +1410,12 @@ def _sse_artifact_stream(
             "usage": usage.as_openai(),
         }
         yield f"data: {json.dumps(usage_chunk)}\n\n"
+    logger.info(
+        "Dify %s stream finalized (session=%s, interrupted=%s)",
+        backend_type,
+        session_id,
+        stream_failed,
+    )
     yield "data: [DONE]\n\n"
 
 

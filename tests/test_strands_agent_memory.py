@@ -380,6 +380,83 @@ def test_stream_emits_model_usage_before_final_chunk(monkeypatch):
     assert events[-1]["choices"][0]["finish_reason"] == "stop"
 
 
+def test_stream_logs_cancellation_and_reraises(monkeypatch, caplog):
+    agent, _ = _load_agent_module(monkeypatch)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(accumulated_usage={})
+
+        async def stream_async(self, _prompt):
+            if False:
+                yield None
+            raise asyncio.CancelledError("client disconnected")
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="cancelled-session",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+
+    async def collect():
+        return [event async for event in agent.stream(request)]
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(collect())
+
+    assert "Strands streaming invocation cancelled" in caplog.text
+    assert "cancelled-session" in caplog.text
+
+
+def test_stream_emits_heartbeat_while_waiting_for_strands(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+    monkeypatch.setattr(agent, "RUNTIME_STREAM_HEARTBEAT_SECONDS", 0.01)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(accumulated_usage={})
+
+        async def stream_async(self, _prompt):
+            await asyncio.Event().wait()
+            if False:
+                yield None
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="heartbeat-session",
+        model_slug="strands-data-analyst",
+        stream=True,
+    )
+
+    async def first_event():
+        events = agent.stream(request)
+        try:
+            return await events.__anext__()
+        finally:
+            await events.aclose()
+
+    assert asyncio.run(first_event()) == {"event": "heartbeat"}
+
+
 def test_stream_emits_skill_input_and_full_result_details(monkeypatch):
     agent, _ = _load_agent_module(monkeypatch)
     monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", True)

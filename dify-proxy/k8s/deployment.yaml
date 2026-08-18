@@ -25,6 +25,14 @@ spec:
           env:
             - name: AWS_DEFAULT_REGION
               value: ap-southeast-1
+            - name: DIFY_RUNTIME_READ_TIMEOUT_SECONDS
+              value: "3900"
+            - name: DIFY_RUNTIME_HEARTBEAT_SECONDS
+              value: "20"
+            - name: DIFY_ARTIFACT_CONNECT_TIMEOUT_SECONDS
+              value: "3"
+            - name: DIFY_ARTIFACT_READ_TIMEOUT_SECONDS
+              value: "10"
             - name: DIFY_OFFICE_ARTIFACTS_BUCKET
               value: ah-dify
             - name: DIFY_OFFICE_ARTIFACTS_PREFIX

@@ -71,6 +71,10 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `AGENT_NAME` | `data-analyst` | Name passed to the Strands agent |
 | `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Description passed to the Strands agent |
 | `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
+| `MODEL_CONNECT_TIMEOUT_SECONDS` | `10` | Bedrock model connection timeout, constrained to 1-60 seconds |
+| `MODEL_READ_TIMEOUT_SECONDS` | `900` | Bedrock model response read timeout, constrained to 60-900 seconds |
+| `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Maximum Bedrock model retry attempts, constrained to 0-5 |
+| `RUNTIME_STREAM_HEARTBEAT_SECONDS` | `15` | Emit a heartbeat sideband event while waiting for a model or tool, constrained to 5-300 seconds |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Emit one `MODEL_USAGE` JSON log after every invocation, without prompt or response content |
 | `MODEL_PRICING_LABEL` | `claude-sonnet-4.6-standard-2026-08` | Label included with estimated-cost logs so the configured rates can be audited |
 | `MODEL_INPUT_PRICE_PER_MTOK_USD` | `3.00` | Estimated uncached-input price in USD per million tokens |
@@ -180,7 +184,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\build_agentcore_bundle
   -OutputPath .\dist\strands_agent_bundle.zip
 ```
 
-Pass `-Force` to replace an existing output file. The script installs the pinned requirements in a clean ARM64 container, verifies the Strands and MCP imports, and copies every top-level file in this directory except the build script into the `strands_agent/` directory expected by AgentCore:
+Pass `-Force` to replace an existing output file. The script keeps the existing artifact until its replacement passes validation. It installs every exact requirement pin in a clean ARM64 container, verifies the package versions and runtime imports, and copies only the application files into the `strands_agent/` directory expected by AgentCore:
 
 ```text
 strands_agent/main.py
@@ -191,15 +195,15 @@ strands_agent/gateway_proxy.py
 strands_agent/memory.py
 strands_agent/skills_sync.py
 strands_agent/system_prompt.py
-strands_agent/six.py
-strands_agent/typing_extensions.py
 strands_agent/requirements.txt
-strands_agent/README.md
-strands_agent/USER_GUIDE.md
-strands_agent/.gitignore
 strands_agent/<freshly installed dependencies>
 ```
 
+For a versioned release artifact:
+
+```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.0.5.zip
+    -OutputPath .\dist\strands_agent_v0.0.5.zip `
+    -Force
+```
