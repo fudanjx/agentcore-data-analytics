@@ -546,8 +546,10 @@ def _stream_harness_events(
     with _serialized_harness_session(session_id):
         for attempt in range(2):
             first_token_sent = False
+            client = None
             try:
-                response = get_agentcore_client().invoke_harness(**kwargs)
+                client = get_agentcore_client()
+                response = client.invoke_harness(**kwargs)
                 for event in response.get("stream", []):
                     delta = event.get("contentBlockDelta", {}).get("delta", {})
                     text = delta.get("text")
@@ -570,6 +572,15 @@ def _stream_harness_events(
                     )
                     continue
                 raise
+            finally:
+                if client is not None:
+                    try:
+                        client.close()
+                    except Exception:
+                        logger.debug(
+                            "Unable to close Harness invocation client",
+                            exc_info=True,
+                        )
 
 
 def _runtime_kwargs(
@@ -735,8 +746,10 @@ def _stream_runtime_events(
 
     def read_response() -> None:
         body = None
+        client = None
         try:
-            response = get_agentcore_client().invoke_agent_runtime(**kwargs)
+            client = get_agentcore_client()
+            response = client.invoke_agent_runtime(**kwargs)
             body = response["response"]
             state["body"] = body
             for raw_line in body.iter_lines():
@@ -766,6 +779,14 @@ def _stream_runtime_events(
                     body.close()
                 except Exception:
                     logger.debug("Unable to close Runtime response body", exc_info=True)
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug(
+                        "Unable to close Runtime invocation client",
+                        exc_info=True,
+                    )
             state["body"] = None
             enqueue(_RUNTIME_STREAM_DONE)
 

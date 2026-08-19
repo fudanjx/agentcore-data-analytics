@@ -32,10 +32,14 @@ class FakeRuntimeClient:
     def __init__(self, lines):
         self.lines = lines
         self.calls = []
+        self.closed = False
 
     def invoke_agent_runtime(self, **kwargs):
         self.calls.append(kwargs)
         return {"response": FakeStreamingBody(self.lines)}
+
+    def close(self):
+        self.closed = True
 
 
 def test_agentcore_invocation_client_is_not_cached():
@@ -250,6 +254,7 @@ class DifyRuntimeTests(unittest.TestCase):
 
         self.assertEqual(text, "Hello world")
         self.assertEqual(len(client.calls), 1)
+        self.assertTrue(client.closed)
 
     def test_runtime_stream_extracts_sanitized_agent_status_events(self):
         client = FakeRuntimeClient(
@@ -357,6 +362,7 @@ class DifyRuntimeTests(unittest.TestCase):
 
         self.assertEqual(len(client.calls), 1)
         self.assertTrue(body.closed)
+        self.assertTrue(client.closed)
 
     def test_runtime_stream_emits_heartbeat_and_closes_upstream(self):
         body = BlockingStreamingBody()
@@ -379,6 +385,7 @@ class DifyRuntimeTests(unittest.TestCase):
             events.close()
 
         self.assertTrue(body.closed)
+        self.assertTrue(client.closed)
 
     def test_artifact_stream_renders_runtime_status_as_visible_markdown(self):
         events = iter(
