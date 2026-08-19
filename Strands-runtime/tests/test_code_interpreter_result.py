@@ -162,6 +162,57 @@ class SemanticResultTests(unittest.TestCase):
         self.assertEqual(len(parsed), 2)
         self.assertTrue(result_contract.result_is_error(rendered))
 
+    def test_result_metadata_is_useful_without_retaining_contract_values(self) -> None:
+        summary = "Patient-level detail must never enter logs."
+        s3_uri = "s3://private-bucket/outputs/secret-report.html"
+        rendered = result_contract.render_semantic_events(
+            [
+                _event(
+                    "AGENTCORE_RESULT_JSON="
+                    + json.dumps(
+                        {
+                            "ok": True,
+                            "summary": summary,
+                            "columns": ["patient_id", "visit_count"],
+                            "metrics": {"patients": 3},
+                            "sample_rows": [{"patient_id": "P123", "visit_count": 2}],
+                            "artifacts": [{"s3_uri": s3_uri, "filename": "secret-report.html"}],
+                            "warnings": ["sensitive warning"],
+                        }
+                    )
+                )
+            ]
+        )
+
+        metadata = result_contract.result_metadata(
+            rendered, mode="semantic", max_chars=10_000
+        )
+        serialized = json.dumps(metadata)
+
+        self.assertEqual(metadata["source"], "declared")
+        self.assertTrue(metadata["ok"])
+        self.assertEqual(metadata["column_count"], 2)
+        self.assertEqual(metadata["metric_count"], 1)
+        self.assertEqual(metadata["sample_row_count"], 1)
+        self.assertEqual(metadata["artifact_count"], 1)
+        self.assertNotIn(summary, serialized)
+        self.assertNotIn(s3_uri, serialized)
+        self.assertNotIn("P123", serialized)
+
+    def test_legacy_result_metadata_does_not_retain_event_content(self) -> None:
+        rendered = result_contract.render_legacy_events(
+            [_event("private raw output")], max_chars=10_000
+        )
+
+        metadata = result_contract.result_metadata(
+            rendered, mode="legacy", max_chars=10_000
+        )
+
+        self.assertEqual(metadata["source"], "legacy")
+        self.assertTrue(metadata["ok"])
+        self.assertEqual(metadata["event_count"], 1)
+        self.assertNotIn("private raw output", json.dumps(metadata))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -2,10 +2,12 @@
 
 import asyncio
 import hashlib
+import json
 import logging
 import os
 import re
 import shlex
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -129,16 +131,43 @@ def _invoke_and_collect(session_id: str, name: str, arguments: dict) -> str:
     )
 
 
+def _log_result(name: str, rendered: str, duration_ms: int) -> None:
+    """Log model-facing result shape without emitting customer data."""
+    max_chars = (
+        MAX_RESULT_CHARS if RESULT_MODE == "legacy" else SEMANTIC_MAX_RESULT_CHARS
+    )
+    payload = code_interpreter_result.result_metadata(
+        rendered,
+        mode=RESULT_MODE,
+        max_chars=max_chars,
+    )
+    payload.update({"tool": name, "duration_ms": duration_ms})
+    logger.info(
+        "CODE_INTERPRETER_RESULT %s",
+        json.dumps(payload, separators=(",", ":")),
+    )
+
+
 async def _invoke_tool(session_id: str, name: str, arguments: dict) -> str:
+    started_at = time.perf_counter()
     try:
-        return await asyncio.to_thread(_invoke_and_collect, session_id, name, arguments)
+        rendered = await asyncio.to_thread(
+            _invoke_and_collect, session_id, name, arguments
+        )
     except Exception as error:
         logger.exception("Code Interpreter tool failed: %s", name)
         if RESULT_MODE == "semantic":
-            return code_interpreter_result.render_runtime_error(
+            rendered = code_interpreter_result.render_runtime_error(
                 error, SEMANTIC_MAX_RESULT_CHARS
             )
-        return f"Code Interpreter {name} failed: {error}"
+        else:
+            rendered = f"Code Interpreter {name} failed: {error}"
+    _log_result(
+        name,
+        rendered,
+        round((time.perf_counter() - started_at) * 1000),
+    )
+    return rendered
 
 
 def _tool_result_is_error(rendered: str) -> bool:

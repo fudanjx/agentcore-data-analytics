@@ -364,6 +364,120 @@ def render_runtime_error(error: Exception | str, max_chars: int = 10_000) -> str
     )
 
 
+def result_metadata(
+    rendered: str,
+    *,
+    mode: str,
+    max_chars: int,
+) -> dict[str, Any]:
+    """Return privacy-safe shape metadata for the exact model-facing result.
+
+    The returned object deliberately excludes all result values: code, stdout,
+    stderr, summaries, sample values, error text, S3 locations, and filenames.
+    It is intended for Runtime logs only, so operators can measure whether the
+    semantic contract is being followed without copying customer data into
+    CloudWatch.
+    """
+    metadata: dict[str, Any] = {
+        "event": "code_interpreter_result",
+        "mode": mode,
+        "result_chars": len(rendered),
+        "max_result_chars": max(0, int(max_chars)),
+        "within_configured_limit": len(rendered) <= max(0, int(max_chars)),
+    }
+    try:
+        payload = json.loads(rendered)
+    except (TypeError, json.JSONDecodeError):
+        metadata.update(
+            {
+                "source": "legacy_error" if mode == "legacy" else "unparseable",
+                "ok": False,
+                "payload_type": "text",
+            }
+        )
+        return metadata
+
+    if isinstance(payload, list):
+        metadata.update(
+            {
+                "source": "legacy",
+                "ok": not result_is_error(rendered),
+                "payload_type": "event_list",
+                "event_count": len(payload),
+            }
+        )
+        return metadata
+
+    if not isinstance(payload, dict):
+        metadata.update(
+            {
+                "source": "unparseable",
+                "ok": False,
+                "payload_type": type(payload).__name__,
+            }
+        )
+        return metadata
+
+    rows = payload.get("sample_rows")
+    row_field_counts = (
+        [len(row) for row in rows if isinstance(row, dict)]
+        if isinstance(rows, list)
+        else []
+    )
+    metadata.update(
+        {
+            "source": (
+                payload.get("source")
+                if isinstance(payload.get("source"), str)
+                else "unknown"
+            ),
+            "ok": payload.get("ok") if isinstance(payload.get("ok"), bool) else False,
+            "payload_type": "contract",
+            "contract_version": (
+                payload.get("contract_version")
+                if isinstance(payload.get("contract_version"), int)
+                else None
+            ),
+            "contract_field_count": len(payload),
+            "summary_chars": (
+                len(payload.get("summary", ""))
+                if isinstance(payload.get("summary"), str)
+                else 0
+            ),
+            "column_count": (
+                len(payload.get("columns", []))
+                if isinstance(payload.get("columns"), list)
+                else 0
+            ),
+            "metric_count": (
+                len(payload.get("metrics", {}))
+                if isinstance(payload.get("metrics"), dict)
+                else 0
+            ),
+            "sample_row_count": len(rows) if isinstance(rows, list) else 0,
+            "max_sample_row_field_count": max(row_field_counts, default=0),
+            "artifact_count": (
+                len(payload.get("artifacts", []))
+                if isinstance(payload.get("artifacts"), list)
+                else 0
+            ),
+            "warning_count": (
+                len(payload.get("warnings", []))
+                if isinstance(payload.get("warnings"), list)
+                else 0
+            ),
+            "has_row_count": "row_count" in payload,
+            "has_error": isinstance(payload.get("error"), str),
+            "has_stdout_preview": isinstance(payload.get("stdout_preview"), str),
+            "has_exit_code": (
+                isinstance(payload.get("exit_code"), int)
+                and not isinstance(payload.get("exit_code"), bool)
+            ),
+        }
+    )
+    return metadata
+
+
 def result_is_error(rendered: str) -> bool:
     """Recognize failures in either semantic object or legacy event-list output."""
     try:

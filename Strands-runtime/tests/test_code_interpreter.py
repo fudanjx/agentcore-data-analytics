@@ -83,6 +83,54 @@ class CodeInterpreterWrapperTests(unittest.TestCase):
         self.assertEqual(payload["source"], "runtime_error")
         self.assertIn("connection failed", payload["error"])
 
+    def test_semantic_call_emits_safe_contract_shape_log(self) -> None:
+        self.module.RESULT_MODE = "semantic"
+        self.module.SEMANTIC_MAX_RESULT_CHARS = 10_000
+        sensitive_summary = "Do not log this patient-specific result."
+        self.module.get_client = lambda: _FakeClient(
+            [
+                {
+                    "result": {
+                        "content": [
+                            {
+                                "text": "AGENTCORE_RESULT_JSON="
+                                + json.dumps(
+                                    {
+                                        "ok": True,
+                                        "summary": sensitive_summary,
+                                        "artifacts": [
+                                            {
+                                                "s3_uri": "s3://private/report.html",
+                                                "filename": "report.html",
+                                            }
+                                        ],
+                                    }
+                                )
+                            }
+                        ]
+                    }
+                }
+            ]
+        )
+
+        with self.assertLogs("code_interpreter", level="INFO") as captured:
+            rendered = asyncio.run(self.module._invoke_tool("session", "executeCode", {}))
+
+        record = next(
+            message
+            for message in captured.output
+            if "CODE_INTERPRETER_RESULT" in message
+        )
+        payload = json.loads(record.split("CODE_INTERPRETER_RESULT ", 1)[1])
+        self.assertEqual(json.loads(rendered)["source"], "declared")
+        self.assertEqual(payload["tool"], "executeCode")
+        self.assertEqual(payload["source"], "declared")
+        self.assertTrue(payload["ok"])
+        self.assertEqual(payload["artifact_count"], 1)
+        self.assertGreaterEqual(payload["duration_ms"], 0)
+        self.assertNotIn(sensitive_summary, record)
+        self.assertNotIn("s3://private/report.html", record)
+
     def test_semantic_success_and_failure_are_both_detected(self) -> None:
         self.assertFalse(
             self.module._tool_result_is_error(

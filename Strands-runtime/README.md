@@ -133,6 +133,22 @@ fallback containing success or failure state and a bounded stdout/error preview.
 Set `CODE_INTERPRETER_RESULT_MODE=legacy` only as a temporary emergency fallback;
 that mode restores raw event JSON and uses `CODE_INTERPRETER_MAX_RESULT_CHARS`.
 
+Every interpreter call also emits one `CODE_INTERPRETER_RESULT` CloudWatch record.
+It records only metadata about the exact result supplied to the model: tool name,
+duration, result size and configured limit, semantic source and success state, and
+counts of columns, metrics, sample rows, artifacts, warnings, and contract fields.
+It never logs code, stdout/stderr, summaries, sample values, error text, S3 URIs,
+or filenames. Query it with:
+
+```text
+fields @timestamp, @message
+| filter @message like /CODE_INTERPRETER_RESULT/
+| parse @message /"tool":"(?<tool>[^"]+)".*"duration_ms":(?<duration_ms>\d+)/
+| parse @message /"result_chars":(?<result_chars>\d+).*"source":"(?<source>[^"]+)/
+| sort @timestamp desc
+| display @timestamp, tool, source, duration_ms, result_chars
+```
+
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 
 Example CloudWatch Logs Insights query:
