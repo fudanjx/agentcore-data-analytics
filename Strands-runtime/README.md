@@ -50,7 +50,8 @@ The blocking response is:
 {
   "result": "...",
   "session_id": "conversation-000000000000000000001",
-  "model": "strands-data-analyst"
+  "model": "strands-data-analyst",
+  "model_usage": {"event": "model_usage", "total_input_tokens": 123, "output_tokens": 45}
 }
 ```
 
@@ -58,7 +59,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 
 The Dify proxy exposes each step as an `agent_step` OpenAI response extension and embeds the same JSON as a base64-encoded `<!--agentcore-step:...-->` content marker, because Dify's model-provider layer otherwise retains only text. A frontend can remove the marker, decode it as UTF-8 JSON, and decide whether to hide, summarize, or expand the details. The visible Markdown status line is retained for clients that do not parse markers.
 
-The proxy converts `model_usage` into an OpenAI usage chunk so Dify can persist aggregate prompt and completion tokens. Cache-read, cache-write, and estimated-cost details remain in the Runtime's `MODEL_USAGE` CloudWatch record because Dify's standard message schema only supports aggregate token counts. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
+The proxy stores the complete `model_usage` record in PostgreSQL and converts it into an OpenAI usage chunk containing only aggregate prompt, completion, and total tokens for Dify compatibility. CloudWatch logging remains available as an independent record. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
 
 The Dify proxy independently limits accepted serialized step details with `RUNTIME_STEP_DETAIL_MAX_CHARS` (default `500000`, constrained to 1,000-1,000,000). Keep that value at least as large as twice `TOOL_DETAIL_MAX_CHARS` when both a maximum-size input and result must fit in one completed step.
 

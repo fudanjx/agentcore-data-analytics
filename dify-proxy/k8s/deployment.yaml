@@ -37,6 +37,8 @@ spec:
               value: ah-dify
             - name: DIFY_OFFICE_ARTIFACTS_PREFIX
               value: harness_dev/
+            - name: MODEL_USAGE_DATABASE_URL
+              value: "postgresql://postgres:ahdsa@k8s-dify-difypost-c3b810c02f-4f45659eb43387cd.elb.ap-southeast-1.amazonaws.com:5432/nuhs?sslmode=disable&connect_timeout=5"
           resources:
             requests:
               cpu: 256m

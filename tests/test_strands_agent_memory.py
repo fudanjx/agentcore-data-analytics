@@ -334,6 +334,48 @@ def test_model_usage_payload_separates_cache_tokens_and_estimates_cost(monkeypat
     assert payload["succeeded"] is True
 
 
+def test_blocking_response_includes_model_usage(monkeypatch):
+    agent, _ = _load_agent_module(monkeypatch)
+
+    class FakeAgent:
+        event_loop_metrics = types.SimpleNamespace(
+            accumulated_usage={
+                "inputTokens": 1000,
+                "outputTokens": 100,
+                "cacheReadInputTokens": 2000,
+                "cacheWriteInputTokens": 4000,
+                "totalTokens": 7100,
+            }
+        )
+
+        def __call__(self, _prompt):
+            return "Answer"
+
+        def cleanup(self):
+            pass
+
+    runtime_agent = FakeAgent()
+    monkeypatch.setattr(
+        agent,
+        "_prepare",
+        lambda _request: (runtime_agent, None, None, "question"),
+    )
+    request = agent.InvocationRequest(
+        messages=[{"role": "user", "content": "question"}],
+        actor_id="actor-id",
+        session_id="session-id",
+        model_slug="strands-data-analyst",
+        stream=False,
+    )
+
+    response = agent.run(request)
+
+    assert response["result"] == "Answer"
+    assert response["model_usage"]["event"] == "model_usage"
+    assert response["model_usage"]["total_input_tokens"] == 7000
+    assert response["model_usage"]["output_tokens"] == 100
+
+
 def test_stream_emits_model_usage_before_final_chunk(monkeypatch):
     agent, _ = _load_agent_module(monkeypatch)
 

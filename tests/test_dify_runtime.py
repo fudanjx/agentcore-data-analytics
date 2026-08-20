@@ -3,14 +3,15 @@ import base64
 import importlib.util
 import json
 import pathlib
+import sys
 import threading
 import time
 import unittest
 from unittest.mock import AsyncMock, patch
 
-MODULE_PATH = (
-    pathlib.Path(__file__).parents[1] / "dify-proxy" / "dify-server.py"
-)
+PROXY_DIR = pathlib.Path(__file__).parents[1] / "dify-proxy"
+MODULE_PATH = PROXY_DIR / "dify-server.py"
+sys.path.insert(0, str(PROXY_DIR))
 SPEC = importlib.util.spec_from_file_location("dify_server_runtime_tests", MODULE_PATH)
 dify_server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(dify_server)
@@ -119,6 +120,38 @@ class FakeRequest:
         return self.body
 
 
+class FakeUsageCursor:
+    def __init__(self):
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def execute(self, statement, values=None):
+        self.calls.append((statement, values))
+
+
+class FakeUsageConnection:
+    def __init__(self):
+        self.cursor_instance = FakeUsageCursor()
+        self.closed = False
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return False
+
+    def cursor(self):
+        return self.cursor_instance
+
+    def close(self):
+        self.closed = True
+
+
 class DifyRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.original_runtimes = dict(dify_server.DIFY_RUNTIMES)
@@ -148,6 +181,29 @@ class DifyRuntimeTests(unittest.TestCase):
             backend = dify_server.get_dify_backend("dev")
 
         self.assertEqual(backend, ("runtime", "arn:runtime"))
+
+    def test_model_usage_database_uses_single_connection_url(self):
+        calls = []
+        connection = object()
+
+        class FakePsycopg2:
+            @staticmethod
+            def connect(*args, **kwargs):
+                calls.append((args, kwargs))
+                return connection
+
+        database_url = (
+            "postgresql://user:secret@db.example:5432/postgres"
+            "?sslmode=require&connect_timeout=5"
+        )
+        with (
+            patch.dict("sys.modules", {"psycopg2": FakePsycopg2}),
+            patch.object(dify_server.model_usage, "DATABASE_URL", database_url),
+        ):
+            result = dify_server.model_usage._connect()
+
+        self.assertIs(result, connection)
+        self.assertEqual(calls, [((database_url,), {})])
 
     def test_discovers_ready_runtimes_across_pages_and_adds_short_alias(self):
         dify_server.DIFY_RUNTIMES.clear()
@@ -326,7 +382,7 @@ class DifyRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(events[0], "Answer")
-        self.assertIsInstance(events[1], dify_server._RuntimeUsage)
+        self.assertIsInstance(events[1], dify_server.model_usage.Usage)
         self.assertEqual(
             events[1].as_openai(),
             {
@@ -335,6 +391,129 @@ class DifyRuntimeTests(unittest.TestCase):
                 "total_tokens": 7100,
             },
         )
+        self.assertEqual(events[1].payload["cache_read_input_tokens"], 2000)
+
+    def test_runtime_usage_is_persisted_and_only_openai_usage_reaches_dify(self):
+        usage_payload = {
+            "event": "model_usage",
+            "model_id": "arn:model",
+            "model_slug": "analytics",
+            "session_id": "runtime-session",
+            "stream": True,
+            "succeeded": True,
+            "duration_ms": 12345,
+            "prompt_cache_ttl": "5m",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "cache_read_input_tokens": 2000,
+            "cache_write_input_tokens": 4000,
+            "total_input_tokens": 7000,
+            "total_tokens_reported": 7100,
+            "cache_read_ratio": 0.285714,
+            "estimated_cost_usd": 0.0201,
+            "estimated_cost_breakdown_usd": {
+                "input": 0.003,
+                "output": 0.0015,
+                "cache_read": 0.0006,
+                "cache_write": 0.015,
+            },
+            "pricing": {"label": "test-pricing"},
+        }
+        client = FakeRuntimeClient(
+            [
+                b'data: {"choices":[{"delta":{"content":"Answer"}}]}',
+                f"data: {json.dumps(usage_payload)}".encode(),
+                b"data: [DONE]",
+            ]
+        )
+        database = FakeUsageConnection()
+
+        with (
+            patch.object(dify_server, "get_agentcore_client", return_value=client),
+            patch.object(
+                dify_server.model_usage,
+                "DATABASE_URL",
+                "postgresql://user:secret@db.example:5432/postgres",
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_connect",
+                return_value=database,
+            ),
+            patch.object(dify_server, "_resolve_artifacts", return_value=[]),
+        ):
+            response = "".join(
+                dify_server._sse_artifact_stream(
+                    dify_server._stream_runtime_events(
+                        [{"role": "user", "content": "hello"}],
+                        "arn:runtime",
+                        "proxy-session",
+                        "proxy-user",
+                    ),
+                    "runtime",
+                    "proxy-session",
+                    "dev",
+                    "chatcmpl-test",
+                    ("proxy-user", "proxy-session", {}),
+                )
+            )
+
+        self.assertTrue(database.closed)
+        self.assertEqual(len(database.cursor_instance.calls), 2)
+        insert_values = database.cursor_instance.calls[1][1]
+        self.assertEqual(insert_values[0], "proxy-session")
+        self.assertEqual(insert_values[1], "proxy-user")
+        self.assertEqual(insert_values[8:14], (1000, 2000, 4000, 7000, 100, 7100))
+        self.assertEqual(insert_values[16:20], (0.003, 0.0015, 0.0006, 0.015))
+        self.assertEqual(insert_values[-1], "test-pricing")
+        self.assertIn(
+            "DROP COLUMN IF EXISTS raw_usage",
+            database.cursor_instance.calls[0][0],
+        )
+        self.assertNotIn("raw_usage", database.cursor_instance.calls[1][0])
+
+        chunks = [
+            json.loads(line.removeprefix("data: "))
+            for line in response.splitlines()
+            if line.startswith("data: {")
+        ]
+        self.assertEqual(
+            chunks[-1]["usage"],
+            {
+                "prompt_tokens": 7000,
+                "completion_tokens": 100,
+                "total_tokens": 7100,
+            },
+        )
+        self.assertNotIn("model_usage", response)
+        self.assertNotIn("estimated_cost_usd", response)
+
+    def test_model_usage_database_failure_does_not_drop_dify_usage(self):
+        usage = dify_server.model_usage.Usage(
+            7000,
+            100,
+            {"event": "model_usage", "total_input_tokens": 7000},
+        )
+
+        with (
+            patch.object(
+                dify_server.model_usage,
+                "DATABASE_URL",
+                "postgresql://user:secret@db.example:5432/postgres",
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_connect",
+                side_effect=OSError("database unavailable"),
+            ),
+        ):
+            dify_server.model_usage.persist(
+                usage.payload,
+                "session-id",
+                "user-id",
+            )
+
+        self.assertEqual(usage.as_openai()["total_tokens"], 7100)
 
     def test_runtime_stream_does_not_replay_transport_failure(self):
         body = FailingStreamingBody([])
@@ -457,7 +636,7 @@ class DifyRuntimeTests(unittest.TestCase):
         events = iter(
             [
                 "Answer",
-                dify_server._RuntimeUsage(7000, 100),
+                dify_server.model_usage.Usage(7000, 100),
             ]
         )
 
@@ -546,7 +725,7 @@ class DifyRuntimeTests(unittest.TestCase):
                 "_invoke_runtime_buffered",
                 return_value=dify_server._BufferedRuntimeResult(
                     "runtime answer",
-                    dify_server._RuntimeUsage(7000, 100),
+                    dify_server.model_usage.Usage(7000, 100),
                     [
                         {
                             "id": "tool-1",
