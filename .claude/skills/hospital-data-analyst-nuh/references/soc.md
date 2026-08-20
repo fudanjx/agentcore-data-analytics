@@ -1,6 +1,6 @@
 ---
 name: nuh-analytics-soc
-description: Column reference and SQL guidance for NUH soc. Use when analyzing specialist outpatient visits, new versus repeat visits, private versus subsidised activity, clinics, specialties, departments, clusters, or subspecialties.
+description: Column reference and SQL guidance for NUH soc. Use when analyzing specialist outpatient visits or attendance, First or New versus Repeat visits or attendance, private versus subsidised activity, clinics, specialties, departments, clusters, or subspecialties.
 ---
 
 # NUH Analytics — soc
@@ -27,6 +27,19 @@ For CY2023 and earlier, `N` (New Patient) and `B` (Pre-Admission) are New;
 `R`, `T`, `S`, `A`, and every other SAP value are Repeat. From CY2024 use the
 native `VISIT_TYPE_GRP` value directly. State null or unexpected native values
 separately rather than recoding them.
+
+For SOC reporting, `attendance` and `visit` are interchangeable. Treat First
+Visit, First Attendance, New Visit, New Attendance, and New Patient as requests
+for the hybrid `New` category. Treat Repeat Visit, Repeat Attendance, and Repeat
+Patient as requests for the hybrid `Repeat` category. Do not use a similarly
+named source column instead of the hybrid rule.
+
+Match the displayed label to the user's wording:
+
+- A visits request displays `First Visit` and `Repeat Visit`.
+- An attendance request displays `First Attendance` and `Repeat Attendance`.
+
+The display-label change does not alter the underlying hybrid classification.
 
 ## Locked private / subsidised classification
 

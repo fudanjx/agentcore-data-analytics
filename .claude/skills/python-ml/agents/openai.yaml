@@ -1,4 +1,0 @@
-interface:
-  display_name: "Python Machine Learning"
-  short_description: "Build and evaluate Python ML workflows"
-  default_prompt: "Use $python-ml to build a reproducible machine-learning workflow."

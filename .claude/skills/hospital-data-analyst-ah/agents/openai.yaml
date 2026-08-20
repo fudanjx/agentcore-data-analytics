@@ -1,4 +1,0 @@
-interface:
-  display_name: "Hospital Data Analyst"
-  short_description: "Analyze AH and NUH hospital operations data"
-  default_prompt: "Use $hospital-data-analyst to analyze this hospital operations question."

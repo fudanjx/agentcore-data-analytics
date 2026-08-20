@@ -1,6 +1,6 @@
 ---
 name: nuh-analytics-inpatient-movement
-description: Column reference and SQL guidance for NUH inpatient_movement. Use when analyzing inpatient admissions, discharges, patient days, ALOS, TYPE_GRP, or paying and subsidised inpatient activity.
+description: Column reference and SQL guidance for NUH inpatient_movement. Use when analyzing inpatient admissions, discharges, patient days, ALOS, TYPE_GRP, Elective, Emergency, Transfer-In, New Born, or paying and subsidised inpatient activity.
 ---
 
 # NUH Analytics — inpatient_movement
@@ -76,10 +76,24 @@ For department, cluster, MOH-specialty, or subspecialty reporting, read
 the mapping document does not prescribe its exact column name. Do not invent or
 manually reconstruct mapped result rows. Use fresh SQL output for reconciliation.
 
-## Additional fields
+## Elective, Emergency, Transfer-In, and New Born
 
-`TYPE_GRP`: `EM` Emergency, `EL` Elective, `TA` Transfer-In, `MA` Maternity;
-null is unclassified older SAP data.
+For an inpatient admissions or discharges breakdown by Elective/Emergency, use
+`TYPE_GRP` and retain all five output categories:
+
+```sql
+CASE
+  WHEN "TYPE_GRP" = 'EL' THEN 'Elective'
+  WHEN "TYPE_GRP" = 'EM' THEN 'Emergency'
+  WHEN "TYPE_GRP" = 'TA' THEN 'Transfer-In'
+  WHEN "TYPE_GRP" = 'NB' THEN 'New Born'
+  ELSE 'Others'
+END AS admission_type
+```
+
+`Others` includes null and every unexpected value. Do not omit Transfer-In,
+New Born, null, or unexpected values merely because the user asks for an
+Elective/Emergency breakdown. Use `NB` for New Born.
 
 ## CY2025 locked benchmarks
 

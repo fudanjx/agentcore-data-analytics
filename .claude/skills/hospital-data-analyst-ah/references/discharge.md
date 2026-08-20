@@ -20,27 +20,24 @@ WHERE "prelim_flag" = 'N'
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join to `admission`, `inflight`, `procedure`. **Blank for new encounters created from Feb 2026 (NBS go-live) onward** — use `PAT_ENC_CSN_ID` for those. |
+| `Case_No` | TEXT | Episode identifier — join to `admission`, `inflight`, `procedure`. Blank for new encounters from Feb 2026 onward. |
 | `Adm_Date` | TIMESTAMP | Admission date |
-| `Adm_Time` | TIME | Admission time |
 | `Disch_Date` | TIMESTAMP | Discharge date — primary date filter |
 | `Disch_Time` | TIME | Discharge time |
 | `Adm_Type` | TEXT | Admission route (same codes as `admission` table) |
-| `Adm_Class` | TEXT | Raw patient class code at admission — not resolved through the lookup below. For usual reporting, use the derived patient class (`Class_abc`/`Class_abc_MOH`) instead. |
-| `Disch_Class` | TEXT | Raw patient class code at discharge — not resolved through the lookup below. For usual reporting, use the derived patient class (`Class_abc`/`Class_abc_MOH`) instead.  |
+| `Adm_Class` | TEXT | Raw patient class at admission — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`) |
+| `Disch_Class` | TEXT | Raw patient class at discharge — resolve through `pt_class_abc` |
 | `Nrs_OU` | TEXT | Discharging ward code (apply exclusion filter here) |
 | `Disch_Dept_OU_Text` | TEXT | Discharging department name |
 | `Discharge_Type_Text` | TEXT | Discharge disposition — see values below |
 | `Discharge_w_in_24_hrs` | TEXT | `X` if discharged within 24 hours |
-| `LOS` | TEXT | Length of stay in days — cast to NUMERIC for maths |
+| `LOS` | TEXT | Length of stay in days — cast to NUMERIC for calculations |
 | `Death_Date` | TIMESTAMP | Date of death (null if survived) |
-| `Death_Time` | TIME | Time of death |
 | `Pri_Diag_Code` | TEXT | Principal discharge diagnosis ICD code |
-| `Other_Diag_Code` | TEXT | Additional diagnoses (pipe `\|` separated) |
 | `DRG_Code` | TEXT | DRG code |
 | `Attending_Physician_Name` | TEXT | Attending physician name |
 | `Age` | TEXT | Age at discharge |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter ID. **Null before 2023-01-01** (SAP era); use `Case_No` instead for pre-2023 data. |
+| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter ID. Null before 2023-01-01. |
 | `cnt` | INTEGER | Always 1 |
 
 ## Discharge_Type_Text values
@@ -57,10 +54,7 @@ WHERE "prelim_flag" = 'N'
 ## LOS calculations
 
 ```sql
--- Average LOS
 AVG(CAST("LOS" AS NUMERIC)) AS avg_los
-
--- Median LOS
 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY CAST("LOS" AS NUMERIC)) AS median_los
 ```
 
@@ -74,43 +68,20 @@ SUM(CASE WHEN "Discharge_Type_Text" ILIKE 'Death%' THEN 1 ELSE 0 END)::FLOAT
   / COUNT(*) * 100 AS mortality_pct
 ```
 
-## Patient class & residency lookup (`pt_class_abc` — shared across all tables)
+## Patient class
 
-`Disch_Class` resolves through the same `pt_class_abc` lookup table used by `admission` (`Adm_Cls`), `inflight` (`Class`), `procedure` (`Cls`), and `outpatient` (`Class`) — see `Skill_outpatient.md` for the full table and rationale (financial `Class_abc` vs. MOH-facing `Class_abc_MOH`, which reclassifies foreigner `*RF` codes up to `A1`). Reproduced here for `Disch_Class` / `Adm_Class`
-
-| Raw `Disch_Class` / `Adm_Class`| `Class_abc` | `Class_abc_MOH` | `Resident_Type` | `Resident_MOH` |
-|---|---|---|---|---|
-| `A` | `A1` | `A1` | `SG` | `SG` |
-| `AP` | `A1` | `A1` | `PR` | `PR` |
-| `ARF` | `A1` | `A1` | `RF` | `FR` |
-| `B1` | `B1` | `B1` | `SG` | `SG` |
-| `B1P` | `B1` | `B1` | `PR` | `PR` |
-| `B1RF` | `B1` | `A1` | `RF` | `FR` |
-| `B2` | `B2` | `B2` | `SG` | `SG` |
-| `B2P` | `B2` | `B2` | `PR` | `PR` |
-| `B2RF` | `B2` | `A1` | `RF` | `FR` |
-| `C` | `C` | `C` | `SG` | `SG` |
-| `CP` | `C` | `C` | `PR` | `PR` |
-| `CRF` | `C` | `A1` | `RF` | `FR` |
-| `NR` | `A1` | `A1` | `NR` | `FNR` |
-| `PTE` | `Private` | `Private` | `SG` | `SG` |
-| `PTEP` | `Private` | `Private` | `PR` | `PR` |
-| `PTRF` | `Private` | `Private` | `RF` | `FR` |
-| `SUB` | `Subsidized` | `Subsidized` | `SG` | `SG` |
-| `SUBP` | `Subsidized` | `Subsidized` | `PR` | `PR` |
-
-This feeds two derived discharge fields used across the finance/MOH reports:
-- **`Class_abc`** → used directly by `fin_disch_class_abc`/`fin_disch_resident` (financial workload reports).
-- **`cls_icu_iso_fin`** (from `Class_abc`) and **`cls_icu_iso_MOH`** (from `Class_abc_MOH`) → each further overridden to `'ISO'` if `Nrs_OU` starts with `LW9`/`LW8`, to `'HD'` if `Trt_Cat` starts with `HD`, or to `'ICU'` if `Trt_Cat` starts with `CCU` — this is what actually feeds `MOH_F09_Disch` and `Fin_disch_iso_icu`, not raw `Class_abc`/`Class_abc_MOH` alone.
+Resolve `Disch_Class` / `Adm_Class` through `pt_class_abc` (see `references/pt-class-lookup.md`). For MOH and finance reports, apply the ICU/HD/ISO override chain on top of `Class_abc` / `Class_abc_MOH`:
 
 ```sql
 CASE
   WHEN LEFT("Nrs_OU", 3) IN ('LW9','LW8') THEN 'ISO'
-  WHEN LEFT("Trt_Cat", 2) = 'HD' THEN 'HD'
-  WHEN LEFT("Trt_Cat", 3) = 'CCU' THEN 'ICU'
-  ELSE "Class_abc"          -- or "Class_abc_MOH" for the MOH-facing version
+  WHEN LEFT("Trt_Cat", 2) = 'HD'          THEN 'HD'
+  WHEN LEFT("Trt_Cat", 3) = 'CCU'         THEN 'ICU'
+  ELSE "Class_abc"    -- or "Class_abc_MOH" for MOH-facing version
 END AS cls_icu_iso
 ```
+
+This final field feeds `MOH_F09_Disch` and `Fin_disch_iso_icu` — use it, not raw `Class_abc`/`Class_abc_MOH` alone.
 
 ## Same-day discharge
 
@@ -140,4 +111,4 @@ FROM discharge d JOIN admission a ON d."Case_No" = a."Case_No"
 FROM discharge d JOIN inflight i  ON d."Case_No" = i."Case_No"
 ```
 
-⚠️ For dates before 2023-01-01, `PAT_ENC_CSN_ID` will be null — fall back to `Case_No`. For encounters created from Feb 2026 (NBS go-live) onward, `Case_No` may be blank — fall back to `PAT_ENC_CSN_ID`. See `SKILL.md` for the full explanation.
+⚠️ For pre-2023 data use `Case_No`; for post-Feb-2026 data use `PAT_ENC_CSN_ID`. See SKILL.md for the full era rule.

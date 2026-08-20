@@ -8,6 +8,11 @@ description: Build and quality-check NUH operational dashboards from approved NU
 Read the relevant table references first. They control table logic and benchmarks;
 this guide controls dashboard construction, rendering, and cross-table QC.
 
+Read this guide for every chart, visualization, chart report, or dashboard. Apply
+the data and SQL guardrails and Final QC to every visual output. Apply the HTML
+build rules only to HTML output, and apply the mobile dashboard rules only when
+the user requests a mobile dashboard.
+
 ## Data and SQL guardrails
 
 - Use half-open primary-date ranges and double-quoted NUH columns.
