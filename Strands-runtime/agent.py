@@ -495,24 +495,30 @@ def run(request: InvocationRequest) -> dict:
     runtime_agent = None
     interpreter_session = None
     memory_session_manager = None
+    response = None
+    usage_payload = None
     try:
         runtime_agent, interpreter_session, memory_session_manager, prompt = _prepare(request)
         result = runtime_agent(prompt)
         text = _result_text(result)
         succeeded = True
-        return {
+        response = {
             "result": text,
             "session_id": request.session_id,
             "model": request.model_slug,
         }
     finally:
-        _log_model_usage(
+        usage_payload = _log_model_usage(
             request,
             runtime_agent,
             started_at=started_at,
             succeeded=succeeded,
         )
         _cleanup(runtime_agent, interpreter_session, memory_session_manager)
+
+    if usage_payload is not None:
+        response["model_usage"] = usage_payload
+    return response
 
 
 _STEP_UNSAFE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")

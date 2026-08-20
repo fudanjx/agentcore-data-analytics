@@ -1,13 +1,14 @@
 import importlib.util
 import pathlib
+import sys
 import time
 import unittest
 from unittest.mock import patch
 
 
-MODULE_PATH = (
-    pathlib.Path(__file__).parents[1] / "dify-proxy" / "dify-server.py"
-)
+PROXY_DIR = pathlib.Path(__file__).parents[1] / "dify-proxy"
+MODULE_PATH = PROXY_DIR / "dify-server.py"
+sys.path.insert(0, str(PROXY_DIR))
 SPEC = importlib.util.spec_from_file_location("dify_server_for_tests", MODULE_PATH)
 dify_server = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(dify_server)

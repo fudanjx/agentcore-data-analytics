@@ -37,6 +37,8 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
+import model_usage
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
 
@@ -63,7 +65,6 @@ DIFY_ARTIFACT_CONNECT_TIMEOUT_SECONDS = _bounded_int_env(
 DIFY_ARTIFACT_READ_TIMEOUT_SECONDS = _bounded_int_env(
     "DIFY_ARTIFACT_READ_TIMEOUT_SECONDS", 10, 1, 60
 )
-
 # READY runtimes discovered through the AgentCore control plane, keyed by
 # agentRuntimeName. Names beginning with ``agentcore_`` also receive a short
 # alias, so ``agentcore_dev`` remains available through the ``dev`` slug.
@@ -605,24 +606,6 @@ def _runtime_kwargs(
     }
 
 
-class _RuntimeUsage:
-    """Aggregate token usage safe to expose through the OpenAI-compatible API."""
-
-    __slots__ = ("completion_tokens", "prompt_tokens", "total_tokens")
-
-    def __init__(self, prompt_tokens: int, completion_tokens: int):
-        self.prompt_tokens = prompt_tokens
-        self.completion_tokens = completion_tokens
-        self.total_tokens = prompt_tokens + completion_tokens
-
-    def as_openai(self) -> dict[str, int]:
-        return {
-            "prompt_tokens": self.prompt_tokens,
-            "completion_tokens": self.completion_tokens,
-            "total_tokens": self.total_tokens,
-        }
-
-
 class _RuntimeHeartbeat:
     """Internal marker rendered as an SSE comment for downstream keepalive."""
 
@@ -648,54 +631,12 @@ class _BufferedRuntimeResult:
     def __init__(
         self,
         text: str,
-        usage: _RuntimeUsage | None,
+        usage: model_usage.Usage | None,
         agent_steps: list[dict] | None = None,
     ):
         self.text = text
         self.usage = usage
         self.agent_steps = agent_steps or []
-
-
-def _usage_token_count(value) -> int | None:
-    if isinstance(value, bool):
-        return None
-    try:
-        count = int(value)
-    except (TypeError, ValueError, OverflowError):
-        return None
-    return count if count >= 0 else None
-
-
-def _runtime_usage(payload) -> _RuntimeUsage | None:
-    if not isinstance(payload, dict):
-        return None
-
-    prompt_tokens = _usage_token_count(payload.get("total_input_tokens"))
-    if prompt_tokens is None:
-        prompt_tokens = _usage_token_count(payload.get("prompt_tokens"))
-    if prompt_tokens is None:
-        input_tokens = _usage_token_count(payload.get("input_tokens"))
-        cache_read_tokens = _usage_token_count(
-            payload.get("cache_read_input_tokens")
-        )
-        cache_write_tokens = _usage_token_count(
-            payload.get("cache_write_input_tokens")
-        )
-        if any(
-            count is not None
-            for count in (input_tokens, cache_read_tokens, cache_write_tokens)
-        ):
-            prompt_tokens = sum(
-                count or 0
-                for count in (input_tokens, cache_read_tokens, cache_write_tokens)
-            )
-
-    completion_tokens = _usage_token_count(payload.get("output_tokens"))
-    if completion_tokens is None:
-        completion_tokens = _usage_token_count(payload.get("completion_tokens"))
-    if prompt_tokens is None or completion_tokens is None:
-        return None
-    return _RuntimeUsage(prompt_tokens, completion_tokens)
 
 
 def _stream_runtime_events(
@@ -721,12 +662,13 @@ def _stream_runtime_events(
 
     def put_event_items(event: dict) -> None:
         if event.get("event") == "model_usage":
-            usage = _runtime_usage(event.get("usage") or event)
+            usage = model_usage.from_payload(event.get("usage") or event)
             if usage is not None:
+                model_usage.persist(usage.payload, session_id, user_id)
                 enqueue(usage)
             return
         if event.get("usage") is not None:
-            usage = _runtime_usage(event.get("usage"))
+            usage = model_usage.from_payload(event.get("usage"))
             if usage is not None:
                 enqueue(usage)
         if event.get("event") == "heartbeat":
@@ -830,7 +772,7 @@ def _invoke_runtime_buffered(
     usage = None
     agent_steps = []
     for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id):
-        if isinstance(event, _RuntimeUsage):
+        if isinstance(event, model_usage.Usage):
             usage = event
         elif isinstance(event, _RuntimeHeartbeat):
             continue
@@ -1370,7 +1312,7 @@ def _sse_artifact_stream(
 
     try:
         for item in events:
-            if isinstance(item, _RuntimeUsage):
+            if isinstance(item, model_usage.Usage):
                 usage = item
                 continue
             if isinstance(item, _RuntimeHeartbeat):
