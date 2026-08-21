@@ -186,7 +186,7 @@ class InvocationRequest:
             messages=normalized,
             actor_id=str(actor) if actor else None,
             session_id=session_id,
-            model_slug=str(payload.get("model") or "strands-agent"),
+            model_slug=str(payload.get("model") or AGENT_NAME),
             # The existing Dify/OpenAI proxy expects Runtime message payloads
             # to stream even though it does not add a downstream `stream` flag.
             # Simple AgentCore console prompts remain blocking by default.
