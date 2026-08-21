@@ -51,7 +51,12 @@ The blocking response is:
   "result": "...",
   "session_id": "conversation-000000000000000000001",
   "model": "strands-data-analyst",
-  "model_usage": {"event": "model_usage", "total_input_tokens": 123, "output_tokens": 45}
+  "model_usage": {
+    "event": "model_usage",
+    "pricing_label": "bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1",
+    "total_input_tokens": 123,
+    "output_tokens": 45
+  }
 }
 ```
 
@@ -59,7 +64,7 @@ With `"stream": true`, AgentCore returns OpenAI `chat.completion.chunk` SSE obje
 
 The Dify proxy exposes each step as an `agent_step` OpenAI response extension and embeds the same JSON as a base64-encoded `<!--agentcore-step:...-->` content marker, because Dify's model-provider layer otherwise retains only text. A frontend can remove the marker, decode it as UTF-8 JSON, and decide whether to hide, summarize, or expand the details. The visible Markdown status line is retained for clients that do not parse markers.
 
-The proxy stores the complete `model_usage` record in PostgreSQL and converts it into an OpenAI usage chunk containing only aggregate prompt, completion, and total tokens for Dify compatibility. CloudWatch logging remains available as an independent record. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
+The proxy enriches the `model_usage` record with database pricing, stores it in PostgreSQL, and converts it into an OpenAI usage chunk containing only aggregate prompt, completion, and total tokens for Dify compatibility. CloudWatch logging remains available as an independent token record. A `messages` payload defaults to this streaming contract even when `stream` is omitted because the existing Dify/OpenAI proxy expects the Runtime to stream; set `"stream": false` explicitly to request blocking JSON directly.
 
 The Dify proxy independently limits accepted serialized step details with `RUNTIME_STEP_DETAIL_MAX_CHARS` (default `500000`, constrained to 1,000-1,000,000). Keep that value at least as large as twice `TOOL_DETAIL_MAX_CHARS` when both a maximum-size input and result must fit in one completed step.
 
@@ -77,12 +82,7 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Maximum Bedrock model retry attempts, constrained to 0-5 |
 | `RUNTIME_STREAM_HEARTBEAT_SECONDS` | `15` | Emit a heartbeat sideband event while waiting for a model or tool, constrained to 5-300 seconds |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Emit one `MODEL_USAGE` JSON log after every invocation, without prompt or response content |
-| `MODEL_PRICING_LABEL` | `claude-sonnet-4.6-standard-2026-08` | Label included with estimated-cost logs so the configured rates can be audited |
-| `MODEL_INPUT_PRICE_PER_MTOK_USD` | `3.00` | Estimated uncached-input price in USD per million tokens |
-| `MODEL_OUTPUT_PRICE_PER_MTOK_USD` | `15.00` | Estimated output price in USD per million tokens |
-| `MODEL_CACHE_READ_PRICE_PER_MTOK_USD` | `0.30` | Estimated cache-read price in USD per million tokens |
-| `MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD` | `3.75` | Estimated five-minute cache-write price in USD per million tokens |
-| `MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD` | `6.00` | Estimated one-hour cache-write price in USD per million tokens |
+| `MODEL_PRICING_LABEL` | `bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1` | Pricing-table key included with model usage so Dify Proxy can calculate token cost |
 | `BASE_SYSTEM_PROMPT` | Empty | Optional `s3://bucket/key.txt` URI for the UTF-8 base system prompt; no base prompt is added when empty or unset |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | `200000` | Maximum permitted size of the S3 system-prompt object |
 | `AGENTCORE_GATEWAYS_JSON` | Empty | Gateway label, HTTPS URL, ARN, and inferred region mapping; no Gateway tools are added when empty, unset, or `{}` |
@@ -150,7 +150,7 @@ fields @timestamp, @message
 | display @timestamp, tool, source, duration_ms, result_chars
 ```
 
-Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
+Each completed or failed model invocation emits one `MODEL_USAGE` record containing the pricing label, non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, and duration. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The Runtime does not contain price rates or calculate cost; Dify Proxy loads the matching row from `nuhs.model_pricing`, calculates the cost, and stores it with the usage record.
 
 Example CloudWatch Logs Insights query:
 
@@ -160,9 +160,9 @@ fields @timestamp, @message
 | parse @message /"session_id":"(?<session_id>[^"]+)"/
 | parse @message /"cache_read_input_tokens":(?<cache_read>\d+)/
 | parse @message /"cache_write_input_tokens":(?<cache_write>\d+)/
-| parse @message /"estimated_cost_usd":(?<estimated_cost>[0-9.]+)/
+| parse @message /"pricing_label":"(?<pricing_label>[^"]+)"/
 | sort @timestamp desc
-| display @timestamp, session_id, cache_read, cache_write, estimated_cost
+| display @timestamp, session_id, pricing_label, cache_read, cache_write
 ```
 
 When memory is enabled, AgentCore Memory is the source of truth for prior conversation turns. The Runtime sends only the latest user message from an OpenAI-style `messages` payload to Strands, preventing the caller's flattened history from duplicating the session restored by `AgentCoreMemorySessionManager`. Raw tool requests and results are excluded from durable conversational memory; the user turn and final assistant response are retained. Legacy plain-text events written by the previous Runtime implementation remain readable.
@@ -248,6 +248,6 @@ For a versioned release artifact:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.1.0.zip `
+    -OutputPath .\dist\strands_agent_v0.1.1.zip `
     -Force
 ```

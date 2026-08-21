@@ -140,14 +140,14 @@ Each enabled capability also requires the corresponding IAM permissions describe
 
 ### Advanced settings — normally not important
 
-Most users should omit these variables and keep the packaged defaults. Change them only for tuning, troubleshooting, nonstandard Regions, or accurate cost estimates.
+Most users should omit these variables and keep the packaged defaults. Change them only for tuning, troubleshooting, or nonstandard Regions.
 
 | Variables | Why you might change them |
 | --- | --- |
 | `AWS_REGION` | Normally supplied by AgentCore; do not override it routinely |
 | `PROMPT_CACHE_TTL` | Select `1h` instead of the default `5m` only when the model supports it and longer reuse is useful |
 | `ENABLE_MODEL_USAGE_LOGS` | Disable the default usage log only when operational policy requires it |
-| `MODEL_PRICING_LABEL` and all `MODEL_*_PRICE_PER_MTOK_USD` variables | Update estimated-cost logs when using another model or pricing basis; they do not change AWS billing |
+| `MODEL_PRICING_LABEL` | Select the matching `nuhs.model_pricing` row used by Dify Proxy for cost calculation |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | Raise or lower the prompt-object size limit |
 | `ENABLE_GATEWAYS`, `ENABLE_CODE_INTERPRETER` | Emergency override switches; normally leave them at `true` because an empty primary identifier already disables the capability |
 | `CODE_INTERPRETER_REGION`, `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS`, `CODE_INTERPRETER_MAX_RESULT_CHARS` | Nonstandard interpreter Region, session duration, or context limit |
@@ -175,14 +175,9 @@ The following reference tables document the exact defaults and accepted values.
 | `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Bedrock model retry attempts, constrained to 0-5 |
 | `RUNTIME_STREAM_HEARTBEAT_SECONDS` | `15` | Heartbeat interval while waiting for a model or tool, constrained to 5-300 seconds |
 | `ENABLE_MODEL_USAGE_LOGS` | `true` | Use `true` to emit one content-free `MODEL_USAGE` record per invocation |
-| `MODEL_PRICING_LABEL` | Project pricing label | Set an auditable label for your chosen model and pricing basis |
-| `MODEL_INPUT_PRICE_PER_MTOK_USD` | `3.00` | Current uncached-input rate per million tokens |
-| `MODEL_OUTPUT_PRICE_PER_MTOK_USD` | `15.00` | Current output rate per million tokens |
-| `MODEL_CACHE_READ_PRICE_PER_MTOK_USD` | `0.30` | Current cache-read rate per million tokens |
-| `MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD` | `3.75` | Current five-minute cache-write rate per million tokens |
-| `MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD` | `6.00` | Current one-hour cache-write rate per million tokens |
+| `MODEL_PRICING_LABEL` | `bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1` | Set the exact label of the model's row in `nuhs.model_pricing` |
 
-Pricing values affect estimated logs only; they do not affect AWS billing.
+The Runtime sends this label and token counts without any price rates. Dify Proxy owns price lookup, calculation, and database persistence; these estimates do not affect AWS billing.
 
 ### Base prompt and Gateway tools
 
@@ -720,9 +715,9 @@ fields @timestamp, @message
 | parse @message /"session_id":"(?<session_id>[^"]+)"/
 | parse @message /"cache_read_input_tokens":(?<cache_read>\d+)/
 | parse @message /"cache_write_input_tokens":(?<cache_write>\d+)/
-| parse @message /"estimated_cost_usd":(?<estimated_cost>[0-9.]+)/
+| parse @message /"pricing_label":"(?<pricing_label>[^"]+)"/
 | sort @timestamp desc
-| display @timestamp, session_id, cache_read, cache_write, estimated_cost
+| display @timestamp, session_id, pricing_label, cache_read, cache_write
 ```
 
 Interpretation:

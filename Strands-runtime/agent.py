@@ -3,7 +3,6 @@
 import asyncio
 import json
 import logging
-import math
 import os
 import re
 import time
@@ -24,17 +23,6 @@ from strands.tools.mcp import MCPClient
 from botocore.config import Config as BotocoreConfig
 
 logger = logging.getLogger(__name__)
-
-
-def _price_env(name: str, default: str) -> float:
-    raw = os.environ.get(name, default).strip()
-    try:
-        value = float(raw)
-    except ValueError as error:
-        raise ValueError(f"{name} must be a non-negative number") from error
-    if not math.isfinite(value) or value < 0:
-        raise ValueError(f"{name} must be a non-negative number")
-    return value
 
 
 def _bounded_int_env(name: str, default: int, minimum: int, maximum: int) -> int:
@@ -67,23 +55,9 @@ ENABLE_MODEL_USAGE_LOGS = os.environ.get(
     "ENABLE_MODEL_USAGE_LOGS", "true"
 ).lower() not in {"0", "false", "no"}
 MODEL_PRICING_LABEL = os.environ.get(
-    "MODEL_PRICING_LABEL", "claude-sonnet-4.6-standard-2026-08"
-).strip()
-MODEL_INPUT_PRICE_PER_MTOK_USD = _price_env(
-    "MODEL_INPUT_PRICE_PER_MTOK_USD", "3.00"
-)
-MODEL_OUTPUT_PRICE_PER_MTOK_USD = _price_env(
-    "MODEL_OUTPUT_PRICE_PER_MTOK_USD", "15.00"
-)
-MODEL_CACHE_READ_PRICE_PER_MTOK_USD = _price_env(
-    "MODEL_CACHE_READ_PRICE_PER_MTOK_USD", "0.30"
-)
-MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD = _price_env(
-    "MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD", "3.75"
-)
-MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD = _price_env(
-    "MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD", "6.00"
-)
+    "MODEL_PRICING_LABEL",
+    "bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1",
+).strip() or "bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1"
 ENABLE_GATEWAYS = os.environ.get("ENABLE_GATEWAYS", "true").lower() not in {"0", "false", "no"}
 ENABLE_CODE_INTERPRETER = os.environ.get(
     "ENABLE_CODE_INTERPRETER", "true"
@@ -274,24 +248,6 @@ def _model_usage_payload(
     cache_read_tokens = int(usage.get("cacheReadInputTokens", 0) or 0)
     cache_write_tokens = int(usage.get("cacheWriteInputTokens", 0) or 0)
     total_input_tokens = input_tokens + cache_read_tokens + cache_write_tokens
-    cache_write_rate = (
-        MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD
-        if PROMPT_CACHE_TTL == "1h"
-        else MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD
-    )
-
-    def cost(tokens: int, rate: float) -> float:
-        return round(tokens * rate / 1_000_000, 10)
-
-    cost_breakdown = {
-        "input": cost(input_tokens, MODEL_INPUT_PRICE_PER_MTOK_USD),
-        "output": cost(output_tokens, MODEL_OUTPUT_PRICE_PER_MTOK_USD),
-        "cache_read": cost(
-            cache_read_tokens,
-            MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
-        ),
-        "cache_write": cost(cache_write_tokens, cache_write_rate),
-    }
     return {
         "event": "model_usage",
         "model_id": MODEL_ID,
@@ -312,16 +268,7 @@ def _model_usage_payload(
             if total_input_tokens
             else 0.0
         ),
-        "estimated_cost_usd": round(sum(cost_breakdown.values()), 10),
-        "estimated_cost_breakdown_usd": cost_breakdown,
-        "pricing": {
-            "label": MODEL_PRICING_LABEL,
-            "unit": "USD_per_million_tokens",
-            "input": MODEL_INPUT_PRICE_PER_MTOK_USD,
-            "output": MODEL_OUTPUT_PRICE_PER_MTOK_USD,
-            "cache_read": MODEL_CACHE_READ_PRICE_PER_MTOK_USD,
-            "cache_write": cache_write_rate,
-        },
+        "pricing_label": MODEL_PRICING_LABEL,
     }
 
 
