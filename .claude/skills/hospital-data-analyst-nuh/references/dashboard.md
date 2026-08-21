@@ -23,6 +23,26 @@ the user requests a mobile dashboard.
 - For SOC, inpatient, or surgery department/cluster/MOH/subspecialty visuals, read `subspec-mapping.md`, use fresh SQL output, and show unmatched OU records separately before applying the clinical-reporting exclusion.
 - Compute annual totals and every displayed subtotal from the exact monthly values shown. Never manually add them.
 
+## Historical-data integrity
+
+- Never create missing historical observations with interpolation, extrapolation,
+  assumed growth, seasonal formulas, random values, or plausible-looking sample
+  data unless the user explicitly requests a forecast or simulation. Label any
+  authorized forecast separately from actuals.
+- Treat tool previews and truncated results as incomplete. Stop dashboard
+  creation until the complete requested data has been retrieved.
+- Build the chart series, summary tables, KPIs, peak/low calculations, and
+  narrative findings from one canonical processed dataset. Do not paste locked
+  benchmarks into KPI cards independently of the plotted series.
+- Preserve an audit manifest containing source table, date field, date range,
+  SQL result row count, observed month count, unique source OUs, mapping count,
+  mapped/unmapped workload, exclusions, plotted total, and QC status.
+- Show a visible `QC FAILED` state and do not describe the dashboard as ready,
+  verified, or complete when any required assertion fails.
+- For an SOC, inpatient, or surgery department dashboard, run the corresponding
+  bundled `validate_*_dashboard.py` script on the complete month-by-OU export.
+  Build every visual and KPI from its mapped CSV and retain its audit JSON.
+
 ## HTML build rules
 
 1. Re-initialise all data arrays in the active session before building. Do not rely on a prior session.
@@ -46,3 +66,8 @@ benchmark. If a dashboard source total conflicts with the responsible table
 reference, show the discrepancy and ask for a data-owner decision rather than
 choosing a value. For mapped outputs, also validate source row count, total, and
 unique OU count against the SQL result; never manually rebuild a data array for reconciliation.
+For a requested monthly range, assert exact month coverage. Recalculate the
+total from the plotted series and require it to equal the KPI and summary-table
+totals. For clinical-department output, require plotted workload plus declared
+non-clinical exclusions to equal source workload, and preserve unmatched OUs as
+`Unmapped` until corrected.

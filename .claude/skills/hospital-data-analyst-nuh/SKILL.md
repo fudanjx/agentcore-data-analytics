@@ -23,6 +23,9 @@ Before using the `nuh` data tool, inspecting candidate columns, or writing SQL:
 5. For combined requests, load all applicable references before writing any SQL.
 
 Apply reference-defined logic exactly. Never substitute a convenient source column for a documented classification, mapping, date rule, or distinct key.
+For mapped reporting, use the table-specific OU field contract in
+`references/subspec-mapping.md`; schema inspection may resolve physical casing
+or source-specific names only and must never select a different semantic field.
 
 ## Table routing
 
@@ -62,6 +65,35 @@ Apply reference-defined logic exactly. Never substitute a convenient source colu
 - Generate annual totals and displayed subtotals programmatically from the same grouped result. A yearly total must equal the sum of its monthly values.
 - Never manually reconstruct SQL result rows. Use fresh SQL output for reconciliation; re-query when discrepancies arise.
 - State the table, date field, filters, classification, distinct key (when applicable), and QC status with every result.
+
+## Fail-closed reporting gate
+
+Treat historical operational reporting as a low-freedom workflow. Never replace
+missing, truncated, failed, or inconvenient SQL output with sample rows,
+interpolation, assumed growth, seasonal formulas, forecasts, hand-entered values,
+or model-generated values. Stop and report the retrieval problem instead.
+
+Before presenting a chart, dashboard, or mapped result:
+
+1. Confirm the SQL call succeeded and pipe its complete result directly into analysis.
+2. Record the SQL result row count, requested and observed date coverage, total
+   workload, and unique source-OU count.
+3. For mapped output, load the complete bundled mapping file programmatically;
+   never paste or recreate a partial lookup in code.
+4. Reconcile plotted monthly values, displayed subtotals, KPI totals, and locked
+   benchmarks from the same processed dataset.
+5. Stop with a failed QC status when months are missing, result coverage is
+   incomplete, totals disagree, or a required assertion cannot be evaluated.
+
+For a department dashboard, run the matching validator on the complete
+month-by-`source_ou` SQL export before building HTML:
+
+- SOC: `scripts/validate_soc_dashboard.py`
+- Inpatient: `scripts/validate_inpatient_dashboard.py`
+- Surgery: `scripts/validate_surgery_dashboard.py`
+
+Preserve the validator's mapped CSV and audit JSON with the deliverable. Do not
+build or present the dashboard when the validator returns a failed QC status.
 
 ## Outputs
 

@@ -72,9 +72,12 @@ It includes episodes admitted in earlier months; inspect the row grain first.
 ## OU grouping and reconciliation
 
 For department, cluster, MOH-specialty, or subspecialty reporting, read
-`subspec-mapping.md`. Inspect the live inpatient schema to identify the OU field;
-the mapping document does not prescribe its exact column name. Do not invent or
-manually reconstruct mapped result rows. Use fresh SQL output for reconciliation.
+`subspec-mapping.md`. Use only `Dept_OU` as the source mapping field for every
+SAP and Epic period; for S3 Tables use `dept_ou`. Resolve exact RDS
+capitalization from schema metadata without selecting an alternative OU field.
+Alias it as `source_ou` and join it to the mapping's `organizational_unit`.
+Do not invent or manually reconstruct mapped result rows. Use fresh SQL output
+for reconciliation.
 
 ## Elective, Emergency, Transfer-In, and New Born
 
@@ -110,3 +113,24 @@ Validate monthly roll-up, the April-to-May transition (investigate over 5%),
 correct era-specific categories and keys, and Paying plus Subsidised plus stated
 Unclassified equals total discharges. After any mapped load, check the SQL row
 count, total, and unique OU count before reporting.
+
+## Fail-closed dashboard workflow
+
+For a monthly department dashboard, export one complete row per snapshot month
+and `source_ou` with these columns:
+
+```text
+month_date,source_ou,admissions,discharges,patient_days,
+paying_discharges,subsidised_discharges,unclassified_discharges
+```
+
+Generate every measure in SQL with the rules above. Do not calculate distinct
+episodes from an already aggregated export. Ensure SAP rows use `CASE_NO`, Epic
+rows use `EPIC_CSN`, and patient-day OU exclusions affect only `patient_days`.
+
+Run `scripts/validate_inpatient_dashboard.py` with the complete export and the
+bundled mapping JSON. It must confirm exact month coverage, all 277 mapping
+records, non-negative integral counts, discharge-class reconciliation, mapping
+and exclusion reconciliation, and any applicable locked benchmark. For a full
+CY2025 range, its benchmark checks are mandatory. A missing month, unexplained
+OU, total mismatch, or benchmark mismatch is a QC failure; never fill the gap.

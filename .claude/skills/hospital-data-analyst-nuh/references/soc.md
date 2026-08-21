@@ -61,18 +61,22 @@ For CY2024 onward, use the native `PAY_CAT` value directly. Do not substitute
 
 ## OU and grouping fields
 
-`ATTENDING_OU` is the subspecialty OU join key for all periods.
+`Attending_OU` is the only approved subspecialty/department OU join field for
+all periods. Resolve its exact RDS capitalization from schema metadata; for S3
+Tables use `attending_ou`. Do not substitute another OU-like field.
 
 | Reporting grouping | CY2023 | CY2024–2025 | CY2026 onward |
 |---|---|---|---|
 | Subspecialty name | Mapping lookup | `ATTENDING_OU_DESC` | `ATTENDING_OU_DESC` |
 | Cluster | `CLUSTER` | `CLUSTER` | `CLUSTER` |
 | MOH specialty | `MOH_SPEC_DESC` | `MOH_SPEC_DESC` | `MOH_SPEC_DESC` |
-| Clinical department | Mapping lookup | Mapping lookup | `DEPT_MAPPING` |
+| Clinical department | Mapping lookup | Mapping lookup | Mapping lookup |
 
-Do not use `EPIC_CDEPT_MAPPING` for Clinical Department: it has an `Other`
-catch-all and a non-comparable naming scheme. `MED_DIV_GRP` is a CY2026+
-Medicine subdivision, not a replacement for Department Grouping.
+For Clinical Department, join `Attending_OU` to `subspec-mapping.json` in every
+period. From CY2026, use `DEPT_MAPPING` only for QC comparison, not as the
+reporting source. Do not use `EPIC_CDEPT_MAPPING`: it has an `Other` catch-all
+and a non-comparable naming scheme. `MED_DIV_GRP` is a CY2026+ Medicine
+subdivision, not a replacement for Department Grouping.
 
 ## Locked total-visit benchmarks
 
@@ -92,3 +96,25 @@ total. For native groupings, report null or unexpected values separately before
 asserting a subtotal equals total. Never manually reconstruct SQL results; use
 fresh SQL output for reconciliation. For mapped reports, validate source row
 count, total visits, and unique OU count after loading the SQL result.
+
+For a requested monthly range, assert that every requested calendar month is
+present exactly once in the monthly-total reconciliation. A successful query
+invocation is not proof that its complete result reached the analysis step.
+Record the returned row count and observed first and last month before creating
+any visual.
+
+For SOC clinical-department output:
+
+1. Query complete month-by-`attending_ou` aggregates for the requested range.
+2. Export or page the result when it is too large for one tool response. Never
+   continue from a preview, truncated response, or a manually selected sample.
+3. Run `scripts/validate_soc_dashboard.py` with the complete export and bundled
+   `subspec-mapping.json`.
+4. Report mapped and unmapped OU/visit counts and any explicit non-clinical
+   exclusions.
+5. Require monthly department totals plus declared exclusions to equal monthly
+   source totals. Require the same relationship for the full period.
+
+Never infer unreturned months from earlier months, annual benchmarks, growth
+rates, seasonality, or another dashboard. Benchmarks validate retrieved data;
+they are not a source from which to manufacture monthly or departmental values.

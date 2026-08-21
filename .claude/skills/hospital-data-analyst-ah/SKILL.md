@@ -10,8 +10,9 @@ description: Analyze Alexandra Hospital (AH) operational data in the ah-analytic
 Before writing any SQL:
 1. Select the correct table from the routing table below.
 2. Read the corresponding reference file for column details, derived fields, and SQL patterns.
-3. If the query involves patient class, residency, or paying status: also read `references/pt-class-lookup.md`.
-4. Apply every mandatory filter below. Never skip `prelim_flag = 'N'`.
+3. If the requested deliverable is an HTML dashboard, KPI report, management report, or chart page: also read `references/dashboard-design.md` and follow its visual, layout, chart, methodology, and responsive-design rules.
+4. If the query involves patient class, residency, or paying status: also read `references/pt-class-lookup.md`.
+5. Apply every mandatory filter below. Never skip `prelim_flag = 'N'`.
 
 ## Table routing
 
@@ -23,6 +24,7 @@ Before writing any SQL:
 | Discharges, LOS, discharge destination, mortality | `discharge` | references/discharge.md |
 | Bed occupancy, patient-days, daily census | `inflight` | references/inflight.md |
 | Surgery, OT utilisation, procedures | `procedure` | references/procedure.md |
+| HTML dashboard, KPI dashboard, management report, or chart page | — | references/dashboard-design.md |
 | Schema overview | `_table_metadata` | — |
 
 ## Mandatory WHERE filters (apply to every query)

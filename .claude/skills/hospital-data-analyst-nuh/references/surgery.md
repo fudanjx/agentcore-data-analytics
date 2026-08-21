@@ -50,9 +50,27 @@ as Private in CY2023; all other CY2023 values are Subsidised. From CY2024, use
 ## OU grouping and reconciliation
 
 For department, cluster, MOH-specialty, or subspecialty reporting, read
-`subspec-mapping.md`. Inspect the live surgery schema to identify the OU field;
-the mapping document does not prescribe its exact column name. Do not manually
-reconstruct mapped result rows; use fresh SQL output to reconcile them.
+`subspec-mapping.md`. Use only `Attending_Dept_OU` as the source mapping field
+for every SAP and Epic period; for S3 Tables use `attending_dept_ou`. Resolve
+exact RDS capitalization from schema metadata without selecting an alternative
+OU field. Alias it as `source_ou` and join it to the mapping's
+`organizational_unit`. Do not manually reconstruct mapped result rows; use fresh
+SQL output to reconcile them.
+
+## Surgery OU field meanings
+
+- `Attending_Dept_OU`: attending subspecialty/department OU. This is the only
+  field approved for filtering or grouping Surgery workload by clinical
+  department, cluster, subspecialty, or MOH specialty.
+- `Performing_OU`: where the surgery was carried out. Use it only for a request
+  about performing or operating location. Never use it for organizational
+  mapping.
+- RDS `TREATMENT_OU` and S3 Tables `treatment_ou_1`: where the patient stayed.
+  Use this field only for a request about the patient's treatment or stay
+  location. Never use it for organizational mapping.
+- `Treatment_OU` and S3 Tables `treatment_ou_2` are separate physical fields.
+  Do not assume their meaning or use them as substitutes without an explicitly
+  documented rule.
 
 ## Locked annual benchmarks
 
@@ -68,3 +86,24 @@ monthly totals roll to annual total; and no `Unclassified` category exists. For
 CY2025, Elective is 112,145. Investigate a Feb–Sep 2024 total below 7,000 as a
 likely source-filter error. After any mapped load, check the SQL row count, total,
 and unique OU count before reporting.
+
+## Fail-closed dashboard workflow
+
+For a monthly department dashboard, export one complete row per month and
+`source_ou` with these columns:
+
+```text
+month_date,source_ou,procedure_total,day_surgery,normal_delivery,
+inpatient_surgery,unclassified,emergency,elective,unexpected_emerg_ind
+```
+
+Generate every measure in SQL from the same base rows using the locked hybrid
+CASE and `Attending_Dept_OU`. `unexpected_emerg_ind` must count values other
+than null and `X`; do not silently treat them as Elective or omit them.
+
+Run `scripts/validate_surgery_dashboard.py` with the complete export and the
+bundled mapping JSON. It must confirm exact month coverage, all 277 mapping
+records, non-negative integral counts, both category reconciliations, zero
+unclassified/unexpected rows, mapping and exclusion reconciliation, and all
+locked benchmarks fully covered by the requested range. Any failed assertion is
+a QC failure; never replace missing observations with generated data.
