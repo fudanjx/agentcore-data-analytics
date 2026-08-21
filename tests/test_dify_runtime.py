@@ -1,5 +1,6 @@
 import asyncio
 import base64
+from decimal import Decimal
 import importlib.util
 import json
 import pathlib
@@ -156,8 +157,27 @@ class FakeUsageConnection:
         self.closed = True
 
 
+def _sonnet_pricing(label="test-pricing"):
+    return dify_server.model_usage.ModelPricing(
+        pricing_label=label,
+        currency="USD",
+        input_rate=Decimal("3.00"),
+        output_rate=Decimal("15.00"),
+        cache_read_rate=Decimal("0.30"),
+        cache_write_5m_rate=Decimal("3.75"),
+        cache_write_30m_rate=None,
+        cache_write_1h_rate=Decimal("6.00"),
+        long_context_threshold_tokens=None,
+        long_input_rate=None,
+        long_output_rate=None,
+        long_cache_read_rate=None,
+        long_cache_write_30m_rate=None,
+    )
+
+
 class DifyRuntimeTests(unittest.TestCase):
     def setUp(self):
+        dify_server.model_usage._clear_pricing_cache()
         self.original_runtimes = dict(dify_server.DIFY_RUNTIMES)
         self.original_enabled = dify_server.DIFY_RUNTIME_DISCOVERY_ENABLED
         self.original_attempted = dify_server._runtime_discovery_attempted
@@ -170,6 +190,7 @@ class DifyRuntimeTests(unittest.TestCase):
         dify_server._runtime_discovery_refreshed_at = time.monotonic()
 
     def tearDown(self):
+        dify_server.model_usage._clear_pricing_cache()
         dify_server.DIFY_RUNTIMES.clear()
         dify_server.DIFY_RUNTIMES.update(self.original_runtimes)
         dify_server.DIFY_RUNTIME_DISCOVERY_ENABLED = self.original_enabled
@@ -239,6 +260,97 @@ class DifyRuntimeTests(unittest.TestCase):
             ("832757e8-7a25-4e75-8401-8b4a51bfe638",),
         )
         self.assertTrue(database.closed)
+
+    def test_model_pricing_cache_reuses_loaded_row(self):
+        pricing = _sonnet_pricing()
+        with (
+            patch.object(
+                dify_server.model_usage,
+                "PRICING_CACHE_TTL_SECONDS",
+                300,
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_query_model_pricing",
+                return_value=pricing,
+            ) as query,
+        ):
+            first = dify_server.model_usage._get_model_pricing("test-pricing")
+            second = dify_server.model_usage._get_model_pricing("test-pricing")
+
+        self.assertIs(first, pricing)
+        self.assertIs(second, pricing)
+        query.assert_called_once_with("test-pricing")
+
+    def test_model_pricing_query_reads_nuhs_table(self):
+        row = (
+            "USD",
+            Decimal("3.00"),
+            Decimal("15.00"),
+            Decimal("0.30"),
+            Decimal("3.75"),
+            None,
+            Decimal("6.00"),
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        database = FakeUsageConnection(row)
+        with patch.object(
+            dify_server.model_usage,
+            "_connect",
+            return_value=database,
+        ) as connect:
+            pricing = dify_server.model_usage._query_model_pricing("test-pricing")
+
+        connect.assert_called_once_with()
+        self.assertTrue(database.closed)
+        self.assertEqual(pricing, _sonnet_pricing())
+        statement, values = database.cursor_instance.calls[0]
+        self.assertIn("FROM model_pricing", statement)
+        self.assertEqual(values, ("test-pricing",))
+
+    def test_model_pricing_calculates_gpt_long_context_cost(self):
+        pricing = dify_server.model_usage.ModelPricing(
+            pricing_label="gpt-sol",
+            currency="USD",
+            input_rate=Decimal("5.50"),
+            output_rate=Decimal("33.00"),
+            cache_read_rate=Decimal("0.55"),
+            cache_write_5m_rate=None,
+            cache_write_30m_rate=Decimal("6.875"),
+            cache_write_1h_rate=None,
+            long_context_threshold_tokens=272000,
+            long_input_rate=Decimal("11.00"),
+            long_output_rate=Decimal("49.50"),
+            long_cache_read_rate=Decimal("1.10"),
+            long_cache_write_30m_rate=Decimal("13.75"),
+        )
+
+        costs = dify_server.model_usage._calculate_costs(
+            {
+                "prompt_cache_ttl": "30m",
+                "input_tokens": 100000,
+                "output_tokens": 10000,
+                "cache_read_input_tokens": 100000,
+                "cache_write_input_tokens": 100000,
+                "total_input_tokens": 300000,
+            },
+            pricing,
+        )
+
+        self.assertEqual(
+            costs,
+            {
+                "total": 3.08,
+                "input": 1.1,
+                "output": 0.495,
+                "cache_read": 0.11,
+                "cache_write": 1.375,
+            },
+        )
 
     def test_discovers_ready_runtimes_across_pages_and_adds_short_alias(self):
         dify_server.DIFY_RUNTIMES.clear()
@@ -445,14 +557,7 @@ class DifyRuntimeTests(unittest.TestCase):
             "total_input_tokens": 7000,
             "total_tokens_reported": 7100,
             "cache_read_ratio": 0.285714,
-            "estimated_cost_usd": 0.0201,
-            "estimated_cost_breakdown_usd": {
-                "input": 0.003,
-                "output": 0.0015,
-                "cache_read": 0.0006,
-                "cache_write": 0.015,
-            },
-            "pricing": {"label": "test-pricing"},
+            "pricing_label": "test-pricing",
         }
         client = FakeRuntimeClient(
             [
@@ -480,6 +585,11 @@ class DifyRuntimeTests(unittest.TestCase):
                 "_lookup_user_email",
                 return_value="person@example.com",
             ),
+            patch.object(
+                dify_server.model_usage,
+                "_get_model_pricing",
+                return_value=_sonnet_pricing(),
+            ),
             patch.object(dify_server, "_resolve_artifacts", return_value=[]),
         ):
             response = "".join(
@@ -505,6 +615,7 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(insert_values[1], "proxy-user")
         self.assertEqual(insert_values[2], "person@example.com")
         self.assertEqual(insert_values[9:15], (1000, 2000, 4000, 7000, 100, 7100))
+        self.assertEqual(insert_values[16], 0.0201)
         self.assertEqual(insert_values[17:21], (0.003, 0.0015, 0.0006, 0.015))
         self.assertEqual(insert_values[-1], "test-pricing")
         self.assertIn(
@@ -565,6 +676,46 @@ class DifyRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(usage.as_openai()["total_tokens"], 7100)
+
+    def test_missing_model_pricing_still_inserts_token_usage(self):
+        database = FakeUsageConnection()
+        payload = {
+            "event": "model_usage",
+            "pricing_label": "missing-pricing",
+            "input_tokens": 1000,
+            "output_tokens": 100,
+            "total_input_tokens": 1000,
+        }
+
+        with (
+            patch.object(
+                dify_server.model_usage,
+                "DATABASE_URL",
+                "postgresql://user:secret@db.example:5432/nuhs",
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_get_model_pricing",
+                return_value=None,
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_lookup_user_email",
+                return_value=None,
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_connect",
+                return_value=database,
+            ),
+        ):
+            dify_server.model_usage.persist(payload, "session-id", "user-id")
+
+        insert_values = database.cursor_instance.calls[1][1]
+        self.assertEqual(insert_values[9], 1000)
+        self.assertEqual(insert_values[13], 100)
+        self.assertEqual(insert_values[16:21], (None, None, None, None, None))
+        self.assertEqual(insert_values[-1], "missing-pricing")
 
     def test_runtime_stream_does_not_replay_transport_failure(self):
         body = FailingStreamingBody([])

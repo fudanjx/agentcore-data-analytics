@@ -26,11 +26,6 @@ def _load_agent_module(
         "ENABLE_TOOL_DETAILS",
         "ENABLE_MODEL_USAGE_LOGS",
         "MODEL_PRICING_LABEL",
-        "MODEL_INPUT_PRICE_PER_MTOK_USD",
-        "MODEL_OUTPUT_PRICE_PER_MTOK_USD",
-        "MODEL_CACHE_READ_PRICE_PER_MTOK_USD",
-        "MODEL_CACHE_WRITE_5M_PRICE_PER_MTOK_USD",
-        "MODEL_CACHE_WRITE_1H_PRICE_PER_MTOK_USD",
     ):
         monkeypatch.delenv(name, raising=False)
     if prompt_cache_ttl is None:
@@ -53,6 +48,7 @@ def _load_agent_module(
 
     code_interpreter = types.ModuleType("code_interpreter")
     code_interpreter.CODE_INTERPRETER_ID = ""
+    code_interpreter.system_guidance = lambda: ""
 
     gateway_proxy = types.ModuleType("gateway_proxy")
     gateway_proxy.GATEWAY_CONFIGS = {}
@@ -290,7 +286,9 @@ def test_prepare_requires_an_explicit_model(monkeypatch):
         agent._prepare(request)
 
 
-def test_model_usage_payload_separates_cache_tokens_and_estimates_cost(monkeypatch):
+def test_model_usage_payload_separates_cache_tokens_and_emits_pricing_label(
+    monkeypatch,
+):
     agent, _ = _load_agent_module(monkeypatch)
     request = agent.InvocationRequest(
         messages=[{"role": "user", "content": "create a dashboard"}],
@@ -323,13 +321,12 @@ def test_model_usage_payload_separates_cache_tokens_and_estimates_cost(monkeypat
     assert payload["cache_write_input_tokens"] == 4_000
     assert payload["total_input_tokens"] == 7_000
     assert payload["cache_read_ratio"] == 0.285714
-    assert payload["estimated_cost_breakdown_usd"] == {
-        "input": 0.003,
-        "output": 0.0015,
-        "cache_read": 0.0006,
-        "cache_write": 0.015,
-    }
-    assert payload["estimated_cost_usd"] == 0.0201
+    assert payload["pricing_label"] == (
+        "bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1"
+    )
+    assert "estimated_cost_usd" not in payload
+    assert "estimated_cost_breakdown_usd" not in payload
+    assert "pricing" not in payload
     assert payload["duration_ms"] == 12_345
     assert payload["succeeded"] is True
 
