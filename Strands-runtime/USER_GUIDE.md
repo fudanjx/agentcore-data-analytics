@@ -226,11 +226,28 @@ Requirements:
 | `CODE_INTERPRETER_REGION` | `AWS_DEFAULT_REGION`, then `ap-southeast-1` | Region containing the Code Interpreter |
 | `ENABLE_CODE_INTERPRETER` | `true` | Keep `true`; set `false` to override and suppress a configured interpreter |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | `60` to `28800`; values are clamped to this range |
-| `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Maximum tool-result characters retained in model context, minimum `1000` |
+| `CODE_INTERPRETER_RESULT_MODE` | `semantic` | Compact validated semantic results by default; set `legacy` only to restore raw event JSON temporarily |
+| `CODE_INTERPRETER_SEMANTIC_MAX_CHARS` | `10000` | Semantic result limit, clamped to `2000` through `20000` characters |
+| `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Legacy raw-result limit, minimum `1000`; used only when result mode is `legacy` |
 
 Use a custom Code Interpreter when skill resources or user files must be copied from S3. Its execution role is separate from the Runtime execution role; see the IAM examples below.
 
 When a request includes an uploaded file in a `<document_input>` tag, prefer Code Interpreter to download and process the file instead of relying only on its filename or S3 URL. Ensure that the custom Code Interpreter execution role has `s3:GetObject` permission for the uploaded file's S3 location.
+
+The Runtime adds a stable Code Interpreter result contract to the model prompt
+when semantic mode is active. Code and shell tasks must print one final
+`AGENTCORE_RESULT_JSON=<single-line JSON object>` marker containing boolean
+`ok`, a concise `summary`, and only the small aggregates needed for the next
+reasoning step. The object may include `row_count`, up to 20 `columns`, up to
+20 scalar `metrics`, up to 30 `sample_rows` with 20 fields each, `artifacts`
+with `s3_uri`, `filename`, and `content_type`, plus bounded warnings or errors.
+Do not print full dataframes, raw SQL results, recursive listings, generated
+file contents, or long logs. Keep bulk results in the sandbox or S3 and return
+artifact metadata instead.
+
+If the marker is absent or malformed, the Runtime supplies a bounded automatic
+fallback based on stdout and error state. If an emergency compatibility rollback
+is required, set `CODE_INTERPRETER_RESULT_MODE=legacy`; no rebuild is needed.
 
 ### AgentCore Memory
 

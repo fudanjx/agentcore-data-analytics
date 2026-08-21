@@ -91,7 +91,9 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `CODE_INTERPRETER_REGION` | `AWS_DEFAULT_REGION` or `ap-southeast-1` | Interpreter region |
 | `ENABLE_CODE_INTERPRETER` | `true` | Enable interpreter tools |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | Session timeout, constrained to 60-28,800 seconds |
-| `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Tool-result context limit |
+| `CODE_INTERPRETER_RESULT_MODE` | `semantic` | `semantic` returns a compact validated contract; `legacy` restores raw AgentCore event JSON for emergency compatibility |
+| `CODE_INTERPRETER_SEMANTIC_MAX_CHARS` | `10000` | Maximum characters returned to the model in semantic mode, constrained to 2,000-20,000 |
+| `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Legacy-mode raw tool-result context limit; ignored in semantic mode |
 | `ENABLE_TOOL_DETAILS` | `false` | Include bounded tool/skill inputs and results in streamed `agent_step` events |
 | `TOOL_DETAIL_MAX_CHARS` | `200000` | Maximum serialized characters exposed for each streamed tool input or result, constrained to 1,000-1,000,000 |
 | `MEMORY_ID` | Empty | AgentCore Memory resource; empty or unset disables Memory |
@@ -107,6 +109,46 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 `MODEL_ID` or `MODEL_ARN` must be configured. Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that optional capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
+
+### Code Interpreter result contract
+
+Semantic mode is the default. It prevents large Code Interpreter protocol events,
+dataframes, SQL dumps, and logs from consuming the agent's reasoning context. The
+model must finish each Code Interpreter program or shell task with one line in
+this form:
+
+```text
+AGENTCORE_RESULT_JSON={"ok":true,"summary":"Aggregated monthly visits.","row_count":18420,"columns":["month","department","visit_count"],"metrics":{"departments":18},"sample_rows":[{"month":"2026-06","department":"Cardiology","visit_count":245}],"artifacts":[{"s3_uri":"s3://bucket/outputs/report.html","filename":"report.html","content_type":"text/html"}],"warnings":[]}
+```
+
+`ok` and a non-empty `summary` are required. Optional fields are `row_count`,
+`columns`, `metrics`, `sample_rows`, `artifacts`, `warnings`, and `error`. The
+Runtime validates the object, retains at most 20 columns, 20 metrics, 30 sample
+rows with 20 fields each, 20 artifacts, and 20 warnings, then bounds the final
+result to `CODE_INTERPRETER_SEMANTIC_MAX_CHARS`. Full data and generated files
+must remain in the Code Interpreter sandbox or S3; return artifact metadata
+instead of file contents.
+
+If a program does not emit a valid marker, the Runtime returns a compact
+fallback containing success or failure state and a bounded stdout/error preview.
+Set `CODE_INTERPRETER_RESULT_MODE=legacy` only as a temporary emergency fallback;
+that mode restores raw event JSON and uses `CODE_INTERPRETER_MAX_RESULT_CHARS`.
+
+Every interpreter call also emits one `CODE_INTERPRETER_RESULT` CloudWatch record.
+It records only metadata about the exact result supplied to the model: tool name,
+duration, result size and configured limit, semantic source and success state, and
+counts of columns, metrics, sample rows, artifacts, warnings, and contract fields.
+It never logs code, stdout/stderr, summaries, sample values, error text, S3 URIs,
+or filenames. Query it with:
+
+```text
+fields @timestamp, @message
+| filter @message like /CODE_INTERPRETER_RESULT/
+| parse @message /"tool":"(?<tool>[^"]+)".*"duration_ms":(?<duration_ms>\d+)/
+| parse @message /"result_chars":(?<result_chars>\d+).*"source":"(?<source>[^"]+)/
+| sort @timestamp desc
+| display @timestamp, tool, source, duration_ms, result_chars
+```
 
 Each completed or failed model invocation emits one `MODEL_USAGE` record containing non-cached input, output, cache-read, cache-write, total-input token counts, cache-read ratio, duration, and estimated USD cost. Bedrock reports `inputTokens` as only the input that was neither read from nor written to cache, so total input is calculated as `inputTokens + cacheReadInputTokens + cacheWriteInputTokens`. The default rates match the Runtime's reference Claude Sonnet 4.6 profile as of August 2026; override them when the model, inference tier, routing type, negotiated pricing, or published AWS rates change. The estimate covers model-token charges only and is not a billing record.
 
@@ -191,6 +233,7 @@ Pass `-Force` to replace an existing output file. The script installs the requir
 strands_agent/main.py
 strands_agent/agent.py
 strands_agent/code_interpreter.py
+strands_agent/code_interpreter_result.py
 strands_agent/gateway_config.py
 strands_agent/gateway_proxy.py
 strands_agent/memory.py
@@ -205,6 +248,6 @@ For a versioned release artifact:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.0.5.zip `
+    -OutputPath .\dist\strands_agent_v0.0.7.zip `
     -Force
 ```

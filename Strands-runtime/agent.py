@@ -384,8 +384,17 @@ def _prepare(request: InvocationRequest):
 
         document_guidance = """When <document_input> tags are present:
 Each <document_input> provides the uploaded file’s original filename and S3 URL. Use Code Interpreter to download these files"""
+        interpreter_enabled = (
+            ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID
+        )
         base_prompt = "\n\n".join(
-            part for part in (system_prompt.load(), document_guidance) if part
+            part
+            for part in (
+                system_prompt.load(),
+                document_guidance,
+                code_interpreter.system_guidance() if interpreter_enabled else "",
+            )
+            if part
         )
         skills_enabled = skills_sync.skills_enabled()
         skills_guidance = skills_sync.ACTIVATION_GUIDANCE if skills_enabled else ""
@@ -402,7 +411,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         if skills_enabled:
             tools.append(skills_sync.read_skill_resource)
             plugins.append(AgentSkills(skills=skills_sync.LOCAL_DIR))
-        if ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID:
+        if interpreter_enabled:
             interpreter_session = code_interpreter.start_session(request.session_id)
             tools.extend(
                 code_interpreter.build_tools(
