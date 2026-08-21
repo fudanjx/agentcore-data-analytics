@@ -121,8 +121,9 @@ class FakeRequest:
 
 
 class FakeUsageCursor:
-    def __init__(self):
+    def __init__(self, row=None):
         self.calls = []
+        self.row = row
 
     def __enter__(self):
         return self
@@ -133,10 +134,13 @@ class FakeUsageCursor:
     def execute(self, statement, values=None):
         self.calls.append((statement, values))
 
+    def fetchone(self):
+        return self.row
+
 
 class FakeUsageConnection:
-    def __init__(self):
-        self.cursor_instance = FakeUsageCursor()
+    def __init__(self, row=None):
+        self.cursor_instance = FakeUsageCursor(row)
         self.closed = False
 
     def __enter__(self):
@@ -204,6 +208,37 @@ class DifyRuntimeTests(unittest.TestCase):
 
         self.assertIs(result, connection)
         self.assertEqual(calls, [((database_url,), {})])
+
+    def test_model_usage_resolves_email_from_dify_database(self):
+        database_url = (
+            "postgresql://user:secret@db.example:5432/nuhs"
+            "?sslmode=disable&connect_timeout=5"
+        )
+        dify_url = (
+            "postgresql://user:secret@db.example:5432/dify"
+            "?sslmode=disable&connect_timeout=5"
+        )
+        database = FakeUsageConnection(("person@example.com",))
+
+        with (
+            patch.object(dify_server.model_usage, "DATABASE_URL", database_url),
+            patch.object(
+                dify_server.model_usage,
+                "_connect",
+                return_value=database,
+            ) as connect,
+        ):
+            email = dify_server.model_usage._lookup_user_email(
+                "832757e8-7a25-4e75-8401-8b4a51bfe638"
+            )
+
+        self.assertEqual(email, "person@example.com")
+        connect.assert_called_once_with(dify_url)
+        self.assertEqual(
+            database.cursor_instance.calls[0][1],
+            ("832757e8-7a25-4e75-8401-8b4a51bfe638",),
+        )
+        self.assertTrue(database.closed)
 
     def test_discovers_ready_runtimes_across_pages_and_adds_short_alias(self):
         dify_server.DIFY_RUNTIMES.clear()
@@ -440,6 +475,11 @@ class DifyRuntimeTests(unittest.TestCase):
                 "_connect",
                 return_value=database,
             ),
+            patch.object(
+                dify_server.model_usage,
+                "_lookup_user_email",
+                return_value="person@example.com",
+            ),
             patch.object(dify_server, "_resolve_artifacts", return_value=[]),
         ):
             response = "".join(
@@ -463,13 +503,19 @@ class DifyRuntimeTests(unittest.TestCase):
         insert_values = database.cursor_instance.calls[1][1]
         self.assertEqual(insert_values[0], "proxy-session")
         self.assertEqual(insert_values[1], "proxy-user")
-        self.assertEqual(insert_values[8:14], (1000, 2000, 4000, 7000, 100, 7100))
-        self.assertEqual(insert_values[16:20], (0.003, 0.0015, 0.0006, 0.015))
+        self.assertEqual(insert_values[2], "person@example.com")
+        self.assertEqual(insert_values[9:15], (1000, 2000, 4000, 7000, 100, 7100))
+        self.assertEqual(insert_values[17:21], (0.003, 0.0015, 0.0006, 0.015))
         self.assertEqual(insert_values[-1], "test-pricing")
         self.assertIn(
             "DROP COLUMN IF EXISTS raw_usage",
             database.cursor_instance.calls[0][0],
         )
+        self.assertIn(
+            "ADD COLUMN IF NOT EXISTS user_email",
+            database.cursor_instance.calls[0][0],
+        )
+        self.assertIn("user_email", database.cursor_instance.calls[1][0])
         self.assertNotIn("raw_usage", database.cursor_instance.calls[1][0])
 
         chunks = [
@@ -505,6 +551,11 @@ class DifyRuntimeTests(unittest.TestCase):
                 dify_server.model_usage,
                 "_connect",
                 side_effect=OSError("database unavailable"),
+            ),
+            patch.object(
+                dify_server.model_usage,
+                "_lookup_user_email",
+                return_value=None,
             ),
         ):
             dify_server.model_usage.persist(

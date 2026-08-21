@@ -248,6 +248,6 @@ For a versioned release artifact:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.0.7.zip `
+    -OutputPath .\dist\strands_agent_v0.1.0.zip `
     -Force
 ```
