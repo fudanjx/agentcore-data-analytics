@@ -1,14 +1,29 @@
 ---
 name: nuh-subspecialty-mapping
-description: Apply the August 2026 NUH organizational-unit mapping to SOC, inpatient, or surgery reports by subspecialty, clinical department, cluster, or MOH specialty.
+description: Apply the August 2026 NUH organizational-unit mapping to SOC, inpatient, or surgery reports by subspecialty, clinical department, or MOH specialty.
 ---
 
 # NUH subspecialty mapping
 
 Use `subspec-mapping.json` as the August 13, 2026 reference lookup. It contains
 277 unique OUs (198 Activated and 79 Deactivated); the primary key is
-`organizational_unit`. It maps an OU to its display name, `department_grouping`,
-`cluster_grouping`, `moh_specialty_code`, and `moh_specialty_description`.
+`organizational_unit`. Each record contains only the three supported mapping
+keys: `organizational_unit`, `moh_specialty_description`, and
+`department_grouping`.
+
+## Field aliases
+
+Treat the following source-field names as aliases for the corresponding JSON
+mapping keys:
+
+| JSON mapping key | Source-field aliases |
+|---|---|
+| `organizational_unit` | `OU`, `Department_OU`, `Dept_OU` |
+| `moh_specialty_description` | `MOH Grouping`, `MOH speciality`, `MOH SPEC` |
+| `department_grouping` | `Clinical Department`, `Department`, `Discipline`, `Clinical Speciality` |
+
+Resolve the physical source column using the source table's schema while
+preserving the approved logical field contract below.
 
 ## Mandatory source OU field contract
 
@@ -42,17 +57,60 @@ cluster, subspecialty, or MOH-specialty mapping.
 1. Query the source workload rows or OU-level aggregates first. Never create or manually type source result rows.
 2. Load the complete bundled JSON programmatically from its `records` array and
    assert its `source.record_count`, record count, and unique
-   `organizational_unit` count are all 277. Never paste mapping entries into
-   generated Python, JavaScript, SQL, or HTML.
+   `organizational_unit` count are all 277. Never manually type, paste, or
+   model-reconstruct mapping entries in Python, JavaScript, SQL, or HTML.
 3. Merge the approved `source_ou` with `organizational_unit`
    as a many-to-one lookup. Do not inspect the schema to choose among OU fields.
 4. Label unmatched source OUs `Unmapped`; never guess, abbreviate, or derive a
    department name from the OU code or description.
 5. Before applying exclusions, report unmatched source OUs and validate source row count, total workload, and unique OU count against the SQL output.
-6. Exclude `cluster_grouping = 'XX Cluster'` (equivalently `department_grouping = 'xx Dept'`) only for clinical-workload reporting. This also excludes SOC Allied Health/non-consult OUs. Do not use `ou_status`, `valid_to`, or `remarks` as an analytical filter. Report the excluded visit count so the clinical chart can reconcile to the unfiltered source total.
-7. Aggregate by `department_grouping` for internal departments, `cluster_grouping` for internal clusters, or both MOH specialty fields for MOH reports. Preserve deactivated OUs when they occur in source data.
+6. The compact mapping does not contain cluster, status, validity-date, or
+   remarks fields. Do not infer those values from an OU or substitute another
+   mapping field; use an explicitly approved source-side field and rule when
+   such filtering is required.
+7. Aggregate by `department_grouping` for clinical departments or by
+   `moh_specialty_description` for MOH-specialty reports. Preserve deactivated
+   OUs when they occur in source data.
 
 The lookup is a mapping reference, not proof that an OU has source records. Do not assume every mapping OU is present in a period.
+
+## Row-limited SQL tools
+
+Use this low-freedom fallback only when the SQL tool cannot return or persist a
+complete month-by-OU export. Do not weaken QC or substitute a native department
+field.
+
+1. Stage `subspec-mapping-cte.sql` and use its two generated CTEs unchanged.
+   The file is deterministically generated from all 277 JSON records; it is the
+   only permitted database-side mapping representation.
+2. Verify the CTE's `mapping_count` and `mapping_sha256` against the bundled JSON.
+   Never edit its values by hand. Regenerate it only with
+   `scripts/generate_mapping_cte.py` when the JSON changes.
+3. Aggregate the source table by requested month and approved `source_ou`, then
+   left join `nuh_subspec_mapping` on `organizational_unit`.
+4. Preserve unmatched OUs as `Unmapped`. Apply any explicitly approved
+   source-side exclusion only after computing the unfiltered source total.
+5. Aggregate mapped workload to the requested department/cluster/MOH dimension
+   inside SQL. Return one row per month, with the plotted groups packed into a
+   JSON object and these audit columns:
+
+```text
+month_date,department_payload,source_total,mapped_total,unmapped_total,
+excluded_total,plotted_total,mapping_count,mapping_sha256
+```
+
+6. For S3/Trino, create `department_payload` with
+   `json_format(CAST(map_agg(group_name, workload) AS JSON))`. For RDS/PostgreSQL,
+   use `jsonb_object_agg(group_name, workload)::text`. Aggregate to one unique
+   row per `group_name` before calling either object aggregate.
+7. Run `scripts/validate_compact_mapped_dashboard.py` on the complete compact
+   result. Build charts, tables, and KPIs only from its flattened CSV.
+
+Require `mapped_total + unmapped_total = source_total`,
+`plotted_total + excluded_total = source_total`, and the JSON payload sum to
+equal `plotted_total` for every month and for the full requested period. If the
+compact result itself is truncated, batch by calendar month; each batch must
+still use the unchanged complete mapping CTE.
 
 ## SOC native-field precedence
 

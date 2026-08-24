@@ -7,3886 +7,1393 @@
     "active_ou_count": 198,
     "deactivated_ou_count": 79,
     "primary_key": "organizational_unit",
-    "usage": "Reference lookup for SOC, inpatient, and surgery. Do not filter by ou_status; exclude non-clinical XX Cluster rows only when reporting clinical workload."
+    "usage": "Reference lookup for SOC, inpatient, and surgery using only organizational_unit, moh_specialty_description, and department_grouping. Apply any clinical-workload exclusions from explicitly approved source-side fields."
   },
   "records": [
     {
-      "serial_number": 1,
-      "valid_to": "2008-04-30T00:00:00",
       "organizational_unit": "NSDNOMS",
-      "organizational_unit_name": "Oral & Maxillofacial Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 2,
-      "valid_to": "2008-04-30T00:00:00",
       "organizational_unit": "NSDNPND",
-      "organizational_unit_name": "Preventive Dentistry",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 3,
-      "valid_to": "2008-04-30T00:00:00",
       "organizational_unit": "NSDNRSD",
-      "organizational_unit_name": "Restorative Dentistry",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 4,
-      "valid_to": "2010-05-01T00:00:00",
       "organizational_unit": "NSORAR",
-      "organizational_unit_name": "Adult Reconstructive Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 5,
-      "valid_to": "2010-05-01T00:00:00",
       "organizational_unit": "NSORGO",
-      "organizational_unit_name": "General Orthopaedics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 6,
-      "valid_to": "2010-10-15T00:00:00",
       "organizational_unit": "NSONBH",
-      "organizational_unit_name": "Benign Haematology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 15,
       "moh_specialty_description": "Haematology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 7,
-      "valid_to": "2010-10-15T00:00:00",
       "organizational_unit": "NSONMH",
-      "organizational_unit_name": "Malignant Haematology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 15,
       "moh_specialty_description": "Haematology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 8,
-      "valid_to": "2015-01-27T00:00:00",
       "organizational_unit": "NSCTCT",
-      "organizational_unit_name": "CardiacThoracic&Vascular Surg",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 9,
-      "valid_to": "2015-12-31T00:00:00",
       "organizational_unit": "NSTRLI",
-      "organizational_unit_name": "Liver Transplant",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 10,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNDS",
-      "organizational_unit_name": "Dental Services",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 11,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSANAN",
-      "organizational_unit_name": "Anaesthesia",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 1,
       "moh_specialty_description": "Anaesthesiology",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "Anaesthesia",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "For the new Dept Grouping, NSANAN will be excluded from SCD and placed it as Anaesthesia"
+      "department_grouping": "Anaesthesia"
     },
     {
-      "serial_number": 12,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSASAS",
-      "organizational_unit_name": "Ambulatory Services",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 13,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSASWC",
-      "organizational_unit_name": "Wellness Centre",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To close the workflow to get the Code Table Maintenance Job ID and deactivation date.",
-      "remarks": "NSASWC-Wellness Centre (should be deactivated, replaced by NSHW wef ??)"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 14,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCACA",
-      "organizational_unit_name": "Cardiac",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 3,
       "moh_specialty_description": "Cardiology",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 15,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCMCM",
-      "organizational_unit_name": "Children's Medical Institute",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 16,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCPCP",
-      "organizational_unit_name": "Corporate Planning & Dev",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 17,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCPMRO",
-      "organizational_unit_name": "Medical Records Office",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 18,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSCS",
-      "organizational_unit_name": "Clinical Support Services",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 19,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSDDI",
-      "organizational_unit_name": "Diagnostic Imaging Dept",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 82,
       "moh_specialty_description": "Diagnostic Radiology",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "DDI",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Got Consult visit type"
+      "department_grouping": "DDI"
     },
     {
-      "serial_number": 20,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSDIET",
-      "organizational_unit_name": "Dietetics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 21,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSOT",
-      "organizational_unit_name": "Occupational Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 22,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPOD",
-      "organizational_unit_name": "Podiatry",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 23,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPT",
-      "organizational_unit_name": "Physiotherapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 24,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSST",
-      "organizational_unit_name": "Speech Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 25,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDEM",
-      "organizational_unit_name": "Emergency",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "SCD",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "/*changed from Emergency (NSDEM) to Emergency Medicine*/"
+      "department_grouping": "SCD"
     },
     {
-      "serial_number": 26,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSENEN",
-      "organizational_unit_name": "Otolaryngology&Head&Neck Surg",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 9,
       "moh_specialty_description": "ENT",
-      "cluster_grouping": "(09) ENT Cluster",
-      "department_grouping": "ENT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "ENT"
     },
     {
-      "serial_number": 27,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSEYEY",
-      "organizational_unit_name": "Ophthalmology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 10,
       "moh_specialty_description": "Eye",
-      "cluster_grouping": "(09) EYE Cluster",
-      "department_grouping": "EYE",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "EYE"
     },
     {
-      "serial_number": 28,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSGAGAS",
-      "organizational_unit_name": "Gastroenterology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 29,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSGAGM",
-      "organizational_unit_name": "Gastroenterology (Gen Med)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Ada wanted to remove (Epic has deactivated on 2 Feb 2023 email by Chole YJ Ho on 3 Feb 2023).\n?? Supporting document."
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 30,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHRHR",
-      "organizational_unit_name": "Hand&Reconstructive Microsurg",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 16,
       "moh_specialty_description": "Hand Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Hand)",
-      "department_grouping": "HRM",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "HRM"
     },
     {
-      "serial_number": 31,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSJHJH",
-      "organizational_unit_name": "Johns Hopkins - NUH",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 32,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMAMA",
-      "organizational_unit_name": "Medical Affairs",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 33,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEDERM",
-      "organizational_unit_name": "Dermatology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 34,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEEND",
-      "organizational_unit_name": "Endocrine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 8,
       "moh_specialty_description": "Endocrinology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 35,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEGEN",
-      "organizational_unit_name": "General Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 36,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEGRM",
-      "organizational_unit_name": "Geriatric Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 14,
       "moh_specialty_description": "Geriatric Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 37,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEID",
-      "organizational_unit_name": "Infectious Disease",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 38,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMENEU",
-      "organizational_unit_name": "Neurology -General",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 39,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEREN",
-      "organizational_unit_name": "Nephrology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 40,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMERES",
-      "organizational_unit_name": "Respiratory Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 38,
       "moh_specialty_description": "Respiratory Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 41,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMERHAB",
-      "organizational_unit_name": "Rehabilitation Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 35,
       "moh_specialty_description": "Rehabilitation Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 42,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMERHEU",
-      "organizational_unit_name": "Rheumatology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 86,
       "moh_specialty_description": "Rheumatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*wef 26 Oct 2020 after confirmed by UMC*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 43,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNENE",
-      "organizational_unit_name": "Neonatology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 19,
       "moh_specialty_description": "Neonatology",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 44,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNUNU",
-      "organizational_unit_name": "Nursing",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 45,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSO&GO",
-      "organizational_unit_name": "Gynaecology-Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 46,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSO&GY",
-      "organizational_unit_name": "Gynaecology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 47,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSO&OB",
-      "organizational_unit_name": "Obstetrics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 24,
       "moh_specialty_description": "Obstretrics",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 48,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSOBCT",
-      "organizational_unit_name": "NUH Clinical Trial Unit",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 49,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSOBOB",
-      "organizational_unit_name": "Office of Biomedical Research",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 50,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONMO",
-      "organizational_unit_name": "Medical Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 51,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONRO",
-      "organizational_unit_name": "Radiation Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 52,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORPO",
-      "organizational_unit_name": "Paediatric Orthopaedics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 53,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSM",
-      "organizational_unit_name": "Sports Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 54,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSS",
-      "organizational_unit_name": "Spinal Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 55,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORTR",
-      "organizational_unit_name": "Orthopaedic Trauma",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 56,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPMPM",
-      "organizational_unit_name": "Paediatrics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 57,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPMPO",
-      "organizational_unit_name": "Paediatric-Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 58,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPSPS",
-      "organizational_unit_name": "Paediatric Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 31,
       "moh_specialty_description": "Paediatric Surgery",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 59,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPYPM",
-      "organizational_unit_name": "Psychological Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 60,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSSSS",
-      "organizational_unit_name": "Specialised Support Services",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 61,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUCO",
-      "organizational_unit_name": "Colorectal Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "as at Dec 2024, it is mapped under Colorectal Surgery."
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 62,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUGS",
-      "organizational_unit_name": "General Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 63,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUHP",
-      "organizational_unit_name": "Hepatobiliary Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 64,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUNS",
-      "organizational_unit_name": "Neurosurgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "as at Dec 2024, it is mapped under Neurosurgery."
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 65,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUPL",
-      "organizational_unit_name": "Plastic Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "as at Dec 2024, it is mapped under Plastic Surgery"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 66,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPHD",
-      "organizational_unit_name": "Pharmacy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 67,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSURUR",
-      "organizational_unit_name": "Urology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 41,
       "moh_specialty_description": "Urology",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Urology",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Urology"
     },
     {
-      "serial_number": 68,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSEDTU",
-      "organizational_unit_name": "Extended Diagnosis Treatment Unit",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "SCD",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "SCD"
     },
     {
-      "serial_number": 69,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNOMSP",
-      "organizational_unit_name": "OMS - Postgrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 70,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNOMSU",
-      "organizational_unit_name": "OMS - Undergrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 71,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNOMSS",
-      "organizational_unit_name": "OMS - Specialist",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 72,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNPNDS",
-      "organizational_unit_name": "Preventive - Specialist",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 73,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNPNDU",
-      "organizational_unit_name": "Preventive - Undergrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 74,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNPNDP",
-      "organizational_unit_name": "Preventive - Postgrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 75,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNRSDS",
-      "organizational_unit_name": "Restorative - Specialist",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 76,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNRSDP",
-      "organizational_unit_name": "Restorative - Postgrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 77,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNRSDU",
-      "organizational_unit_name": "Restorative - Undergrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 78,
-      "valid_to": "2021-03-31T00:00:00",
       "organizational_unit": "NSDOMSS",
-      "organizational_unit_name": "OMS - Specialist",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 79,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNDRSDU",
-      "organizational_unit_name": "Restorative - Undergrad",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 80,
-      "valid_to": "2009-12-31T00:00:00",
       "organizational_unit": "NSTRKD",
-      "organizational_unit_name": "Kidney Transplant",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 81,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSHNRO",
-      "organizational_unit_name": "H&N Cancer Prog-Rad Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 82,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHNENT",
-      "organizational_unit_name": "H&N Cancer Prog-ENT",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 9,
       "moh_specialty_description": "ENT",
-      "cluster_grouping": "(09) ENT Cluster",
-      "department_grouping": "ENT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "ENT"
     },
     {
-      "serial_number": 83,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHNMO",
-      "organizational_unit_name": "H&N Cancer Prog-Med Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 84,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSO&GMO",
-      "organizational_unit_name": "Gynae Onco Program-Med Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 85,
-      "valid_to": "2021-06-30T00:00:00",
       "organizational_unit": "NSO&GRO",
-      "organizational_unit_name": "Gynae Onco Program-Rad Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 86,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUBS",
-      "organizational_unit_name": "GS Breast Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 87,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUGSTR",
-      "organizational_unit_name": "GS Trauma",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 88,
-      "valid_to": "2025-09-17T00:00:00",
       "organizational_unit": "NSO&GGO",
-      "organizational_unit_name": "Gynae Onco Program-Gynae Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Carol Fang has raised a deactivation in 17 Sep 2025.RC/010925/758054"
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 89,
-      "valid_to": "2017-03-17T00:00:00",
       "organizational_unit": "NSPFCO&G",
-      "organizational_unit_name": "Pelvic Floor Centre - O&G",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 90,
-      "valid_to": "2017-12-01T00:00:00",
       "organizational_unit": "NSPFCCOL",
-      "organizational_unit_name": "Pelvic Floor Centre - COL",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 5,
       "moh_specialty_description": "Colorectal Surgery",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 91,
-      "valid_to": "2022-08-31T00:00:00",
       "organizational_unit": "NSPFCURO",
-      "organizational_unit_name": "Pelvic Floor Centre - URO",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 41,
       "moh_specialty_description": "Urology",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Urology",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "Urology"
     },
     {
-      "serial_number": 92,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNEUSTK",
-      "organizational_unit_name": "Neurology - Stroke",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 93,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSDOCCRO",
-      "organizational_unit_name": "DOCC-Radiation Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 94,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSDOCCMO",
-      "organizational_unit_name": "DOCC-Medical Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 95,
-      "valid_to": "2018-07-31T00:00:00",
       "organizational_unit": "NSDOCCDN",
-      "organizational_unit_name": "DOCC-Dental",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 96,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSNCCRO",
-      "organizational_unit_name": "NCC - Radiation Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 97,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSNCCMO",
-      "organizational_unit_name": "NCC - Medical Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 98,
-      "valid_to": "2022-08-31T00:00:00",
       "organizational_unit": "NSNCCNEU",
-      "organizational_unit_name": "NCC - Neuroscience",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 22,
       "moh_specialty_description": "Neurosurgery",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 99,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEPSGM",
-      "organizational_unit_name": "Gen Med Psych",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 100,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPO",
-      "organizational_unit_name": "Women's Mental HP (Obs)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 101,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPG",
-      "organizational_unit_name": "Women's Mental HP (Gynae)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 102,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPMPA",
-      "organizational_unit_name": "Adolescent Service",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 103,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSO&GF",
-      "organizational_unit_name": "Subfertility",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 104,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPMDP",
-      "organizational_unit_name": "Developmental Behavioral Paeds",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 81,
       "moh_specialty_description": "Child Development",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 105,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPNG",
-      "organizational_unit_name": "Women's Mental HP (N.Gynae)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 106,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPSF",
-      "organizational_unit_name": "Women's Mental HP (Sub Fert)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 107,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEDFM",
-      "organizational_unit_name": "Division of Family Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 108,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSLUNGRO",
-      "organizational_unit_name": "NCIS Lung MTC - Rad Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 109,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSLUNGSU",
-      "organizational_unit_name": "CTVS Thoracic Surg_Onco",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To be deactivated",
-      "remarks": "Kindly follow up with (Joella) Tew Kai Mei (NUHCS) <joella_tew@nuhs.edu.sg> on the deactivation process"
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 110,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSLUNGMO",
-      "organizational_unit_name": "NCIS Lung MTC - Med Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 111,
-      "valid_to": "2009-07-07T00:00:00",
       "organizational_unit": "NSMA",
-      "organizational_unit_name": "SERVICES OF MA",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 112,
-      "valid_to": "2009-07-07T00:00:00",
       "organizational_unit": "NSSUOM",
-      "organizational_unit_name": "Oncology Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 27,
       "moh_specialty_description": "Surgical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 113,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPHL",
-      "organizational_unit_name": "Prosthetic Hand Lab",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 114,
-      "valid_to": "2009-12-04T00:00:00",
       "organizational_unit": "NSTRKPRE",
-      "organizational_unit_name": "Transplant Kidney Pre-surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 115,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRKDO",
-      "organizational_unit_name": "Transplant Kidney Donor",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 116,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRKREC",
-      "organizational_unit_name": "Transplant Kidney Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 117,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRKPD",
-      "organizational_unit_name": "Transplant KD Pre Donor",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 118,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRKPR",
-      "organizational_unit_name": "Transplant KD Pre Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 119,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEVIH",
-      "organizational_unit_name": "Infectious Disease MIDC",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 120,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORHK",
-      "organizational_unit_name": "Hip & Knee",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 121,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORFA",
-      "organizational_unit_name": "Foot & Ankle",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 122,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSE",
-      "organizational_unit_name": "Shoulder & Elbow",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 123,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORMO",
-      "organizational_unit_name": "Musculoskeletal Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 124,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSCOLMO",
-      "organizational_unit_name": "NCIS Colorectal MTC - Med Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 125,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSCOLRO",
-      "organizational_unit_name": "NCIS Colorectal MTC - Rad Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 126,
-      "valid_to": "2022-08-31T00:00:00",
       "organizational_unit": "NSCOLSU",
-      "organizational_unit_name": "NCIS Colorectal MTC - Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 5,
       "moh_specialty_description": "Colorectal Surgery",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 127,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHAEM",
-      "organizational_unit_name": "Haematology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 15,
       "moh_specialty_description": "Haematology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 128,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSUGIMO",
-      "organizational_unit_name": "NCIS Upp GI MTC - Med Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 129,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSUGIRO",
-      "organizational_unit_name": "NCIS Upp GI MTC - Rad Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 130,
-      "valid_to": "2022-08-31T00:00:00",
       "organizational_unit": "NSUGISU",
-      "organizational_unit_name": "NCIS Upp GI MTC - Surg",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 131,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSBRTMO",
-      "organizational_unit_name": "NCIS Breast MTC - Med Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 132,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSBRTRO",
-      "organizational_unit_name": "NCIS Breast MTC - Rad Onc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 34,
       "moh_specialty_description": "Radiotherapy",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 133,
-      "valid_to": "2021-03-31T00:00:00",
       "organizational_unit": "NSBRTSU",
-      "organizational_unit_name": "NCIS Breast MTC - Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 134,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCACP",
-      "organizational_unit_name": "Cardiology Paeds",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 3,
       "moh_specialty_description": "Cardiology",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To be deactivated",
-      "remarks": "Kindly follow up with (Joella) Tew Kai Mei (NUHCS) <joella_tew@nuhs.edu.sg> on the deactivation process"
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 135,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCTCP",
-      "organizational_unit_name": "Cardiothoracic Paeds",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 136,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNSD",
-      "organizational_unit_name": "(Sub) Dental Services",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 137,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNSOMS",
-      "organizational_unit_name": "(Sub) Oral MaxilloSurg - Spec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 138,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNSPND",
-      "organizational_unit_name": "(Sub) Preventive - Spec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 139,
-      "valid_to": "2018-05-09T00:00:00",
       "organizational_unit": "NSDNSRSD",
-      "organizational_unit_name": "(Sub) Restorative - Spec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 140,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSREACH",
-      "organizational_unit_name": "REACH Program (West)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 141,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCARPSY",
-      "organizational_unit_name": "Cardiac-Psychiatry Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 3,
       "moh_specialty_description": "Cardiology",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 142,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSOHS",
-      "organizational_unit_name": "CTVS Adult Cardiac Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 143,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCARPPM",
-      "organizational_unit_name": "Cardiac-PPM",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 3,
       "moh_specialty_description": "Cardiology",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 144,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCTPOD",
-      "organizational_unit_name": "CTVS-Podiatry",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "No",
-      "remarks": "Non consult services"
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 145,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRLPR",
-      "organizational_unit_name": "Transplant Liver Pre Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 146,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRLREC",
-      "organizational_unit_name": "Transplant Liver Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 147,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRLPD",
-      "organizational_unit_name": "Transplant Liver Pre Donor",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 148,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRLDO",
-      "organizational_unit_name": "Transplant Liver Donor",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 149,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSUGIONC",
-      "organizational_unit_name": "NCIS Upper Gastrointestinal",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 150,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSCOLONC",
-      "organizational_unit_name": "NCIS Colorectal",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 151,
-      "valid_to": "2015-09-30T00:00:00",
       "organizational_unit": "NSO&GONC",
-      "organizational_unit_name": "NCIS Gynaecology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 152,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSGCP",
-      "organizational_unit_name": "G-Race Community Programme",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 153,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPB",
-      "organizational_unit_name": "WEHS-Breast Cancer Care",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 154,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPM",
-      "organizational_unit_name": "WEHS-Maternal Care (>1yr)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 155,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPP",
-      "organizational_unit_name": "WEHS-Pregnancy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 156,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSWMHPW",
-      "organizational_unit_name": "WEHS-Others",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 157,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONSO",
-      "organizational_unit_name": "Surgical Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 27,
       "moh_specialty_description": "Surgical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 158,
-      "valid_to": "2014-12-31T00:00:00",
       "organizational_unit": "NSTPAK",
-      "organizational_unit_name": "Pancreas After Kidney Tx",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 159,
-      "valid_to": "2017-12-31T00:00:00",
       "organizational_unit": "NSTPKR",
-      "organizational_unit_name": "Pancreas SPK Pre Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 160,
-      "valid_to": "2018-05-31T00:00:00",
       "organizational_unit": "NSTSPK",
-      "organizational_unit_name": "Pancreas Kidney Transplant",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 161,
-      "valid_to": "2018-05-31T00:00:00",
       "organizational_unit": "NSTPAKR",
-      "organizational_unit_name": "Pancreas After Kidney PreRecip",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 162,
-      "valid_to": "2018-05-31T00:00:00",
       "organizational_unit": "NSTPAR",
-      "organizational_unit_name": "Pancreas Tx Alone PreRecipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 163,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTPTA",
-      "organizational_unit_name": "Pancreas Transplant Alone",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 164,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRGEN",
-      "organizational_unit_name": "Kidney Treatment",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 165,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSFFMC",
-      "organizational_unit_name": "Frontier Family Med Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 166,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUWM",
-      "organizational_unit_name": "Bariatric Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 167,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUGI",
-      "organizational_unit_name": "GS Upper GI",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 168,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCTTH",
-      "organizational_unit_name": "CTVS Thoracic Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 169,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCTVA",
-      "organizational_unit_name": "CTVS Vascular Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 4,
       "moh_specialty_description": "Cardiothoracic Surgery",
-      "cluster_grouping": "(02) NUHCS - National Uni Heart Centre Singapore",
-      "department_grouping": "NUHCS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUHCS"
     },
     {
-      "serial_number": 170,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUHERN",
-      "organizational_unit_name": "GS Hernia Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 171,
-      "valid_to": "2024-01-01T00:00:00",
       "organizational_unit": "NSMEDERP",
-      "organizational_unit_name": "Dermatology - Paediatrics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Pending",
-      "remarks": "Removed, have deactivated on epic Aug 2024 - Wei Ting. She is on ML, pending for Miki's confirmation"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 172,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONBMT",
-      "organizational_unit_name": "Bone Marrow Transplant @ NCIS",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 15,
       "moh_specialty_description": "Haematology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 173,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSIDDEG",
-      "organizational_unit_name": "Infectious Disease - Dengue",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 174,
-      "valid_to": "2021-03-31T00:00:00",
       "organizational_unit": "NSOHCHR",
-      "organizational_unit_name": "Human Resource",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 175,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMFA",
-      "organizational_unit_name": "Sports Med - Foot & Ankle",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 176,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMPO",
-      "organizational_unit_name": "Sports Med - Paeds Ortho",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 177,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMHK",
-      "organizational_unit_name": "Sports Med - Hip & Knee",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 178,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMSE",
-      "organizational_unit_name": "Sports Med - Shoulder & Elbow",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 179,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNUH2H",
-      "organizational_unit_name": "Transition Care (NUH2H)",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 180,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUBSCA",
-      "organizational_unit_name": "GS Breast Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 181,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUCOCA",
-      "organizational_unit_name": "Colorectal Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 182,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUHPCA",
-      "organizational_unit_name": "Hepato & Pancreas Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 183,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUGICA",
-      "organizational_unit_name": "GS Upper GI Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 184,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUNSCA",
-      "organizational_unit_name": "Neurosurgery Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 185,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSSUENCA",
-      "organizational_unit_name": "GS Thyroid & Endocrine Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 186,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSUEN",
-      "organizational_unit_name": "GS Thyroid & Endocrine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 12,
       "moh_specialty_description": "General Surgery",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Surgery",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Surgery"
     },
     {
-      "serial_number": 187,
-      "valid_to": "2025-01-13T00:00:00",
       "organizational_unit": "NSURURCA",
-      "organizational_unit_name": "Urology Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 41,
       "moh_specialty_description": "Urology",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Urology",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Yaron has raised deactivation in 13 Jan 2025.RC/241224/741323"
+      "department_grouping": "Urology"
     },
     {
-      "serial_number": 188,
-      "valid_to": "2022-08-31T00:00:00",
       "organizational_unit": "NSURURSC",
-      "organizational_unit_name": "Urology Cancer Screening",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 41,
       "moh_specialty_description": "Urology",
-      "cluster_grouping": "(04) USC - Uni Surgical Cluster",
-      "department_grouping": "Urology",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "Urology"
     },
     {
-      "serial_number": 189,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMHR",
-      "organizational_unit_name": "Sports Med - Hand Recon",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 190,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRPPR",
-      "organizational_unit_name": "Transplant Pancreas Pre-Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 191,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTRPREC",
-      "organizational_unit_name": "Transplant Pancreas Recipient",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 36,
       "moh_specialty_description": "Renal Medicine",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 192,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSTLGEN",
-      "organizational_unit_name": "Liver Treatment",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "(10) Transplant",
-      "department_grouping": "NUCOT",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "MOH Mapping changed from Apr 2026 reporting"
+      "department_grouping": "NUCOT"
     },
     {
-      "serial_number": 193,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSENMA",
-      "organizational_unit_name": "ENT Community Audiology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 194,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONPAL",
-      "organizational_unit_name": "Palliative Care",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 26,
       "moh_specialty_description": "Medical Oncology",
-      "cluster_grouping": "(01) NCIS - National Uni Cancer Institute Singapore",
-      "department_grouping": "NCIS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "From Haematology -> Medical Oncology. Replied by Jason"
+      "department_grouping": "NCIS"
     },
     {
-      "serial_number": 195,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSORSMSS",
-      "organizational_unit_name": "Sports Med - Spinal Surgery",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 28,
       "moh_specialty_description": "Orthopaedic Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Ortho)",
-      "department_grouping": "Ortho Surg",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Ortho Surg"
     },
     {
-      "serial_number": 196,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSASCAT",
-      "organizational_unit_name": "Assessment & Shared Care Team",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 197,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPLTPRE",
-      "organizational_unit_name": "P Liver Transplant Pre Rec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 31,
       "moh_specialty_description": "Paediatric Surgery",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 198,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPLTREC",
-      "organizational_unit_name": "P Liver Transplant Rec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 31,
       "moh_specialty_description": "Paediatric Surgery",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 199,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPKTPRE",
-      "organizational_unit_name": "P KD Transplant Pre Rec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 31,
       "moh_specialty_description": "Paediatric Surgery",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 200,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPKTREC",
-      "organizational_unit_name": "P KD Transplant Rec",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 31,
       "moh_specialty_description": "Paediatric Surgery",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     },
     {
-      "serial_number": 201,
-      "valid_to": "2021-03-31T00:00:00",
       "organizational_unit": "NSMEDAC",
-      "organizational_unit_name": "Acute Care",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 202,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMAFPSU",
-      "organizational_unit_name": "AF Primary Stroke Prevention",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 203,
-      "valid_to": "2021-03-31T00:00:00",
       "organizational_unit": "NSWCSTSC",
-      "organizational_unit_name": "WELLNESSCTRSTAFFHEALTHSCREEN",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 204,
-      "valid_to": "2024-01-01T00:00:00",
       "organizational_unit": "NSMDIMM",
-      "organizational_unit_name": "Derma immunology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To close the workflow to get the Code Table Maintenance Job ID and deactivation date.",
-      "remarks": "Removed, have deactivated on epic Aug 2024"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 205,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMDHAN",
-      "organizational_unit_name": "Derma Hair and Nail",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To close the workflow to get the Code Table Maintenance Job ID and deactivation date.",
-      "remarks": "Removed, have deactivated on epic Aug 2024"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 206,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSKHFMC",
-      "organizational_unit_name": "Keat Hong Med Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 207,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSO&GU",
-      "organizational_unit_name": "Urogynae & Pelvic Recon",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 25,
       "moh_specialty_description": "Gynaecology",
-      "cluster_grouping": "(09) O&G Cluster",
-      "department_grouping": "NUWoC (O&G)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUWoC (O&G)"
     },
     {
-      "serial_number": 208,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEPREP",
-      "organizational_unit_name": "Infectious Disease - PREP",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 209,
-      "valid_to": "2021-01-01T00:00:00",
       "organizational_unit": "NSMICARE",
-      "organizational_unit_name": "I-CARE Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 210,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEALL",
-      "organizational_unit_name": "Allergy Adult",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 86,
       "moh_specialty_description": "Rheumatology",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Ada wanted to remove (Epic has deactivated on 2 Feb 2023 email by Chole YJ Ho on 3 Feb 2023).\n?? Supporting document."
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 211,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEALLP",
-      "organizational_unit_name": "Allergy Paediatrics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 86,
       "moh_specialty_description": "Rheumatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "From Paed Medicine changed to Rheumatology. These are for paeds cases seen in DOM allergy clinic"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 212,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMETRL",
-      "organizational_unit_name": "Travel Clinic Adult",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 213,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMETRLP",
-      "organizational_unit_name": "Travel Clinic Paediatrics",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 214,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSURURHS",
-      "organizational_unit_name": "Urology Health Screening",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Connie Oh has raised to deactivate in Aug 2022.RC/020822/683520"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 215,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSONGENE",
-      "organizational_unit_name": "Genetics Adult Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 216,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPCN",
-      "organizational_unit_name": "Primary Care Network",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 217,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHEAD",
-      "organizational_unit_name": "Headache",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*change from 13(GM) to 20(Neurology) wef Jan 2019*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 218,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMUSL",
-      "organizational_unit_name": "Neuro Muscular",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*changed from 13(GM) to 20(Neurology) wef Jan 2019*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 219,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMMOD",
-      "organizational_unit_name": "Movement Disorder",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*changed from 13(GM) to 20(Neurology) wef Jan 2019*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 220,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMMTS",
-      "organizational_unit_name": "Multiple Sclerosis",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*changed from 13(GM) to 20(Neurology) wef Jan 2019*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 221,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEPI",
-      "organizational_unit_name": "EPILEPSY",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*changed from 13(GM) to 20(Neurology) wef Jan 2019*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 222,
-      "valid_to": "2024-01-01T00:00:00",
       "organizational_unit": "NSMSKCA",
-      "organizational_unit_name": "Skin Cancer",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Wei Ting has raised to deactivation and email on 13 November 2024 and indicated in the reviewing document: 'To remove, has been deactivated on Epic in August 2024'."
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 223,
-      "valid_to": "2024-01-01T00:00:00",
       "organizational_unit": "NSMDEAIM",
-      "organizational_unit_name": "DERM AIM",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 7,
       "moh_specialty_description": "Dermatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Wei Ting has raised to deactivation and email on 13 November 2024 and indicated in the reviewing document: 'To remove, has been deactivated on Epic in August 2024'."
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 224,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSOMS",
-      "organizational_unit_name": "Oral Maxillofacial Surgery_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 225,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSPER",
-      "organizational_unit_name": "Periodontics_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 226,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSORT",
-      "organizational_unit_name": "Orthodontics_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 227,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSPAE",
-      "organizational_unit_name": "Paedodontics_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 228,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSPRO",
-      "organizational_unit_name": "Prosthodontics_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 229,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSEND",
-      "organizational_unit_name": "Endodontics_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 230,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSSN",
-      "organizational_unit_name": "Special Needs_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 231,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDSGD",
-      "organizational_unit_name": "General Dentistry_S",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 232,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPOMS",
-      "organizational_unit_name": "Oral Maxillofacial Surgery_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 85,
       "moh_specialty_description": "Oral & Maxillo-facial Surgery",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 233,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPPER",
-      "organizational_unit_name": "Periodontics_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 234,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPORT",
-      "organizational_unit_name": "Orthodontics_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 235,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPPAE",
-      "organizational_unit_name": "Paedodontics_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 236,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPPRO",
-      "organizational_unit_name": "Prosthodontics_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 237,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDPEND",
-      "organizational_unit_name": "Endodontics_PG",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 238,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDUDEN",
-      "organizational_unit_name": "Undergraduate Svc",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 239,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDOHT",
-      "organizational_unit_name": "NYP Oral Health Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 240,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSDGDDI",
-      "organizational_unit_name": "Dental Implantology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "(07) Dental Cluster",
-      "department_grouping": "NUCOHS",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "NUCOHS"
     },
     {
-      "serial_number": 241,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPROPEL",
-      "organizational_unit_name": "Parent Emo Health Child Learn",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 242,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEALLG",
-      "organizational_unit_name": "Allergy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 86,
       "moh_specialty_description": "Rheumatology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "/*wef 26 Oct 2020 after confirmed by UMC*/"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 243,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPPT",
-      "organizational_unit_name": "Paeds Physiotherapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 244,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPOT",
-      "organizational_unit_name": "Paeds Occupational Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 245,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPST",
-      "organizational_unit_name": "Paeds Speech Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 246,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCSPPOD",
-      "organizational_unit_name": "Paeds Podiatry",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 30,
       "moh_specialty_description": "Paediatric Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Non consult visit type"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 247,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMSW",
-      "organizational_unit_name": "NSMSW",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 248,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMNUSLP",
-      "organizational_unit_name": "Neurology Sleep",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 249,
-      "valid_to": "2022-08-15T00:00:00",
       "organizational_unit": "NSDOHTDH",
-      "organizational_unit_name": "NYP Dental Hygiene",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Keng Leng has raised deactivation in 15 Aug 2022.RC/280722/683129"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 250,
-      "valid_to": "2022-08-15T00:00:00",
       "organizational_unit": "NSDOHTDT",
-      "organizational_unit_name": "NYP Dental Therapy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 6,
       "moh_specialty_description": "Dentistry",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Keng Leng has raised deactivation in 15 Aug 2022.RC/280722/683129"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 251,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSIPMDA",
-      "organizational_unit_name": "Adolescents Depression Program",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 252,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPUCC",
-      "organizational_unit_name": "Paediatric Urgent Care Centre",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 253,
-      "valid_to": "2025-11-11T00:00:00",
       "organizational_unit": "NSBBSHC",
-      "organizational_unit_name": "Bukit Batok SHC",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "Deactivated",
-      "remarks": "Tze Kang has raised deactivation in 11 Nov 2025.RC/241025/760754"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 254,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSJWSHC",
-      "organizational_unit_name": "Jurong West SHC",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Not apply to consultation visit. Should under AF, AR or TT"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 255,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSC",
-      "organizational_unit_name": "Satellite Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 256,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSF",
-      "organizational_unit_name": "Swab Facility",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 257,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPSC",
-      "organizational_unit_name": "PSC",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 258,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSOSP",
-      "organizational_unit_name": "Community Isolation Facility",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 259,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPAEDS",
-      "organizational_unit_name": "Paediatrics & Adolescents Psy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 260,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMSC",
-      "organizational_unit_name": "Mass Screening Centre",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 261,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSUBNEU",
-      "organizational_unit_name": "Uni Brain Health Unit- Neuro",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 20,
       "moh_specialty_description": "Neurology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 262,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSUBPSY",
-      "organizational_unit_name": "Uni Brain Health Unit- Psy",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 33,
       "moh_specialty_description": "Psychiatric Medicine",
-      "cluster_grouping": "(11) Psychological Medicine",
-      "department_grouping": "Psychological Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "Psychological Medicine"
     },
     {
-      "serial_number": 263,
-      "valid_to": "2024-06-10T00:00:00",
       "organizational_unit": "NSUBGER",
-      "organizational_unit_name": "Uni Brain Health Unit- Geri",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Deactivated",
-      "moh_specialty_code": 14,
       "moh_specialty_description": "Geriatric Medicine",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Jia Ning raised deactivation in Code Table Maintenance in 10 Jun 2024. RC/230524/729044"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 264,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSAIMSLP",
-      "organizational_unit_name": "AIM Sleep Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "No. To close the workflow to get the Code Table Maintenance Job ID and deactivation date.",
-      "remarks": "Can remove, no longer in use wef Nov 2024. service will move to RCCM"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 265,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHRMO",
-      "organizational_unit_name": "HRM Musculokeletal Oncology",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 16,
       "moh_specialty_description": "Hand Surgery",
-      "cluster_grouping": "(05) UOHC - Uni Ortho, Hand & RC Microsurgery Cluster (Hand)",
-      "department_grouping": "HRM",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": null
+      "department_grouping": "HRM"
     },
     {
-      "serial_number": 266,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNVC",
-      "organizational_unit_name": "COVID-19 Treatment Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 267,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSSTC",
-      "organizational_unit_name": "Staff Clinic",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 268,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSOH",
-      "organizational_unit_name": "Occupational Health",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 269,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHW",
-      "organizational_unit_name": "Health & Wellness",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "SCD",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "SCD"
     },
     {
-      "serial_number": 270,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSHDSPP",
-      "organizational_unit_name": "Health/Dev Supt Presch P'ship",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 271,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSPROWE",
-      "organizational_unit_name": "ProPEL WEHS+@Community",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": null
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 272,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEPALL",
-      "organizational_unit_name": "Supportive and Palliative Care",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 29,
       "moh_specialty_description": "Palliative Medicine",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 273,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNUHSHH",
-      "organizational_unit_name": "NUHS@Home",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 13,
       "moh_specialty_description": "General Medicine",
-      "cluster_grouping": "(08) Specialist Clinical Departments",
-      "department_grouping": "SCD",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "SCD"
     },
     {
-      "serial_number": 274,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSNUCD",
-      "organizational_unit_name": "NATL UNI CTR DIGESTIVE HEALTH",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 11,
       "moh_specialty_description": "Gastroenterology",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 275,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSMEMTC",
-      "organizational_unit_name": "Infectious Disease - TB",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": 17,
       "moh_specialty_description": "Infectious Diseases",
-      "cluster_grouping": "(03) UMC - Uni Medicine Cluster",
-      "department_grouping": "Medicine",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "Medicine"
     },
     {
-      "serial_number": 276,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSGENE",
-      "organizational_unit_name": "Genomics Medicine",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "XX Cluster",
-      "department_grouping": "xx Dept",
-      "dept_ou_signoff_review_as_at_yr2025": "N.A.",
-      "remarks": "Not in Sign off 2024, code was created after. Used for Allied Health services, do not include in mapping"
+      "department_grouping": "xx Dept"
     },
     {
-      "serial_number": 277,
-      "valid_to": "9999-12-31T00:00:00",
       "organizational_unit": "NSCE",
-      "organizational_unit_name": "Children's Emergency",
-      "effective_updated_date": "2025-12-10T00:00:00",
-      "ou_status": "Activated",
-      "moh_specialty_code": "xx",
       "moh_specialty_description": "xx",
-      "cluster_grouping": "(06) UCMI - Uni Childrens Medical Institute",
-      "department_grouping": "NUWoC (KTP-NUCMI)",
-      "dept_ou_signoff_review_as_at_yr2025": "Yes",
-      "remarks": "Newly added for Yr 2025 sign-off"
+      "department_grouping": "NUWoC (KTP-NUCMI)"
     }
   ]
 }
