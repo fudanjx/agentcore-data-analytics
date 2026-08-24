@@ -39,3 +39,4 @@ him_scripts/
 Strands-runtime/.bundle-build/
 Strands-runtime/dist/
 /tests/
+docs/architecture/

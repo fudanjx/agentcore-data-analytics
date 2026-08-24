@@ -95,6 +95,12 @@ month-by-`source_ou` SQL export before building HTML:
 Preserve the validator's mapped CSV and audit JSON with the deliverable. Do not
 build or present the dashboard when the validator returns a failed QC status.
 
+When a row-limited SQL tool cannot return or persist the complete month-by-OU
+export, follow the compact mapped-result workflow in
+`references/subspec-mapping.md`. Use the bundled generated mapping CTE unchanged
+and validate the compact result with
+`scripts/validate_compact_mapped_dashboard.py`.
+
 ## Outputs
 
 For a chart or dashboard, return one self-contained HTML document in a single `html` fence unless the user explicitly authorizes publishing. Otherwise answer concisely with the query basis, result, and QC status.

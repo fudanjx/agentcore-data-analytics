@@ -38,14 +38,71 @@ END AS surgical_category
 is a QC failure. The SAP-only codes `NSI038U`/`NSP038U` and Epic-only
 `SI038U`/`SP038U` are retained for future-proofing although none were observed.
 
-## Emergency / elective and patient class
+## Emergency / elective and private / subsidised
 
 Use `"EMERG_IND" = 'X'` for Emergency and `"EMERG_IND" IS NULL` for Elective.
 Do not use `EMERG_IND1` or `Surgery_Case_Type`.
 
-For private/subsidised analysis, use `PATIENT_CLASS IN ('SP','RP','AC','AP','EP')`
-as Private in CY2023; all other CY2023 values are Subsidised. From CY2024, use
-`"Patient_Class_Grp" = 'Private'` as Private and all other values as Subsidised.
+For private/subsidised analysis, apply the verified hybrid rule below to both
+RDS and S3. Resolve exact RDS capitalization from schema metadata; S3 uses
+`patient_class` and `patient_class_grp`.
+
+```sql
+CASE
+  WHEN "SVISITDATE" < DATE '2024-01-01'
+   AND "PATIENT_CLASS" IN
+       ('A','AP','ARF','B1','B1P','B1RF','B2RF','CRF','NR','NRB1',
+        'PTE','PTEP','PTRF') THEN 'Private'
+  WHEN "SVISITDATE" < DATE '2024-01-01'
+   AND "PATIENT_CLASS" IN ('B2','B2P','C','CP','SUB','SUBP')
+    THEN 'Subsidised'
+  WHEN "SVISITDATE" < DATE '2024-01-01' THEN 'Unclassified'
+  ELSE "Patient_Class_Grp"
+END AS paying_group
+```
+
+Do not use the superseded `SP`/`RP`/`AC`/`AP`/`EP` private list. It matches
+only `AP` in the verified CY2023 Surgery data and incorrectly classifies almost
+all Private procedures as Subsidised. Never classify every value outside a
+Private list as Subsidised.
+
+The verified CY2023 S3 profile is:
+
+| Classification | `PATIENT_CLASS` | Verified procedures |
+|---|---|---:|
+| Private | `A` | 4,426 |
+| Private | `AP` | 734 |
+| Private | `ARF` | 842 |
+| Private | `B1` | 1,414 |
+| Private | `B1P` | 170 |
+| Private | `B1RF` | 111 |
+| Private | `B2RF` | 95 |
+| Private | `CRF` | 1,491 |
+| Private | `NR` | 3,885 |
+| Private | `NRB1` | 751 |
+| Private | `PTE` | 10,186 |
+| Private | `PTEP` | 1,642 |
+| Private | `PTRF` | 2,491 |
+| **Private total** |  | **28,238** |
+| Subsidised | `B2` | 11,909 |
+| Subsidised | `B2P` | 777 |
+| Subsidised | `C` | 15,704 |
+| Subsidised | `CP` | 1,083 |
+| Subsidised | `SUB` | 49,934 |
+| Subsidised | `SUBP` | 3,309 |
+| **Subsidised total** |  | **82,716** |
+
+Private 28,238 plus Subsidised 82,716 totals the locked 110,954 CY2023
+procedures, with Unclassified 0. For CY2023, `Patient_Class_Grp` exists but is
+null for every row and must not be used. From CY2024, use the native
+`Patient_Class_Grp` value directly; report null or unexpected values separately
+rather than forcing them into Subsidised.
+
+Before private/subsidised reporting, profile every distinct source value.
+Require `Private + Subsidised + Unclassified = procedure total` monthly and
+annually. A two-category dashboard is permitted only when Unclassified is zero.
+Treat an unexpected code or a difference from the verified CY2023 profile as a
+QC investigation flag; total reconciliation alone is not sufficient.
 
 ## OU grouping and reconciliation
 
@@ -82,10 +139,11 @@ SQL output to reconcile them.
 | H1 2026 | 42,210 | 1,146 | 20,716 | 64,072 | 7,560 |
 
 QC: category total equals procedure total; Emergency plus Elective equals total;
-monthly totals roll to annual total; and no `Unclassified` category exists. For
+Private plus Subsidised plus paying-status Unclassified equals total; monthly
+totals roll to annual total; and no surgical-category `Unclassified` exists. For
 CY2025, Elective is 112,145. Investigate a Feb–Sep 2024 total below 7,000 as a
-likely source-filter error. After any mapped load, check the SQL row count, total,
-and unique OU count before reporting.
+likely source-filter error. After any mapped load, check the SQL row count,
+total, and unique OU count before reporting.
 
 ## Fail-closed dashboard workflow
 
