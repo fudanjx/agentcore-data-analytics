@@ -76,41 +76,30 @@ The lookup is a mapping reference, not proof that an OU has source records. Do n
 
 ## Row-limited SQL tools
 
-Use this low-freedom fallback only when the SQL tool cannot return or persist a
-complete month-by-OU export. Do not weaken QC or substitute a native department
-field.
+Use calendar-month batching only when the SQL tool cannot return or persist a
+complete month-by-OU export in one call. Do not weaken QC, map inside SQL, or
+substitute a native department field.
 
-1. Stage `subspec-mapping-cte.sql` and use its two generated CTEs unchanged.
-   The file is deterministically generated from all 277 JSON records; it is the
-   only permitted database-side mapping representation.
-2. Verify the CTE's `mapping_count` and `mapping_sha256` against the bundled JSON.
-   Never edit its values by hand. Regenerate it only with
-   `scripts/generate_mapping_cte.py` when the JSON changes.
-3. Aggregate the source table by requested month and approved `source_ou`, then
-   left join `nuh_subspec_mapping` on `organizational_unit`.
-4. Preserve unmatched OUs as `Unmapped`. Apply any explicitly approved
-   source-side exclusion only after computing the unfiltered source total.
-5. Aggregate mapped workload to the requested department/cluster/MOH dimension
-   inside SQL. Return one row per month, with the plotted groups packed into a
-   JSON object and these audit columns:
+1. Query one complete calendar month at a time, aggregated by the approved
+   `source_ou`. Keep the same SQL logic, fields, filters, and workload measure in
+   every batch.
+2. Each batch must return `month_date`, `source_ou`, and `workload`. Record its
+   SQL row count, workload total, and unique source-OU count before continuing.
+3. Reject a truncated or failed batch. Retry it with a smaller in-month date
+   range only when necessary, then aggregate those complete pieces back to the
+   calendar-month grain and reconcile their totals.
+4. Concatenate successful batches programmatically in chronological order.
+   Never type, reconstruct, interpolate, or deduplicate analytical rows by hand.
+5. Verify that every requested month occurs exactly as expected and reconcile
+   the combined workload total to the sum of the recorded batch totals.
+6. Load all 277 records from `subspec-mapping.json` in Code Interpreter, apply
+   the many-to-one mapping, preserve unmatched OUs as `Unmapped`, and apply any
+   approved exclusions only after computing the unfiltered source total.
+7. Run the matching table-specific validator on the combined month-by-OU export.
+   Build charts, tables, and KPIs only from its mapped CSV when QC passes.
 
-```text
-month_date,department_payload,source_total,mapped_total,unmapped_total,
-excluded_total,plotted_total,mapping_count,mapping_sha256
-```
-
-6. For S3/Trino, create `department_payload` with
-   `json_format(CAST(map_agg(group_name, workload) AS JSON))`. For RDS/PostgreSQL,
-   use `jsonb_object_agg(group_name, workload)::text`. Aggregate to one unique
-   row per `group_name` before calling either object aggregate.
-7. Run `scripts/validate_compact_mapped_dashboard.py` on the complete compact
-   result. Build charts, tables, and KPIs only from its flattened CSV.
-
-Require `mapped_total + unmapped_total = source_total`,
-`plotted_total + excluded_total = source_total`, and the JSON payload sum to
-equal `plotted_total` for every month and for the full requested period. If the
-compact result itself is truncated, batch by calendar month; each batch must
-still use the unchanged complete mapping CTE.
+If even the smallest practical date batch is truncated or cannot be reconciled,
+stop with a failed QC status rather than returning a partial mapped result.
 
 ## SOC native-field precedence
 

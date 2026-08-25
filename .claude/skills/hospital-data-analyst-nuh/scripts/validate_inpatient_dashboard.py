@@ -138,8 +138,7 @@ def main() -> int:
         record = mapping.get(ou)
         mapped = record is not None
         department = record.get("department_grouping") if mapped else "Unmapped"
-        cluster = record.get("cluster_grouping") if mapped else "Unmapped"
-        is_excluded = bool(args.clinical_only and mapped and (cluster == "XX Cluster" or department == "xx Dept"))
+        is_excluded = bool(args.clinical_only and mapped and department == "xx Dept")
         if not mapped:
             unmapped_ous.add(ou)
             unmapped_discharges += row_values["discharges"]
@@ -153,7 +152,7 @@ def main() -> int:
                 chart[metric] += value
         output_rows.append({
             "month": month, "source_ou": ou,
-            "department_grouping": department, "cluster_grouping": cluster,
+            "department_grouping": department,
             **row_values, "mapping_status": "Mapped" if mapped else "Unmapped",
             "excluded_nonclinical": "Yes" if is_excluded else "No",
         })
@@ -196,7 +195,7 @@ def main() -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.audit.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["month", "source_ou", "department_grouping", "cluster_grouping", *METRICS, "mapping_status", "excluded_nonclinical"]
+    fields = ["month", "source_ou", "department_grouping", *METRICS, "mapping_status", "excluded_nonclinical"]
     with args.output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()

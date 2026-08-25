@@ -1,0 +1,65 @@
+{
+  "agentRuntimeName": "Strands_runtime_ds",
+  "agentRuntimeArtifact": {
+    "codeConfiguration": {
+      "code": {
+        "s3": {
+          "bucket": "bedrock-agentcore-runtime-964340114883-ap-southeast-1-7a3qgyspw",
+          "prefix": "strands_runtime_ds_v0.0.1.zip"
+        }
+      },
+      "runtime": "PYTHON_3_13",
+      "entryPoint": [
+        "strands_agent/main.py"
+      ]
+    }
+  },
+  "roleArn": "arn:aws:iam::964340114883:role/agentcore-poc-runtime-role",
+  "networkConfiguration": {
+    "networkMode": "VPC",
+    "networkModeConfig": {
+      "securityGroups": [
+        "sg-07258677b7e691e48"
+      ],
+      "subnets": [
+        "subnet-061205c705e0f41d4",
+        "subnet-0466b6e1fbb8a49f3"
+      ]
+    }
+  },
+  "description": "Strands data analyst using DeepSeek V4 Flash official Responses API",
+  "protocolConfiguration": {
+    "serverProtocol": "HTTP"
+  },
+  "lifecycleConfiguration": {
+    "idleRuntimeSessionTimeout": 3600,
+    "maxLifetime": 28800
+  },
+  "environmentVariables": {
+    "AGENTCORE_GATEWAYS_JSON": "{\"nuh\":{\"label\":\"NUH\",\"url\":\"https://nuh-analytics-db-fhbzdmtdta.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com\",\"arn\":\"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/nuh-analytics-db-fhbzdmtdta\"},\"ah\":{\"label\":\"AH\",\"url\":\"https://ah-analytics-db-gszih4adsx.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com\",\"arn\":\"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-db-gszih4adsx\"},\"fm\":{\"label\":\"TimesFM\",\"url\":\"https://timesfm-gateway-w4fho4r9um.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com\",\"arn\":\"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/timesfm-gateway-w4fho4r9um\"},\"s3tables\":{\"label\":\"S3 Tables\",\"url\":\"https://ah-analytics-s3tables-uhtyjdutj7.gateway.bedrock-agentcore.ap-southeast-1.amazonaws.com\",\"arn\":\"arn:aws:bedrock-agentcore:ap-southeast-1:964340114883:gateway/ah-analytics-s3tables-uhtyjdutj7\"}}",
+    "CODE_INTERPRETER_ID": "code_interpreter_runtime_dev-PEpoCecsBL",
+    "CODE_INTERPRETER_MAX_RESULT_CHARS": "30000",
+    "CODE_INTERPRETER_REGION": "ap-southeast-1",
+    "DEEPSEEK_API_KEY": "PENDING_REPLACE_ME",
+    "DEEPSEEK_BASE_URL": "https://api.deepseek.com",
+    "DEEPSEEK_MAX_OUTPUT_TOKENS": "32768",
+    "DEEPSEEK_REASONING_EFFORT": "high",
+    "ENABLE_MODEL_USAGE_LOGS": "true",
+    "ENABLE_TOOL_DETAILS": "true",
+    "MEMORY_ID": "harness_harness_e52fs_8d3d-vtE3DJC9ia",
+    "MEMORY_REGION": "ap-southeast-1",
+    "MODEL_CONNECT_TIMEOUT_SECONDS": "10",
+    "MODEL_ID": "deepseek-v4-flash",
+    "MODEL_PRICING_LABEL": "deepseek-v4-flash-official-2026-08",
+    "MODEL_READ_TIMEOUT_SECONDS": "900",
+    "MODEL_RETRY_MAX_ATTEMPTS": "2",
+    "RUNTIME_STREAM_HEARTBEAT_SECONDS": "15",
+    "SKILLS_BUCKET": "agentcore-harness-dev",
+    "SKILLS_PREFIX": "skills/",
+    "TOOL_DETAIL_MAX_CHARS": "12000"
+  },
+  "tags": {
+    "Model": "deepseek-v4-flash",
+    "Project": "Strands_runtime_ds"
+  }
+}

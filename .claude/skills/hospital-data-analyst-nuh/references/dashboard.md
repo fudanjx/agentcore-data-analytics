@@ -42,9 +42,10 @@ the user requests a mobile dashboard.
 - For an SOC, inpatient, or surgery department dashboard, run the corresponding
   bundled `validate_*_dashboard.py` script on the complete month-by-OU export.
   Build every visual and KPI from its mapped CSV and retain its audit JSON.
-- If the SQL tool cannot persist that export, use the compact database-side
-  mapping workflow in `subspec-mapping.md`, run
-  `validate_compact_mapped_dashboard.py`, and build only from its flattened CSV.
+- If the SQL tool cannot persist that export in one call, follow the
+  calendar-month batching workflow in `subspec-mapping.md`, concatenate and
+  reconcile the complete batches, then run the corresponding table-specific
+  validator on the combined month-by-OU export.
 
 ## HTML build rules
 

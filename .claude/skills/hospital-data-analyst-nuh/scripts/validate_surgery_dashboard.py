@@ -135,8 +135,7 @@ def main() -> int:
         record = mapping.get(ou)
         mapped = record is not None
         department = record.get("department_grouping") if mapped else "Unmapped"
-        cluster = record.get("cluster_grouping") if mapped else "Unmapped"
-        is_excluded = bool(args.clinical_only and mapped and (cluster == "XX Cluster" or department == "xx Dept"))
+        is_excluded = bool(args.clinical_only and mapped and department == "xx Dept")
         if not mapped:
             unmapped_ous.add(ou)
             unmapped_procedures += row_values["procedure_total"]
@@ -152,7 +151,7 @@ def main() -> int:
                 excluded[metric] += value
             else:
                 chart[metric] += value
-        output_rows.append({"month": month, "source_ou": ou, "department_grouping": department, "cluster_grouping": cluster, **row_values, "mapping_status": "Mapped" if mapped else "Unmapped", "excluded_nonclinical": "Yes" if is_excluded else "No"})
+        output_rows.append({"month": month, "source_ou": ou, "department_grouping": department, **row_values, "mapping_status": "Mapped" if mapped else "Unmapped", "excluded_nonclinical": "Yes" if is_excluded else "No"})
 
     for metric in METRICS:
         if chart[metric] + excluded[metric] != source[metric]:
@@ -176,7 +175,7 @@ def main() -> int:
     audit = {"qc_status": "PASSED" if not errors else "FAILED", "input_rows": input_rows, "requested_months": expected_months, "observed_months": observed, "missing_months": missing_months, "extra_months": extra_months, "mapping_declared_records": declared, "mapping_records": len(records), "mapping_unique_ous": len(mapping), "unique_source_ous": len({ou for _, ou in values}), "unmapped_ous": sorted(unmapped_ous), "source_totals": dict(source), "chart_totals": dict(chart), "excluded_nonclinical_totals": dict(excluded), "monthly_source_totals": {month: dict(metrics) for month, metrics in sorted(monthly.items())}, "period_source_totals": {period: dict(metrics) for period, metrics in sorted(by_period.items())}, "warnings": warnings, "errors": errors}
     args.output.parent.mkdir(parents=True, exist_ok=True)
     args.audit.parent.mkdir(parents=True, exist_ok=True)
-    fields = ["month", "source_ou", "department_grouping", "cluster_grouping", *METRICS, "mapping_status", "excluded_nonclinical"]
+    fields = ["month", "source_ou", "department_grouping", *METRICS, "mapping_status", "excluded_nonclinical"]
     with args.output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()

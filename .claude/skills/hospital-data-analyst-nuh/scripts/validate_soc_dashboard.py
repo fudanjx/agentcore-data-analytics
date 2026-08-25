@@ -157,11 +157,10 @@ def main() -> int:
         record = mapping.get(ou)
         mapped = record is not None
         department = record.get("department_grouping") if mapped else "Unmapped"
-        cluster = record.get("cluster_grouping") if mapped else "Unmapped"
         excluded = bool(
             args.clinical_only
             and mapped
-            and (cluster == "XX Cluster" or department == "xx Dept")
+            and department == "xx Dept"
         )
         year = month[:4]
         month_source[month] += count
@@ -179,7 +178,6 @@ def main() -> int:
                 "month": month,
                 "source_ou": ou,
                 "department_grouping": department,
-                "cluster_grouping": cluster,
                 "visit_count": count,
                 "mapping_status": "Mapped" if mapped else "Unmapped",
                 "excluded_nonclinical": "Yes" if excluded else "No",
@@ -233,7 +231,7 @@ def main() -> int:
     args.audit.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=list(output_rows[0].keys()) if output_rows else [
-            "month", "source_ou", "department_grouping", "cluster_grouping",
+            "month", "source_ou", "department_grouping",
             "visit_count", "mapping_status", "excluded_nonclinical"
         ])
         writer.writeheader()
