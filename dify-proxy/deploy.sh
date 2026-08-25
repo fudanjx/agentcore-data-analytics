@@ -3,7 +3,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REGION="${AWS_DEFAULT_REGION:-ap-southeast-1}"
-TAG="${TAG:-v0.0.3}"
+TAG="${TAG:-v0.0.10}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 IMAGE="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/agentcore-dify-proxy:${TAG}"
 

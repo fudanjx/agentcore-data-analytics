@@ -3,7 +3,7 @@ set -euo pipefail
 
 REPO=agentcore-dify-proxy
 REGION="${AWS_DEFAULT_REGION:-ap-southeast-1}"
-TAG="${TAG:-v0.0.3}"
+TAG="${TAG:-v0.0.10}"
 ACCOUNT=$(aws sts get-caller-identity --query Account --output text)
 ECR_URI="${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/${REPO}"
 

@@ -1,5 +1,33 @@
 # AgentCore Dify Proxy
 
+## Generated artifacts
+
+The proxy injects a request-scoped S3 output prefix and ownership tags into
+AgentCore calls. Generated CSV, DOCX, HTML, XLSX, PPTX, and PDF files must be
+uploaded to that prefix and reported in an `<agentcore-artifacts>` marker. The
+proxy verifies the exact user and conversation tags before delivery.
+
+Generated HTML must embed its analyzed data and custom CSS/JavaScript. A
+standard Chart.js CDN script is permitted; remote data, styles, fonts, and other
+dependencies are not. Raw HTML printed by Code Interpreter is not a delivery
+channel: the bounded result contract intentionally retains only concise result
+metadata. After validating the S3 object, the proxy downloads it and emits the
+complete document using the frontend's contract:
+
+````text
+```html
+<!DOCTYPE html>
+<html lang="en">
+...
+</html>
+```
+````
+
+Direct model-generated HTML is rejected. If no validated Code Interpreter HTML
+artifact is available, the response reports that dashboard generation failed.
+Non-HTML artifacts retain the existing machine-reference or presigned-link
+behavior.
+
 The proxy consumes the Strands Runtime's final `model_usage` sideband event. `model_usage.py` owns PostgreSQL configuration, pricing lookup and caching, cost calculation, table creation, user lookup, and inserts, while `dify-server.py` keeps only the event handling and Dify-compatible token projection. The internal record is not forwarded to Dify; Dify receives only its existing OpenAI-compatible `usage` object with `prompt_tokens`, `completion_tokens`, and `total_tokens`.
 
 Persistence is disabled when `MODEL_USAGE_DATABASE_URL` is empty. Configure one standard PostgreSQL connection URL:
