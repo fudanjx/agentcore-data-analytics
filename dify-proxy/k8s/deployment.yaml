@@ -18,7 +18,7 @@ spec:
       serviceAccountName: agentcore-proxy
       containers:
         - name: dify-proxy
-          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.3
+          image: 964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/agentcore-dify-proxy:v0.0.10
           imagePullPolicy: Always
           ports:
             - containerPort: 8080
@@ -33,6 +33,8 @@ spec:
               value: "3"
             - name: DIFY_ARTIFACT_READ_TIMEOUT_SECONDS
               value: "10"
+            - name: DIFY_RESPONSE_CHUNK_CHARS
+              value: "16000"
             - name: DIFY_OFFICE_ARTIFACTS_BUCKET
               value: ah-dify
             - name: DIFY_OFFICE_ARTIFACTS_PREFIX

@@ -47,12 +47,34 @@ All remaining environment variables are copied from the active
 and Code Interpreter settings. Do not set the Singapore application inference
 profile here: GPT-5.6 Luna requires the Mantle Responses API, not Converse.
 
+## Bounded S3 Tables exports (GPT pilot)
+
+The shared S3 Tables Gateway continues to return small SQL results directly,
+but it now fails closed when a result exceeds 1,000 rows. It also exposes
+`s3tables_execute_sql_export`, which runs the same read-only AH/NUH query and
+returns only the Athena result CSV URI plus compact execution metadata.
+
+This runtime alone has a stable instruction to use the export operation for
+large or multi-month dashboard and mapping work. Code Interpreter downloads the
+exact returned CSV, performs mapping/validation/aggregation locally, and sends
+only its bounded `AGENTCORE_RESULT_JSON` back to the model. The Claude runtime
+receives the safe Gateway limit but no automatic export-use instruction yet.
+
+The Code Interpreter execution role must have only this additional permission:
+
+```text
+s3:GetObject on arn:aws:s3:::agentcore-tmp-964340114883/athena-results/*
+```
+
+It does not need `s3:ListBucket`, write access to that bucket, or Athena API
+permissions.
+
 ## Build
 
 With Docker Desktop running:
 
 ```bash
-./build_agentcore_bundle.sh ./dist/strands_runtime_gpt_v0.0.1.zip
+./build_agentcore_bundle.sh ./dist/strands_runtime_gpt_v0.0.3.zip
 ```
 
 The script creates a Linux ARM64/Python 3.13 bundle with entry point

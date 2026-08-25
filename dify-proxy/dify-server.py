@@ -11,7 +11,8 @@ identity. OpenAI-compatible provider probes omit them, so the proxy supplies
 request-scoped identifiers when absent. Non-UUID user strings are mapped to a
 stable UUID. An assistant message carrying the marker is removed completely
 before invoking AgentCore, because the model does not support assistant prefill.
-Generated Office artifacts from Harnesses are independently validated in S3.
+Generated business-document artifacts from AgentCore are independently
+validated in S3.
 Runtime backends use the Runtime's native OpenAI-compatible SSE response. This
 file intentionally contains no OpenWebUI, native Dify App API, or file-upload
 proxy routes.
@@ -101,13 +102,16 @@ DIFY_OFFICE_ARTIFACTS_PREFIX = (
 DIFY_OFFICE_SOURCE_PROFILE = {
     "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
     "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
-    "output_extensions": {"csv", "docx", "xlsx", "pptx", "pdf"},
+    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
 }
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
 MAX_ARTIFACTS_PER_RESPONSE = 10
 MAX_ARTIFACT_MARKER_BYTES = 64 * 1024
 DIFY_ARTIFACT_URL_TTL_SECONDS = 60 * 60
+DIFY_RESPONSE_CHUNK_CHARS = _bounded_int_env(
+    "DIFY_RESPONSE_CHUNK_CHARS", 16_000, 1_024, 65_536
+)
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 _STATUS_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
 _STATUS_ID_UNSAFE_RE = re.compile(r"[^A-Za-z0-9._:\-]")
@@ -130,12 +134,23 @@ _ARTIFACT_END = "</agentcore-artifacts>"
 _ARTIFACT_ERROR_TEXT = (
     "\n\nGenerated file could not be made available. Please try again."
 )
+_DIRECT_HTML_REJECTED_TEXT = (
+    "Dashboard generation failed: no validated Code Interpreter HTML "
+    "artifact was produced."
+)
+_DIRECT_HTML_START = "```html"
+_DIRECT_HTML_FENCE_RE = re.compile(
+    r"```html[ \t]*(?:\r?\n)?"
+    r"(?P<document><!DOCTYPE\s+html\b.*?</html>)"
+    r"[ \t]*(?:\r?\n)?```",
+    re.IGNORECASE | re.DOTALL,
+)
 _RUNTIME_INTERRUPTED_TEXT = (
     "\n\n[stream interrupted] The upstream agent stream ended before completion. "
     "Please retry the request."
 )
 
-app = FastAPI(title="AgentCore Dify Proxy", version="1.1.0")
+app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0")
 
 _agentcore_control_client = None
 _s3_client = None
@@ -466,7 +481,7 @@ def _inject_dify_artifact_context(
         extension.upper()
         for extension in sorted(source_profile["output_extensions"])
     )
-    instruction = f"""## Generated Office files
+    instruction = f"""## Generated files
 
 For this request only, create new files solely under:
 `{output_prefix}`
@@ -478,15 +493,21 @@ local file, an appropriate `--content-type`, and:
 `{tagging}`
 
 Use only these downloadable output formats: {allowed_formats}.
+HTML output must be a complete document: embed all analyzed data and custom
+CSS and JavaScript in the file. Chart.js may be loaded from a standard CDN
+script tag. Do not fetch remote data or use remote styles, fonts, or other
+network-loaded dependencies. Do not paste the HTML into the chat and do not use
+`cat` to return the file through Code Interpreter.
 Before the final answer, confirm each upload completed. Then report successful
 outputs only inside an `<agentcore-artifacts>` JSON marker, listing the S3 URI
 and user-facing filename for each output.
 
 Do not generate a presigned URL and do not expose an S3 URI in user-visible
-prose. The trusted proxy validates ownership and returns either its normal
-`<agentcore-generated-files>` JSON envelope or short-lived download links,
-according to the request's trusted output setting.
-For html, just return the html artifact in the chat response don't upload it to s3.
+prose. The trusted proxy validates ownership. For HTML, it downloads the
+validated object and returns the complete document in the frontend's fenced
+`html` response contract. Direct model-generated HTML will be rejected. Other
+file types use either the normal `<agentcore-generated-files>` JSON envelope or
+short-lived download links according to the request's trusted output setting.
 """
     return [*messages, {"role": "system", "content": instruction}]
 
@@ -981,6 +1002,68 @@ class _ArtifactStreamSanitizer:
         return []
 
 
+class _DirectHtmlTailBuffer:
+    """Pass normal text while holding a direct HTML fence and its tail.
+
+    Once a model starts a fenced HTML document, later output must be held until
+    artifact resolution completes. This prevents a direct model copy from
+    reaching the frontend before a validated S3 artifact is selected.
+    """
+
+    def __init__(self):
+        self._pending = ""
+        self._held = ""
+        self._holding = False
+
+    def feed(self, text: str) -> list[str]:
+        if not isinstance(text, str) or not text:
+            return []
+        if self._holding:
+            self._held += text
+            return []
+
+        remaining = self._pending + text
+        self._pending = ""
+        start_index = remaining.lower().find(_DIRECT_HTML_START)
+        if start_index >= 0:
+            self._holding = True
+            self._held = remaining[start_index:]
+            return [remaining[:start_index]] if start_index else []
+
+        pending_length = 0
+        lowered = remaining.lower()
+        max_length = min(len(remaining), len(_DIRECT_HTML_START) - 1)
+        for length in range(max_length, 0, -1):
+            if _DIRECT_HTML_START.startswith(lowered[-length:]):
+                pending_length = length
+                break
+        if pending_length:
+            visible = remaining[:-pending_length]
+            self._pending = remaining[-pending_length:]
+            return [visible] if visible else []
+        return [remaining]
+
+    def finish(self) -> str:
+        held = self._held if self._holding else self._pending
+        self._pending = ""
+        self._held = ""
+        self._holding = False
+        return held
+
+
+def _remove_direct_html(text: str) -> tuple[str, bool]:
+    """Remove model-generated HTML fences, including incomplete attempts."""
+    documents = [
+        match.group("document") for match in _DIRECT_HTML_FENCE_RE.finditer(text)
+    ]
+    cleaned = _DIRECT_HTML_FENCE_RE.sub("", text)
+    incomplete_start = cleaned.lower().find(_DIRECT_HTML_START)
+    attempted = bool(documents) or incomplete_start >= 0
+    if incomplete_start >= 0:
+        cleaned = cleaned[:incomplete_start]
+    return cleaned, attempted
+
+
 def _validate_dify_artifacts(
     artifacts,
     user_id: str,
@@ -1179,6 +1262,82 @@ def _resolve_artifacts(
     return validated if validated else []
 
 
+def _is_html_artifact(artifact: dict) -> bool:
+    return str(artifact.get("filename") or "").lower().endswith(".html")
+
+
+def _load_validated_html(artifact: dict) -> str:
+    """Load and validate an HTML object after ownership validation succeeds."""
+    expected_size = artifact.get("size")
+    if not isinstance(expected_size, int) or not 0 < expected_size <= MAX_ARTIFACT_BYTES:
+        raise DifyArtifactError(
+            403,
+            "artifact_not_accessible",
+            "Generated HTML is unavailable",
+        )
+
+    parsed = urlparse(artifact["s3_uri"])
+    try:
+        response = get_s3_client().get_object(
+            Bucket=parsed.netloc,
+            Key=parsed.path.lstrip("/"),
+        )
+        content_length = response.get("ContentLength")
+        body = response["Body"]
+        try:
+            raw = body.read(expected_size + 1)
+        finally:
+            close = getattr(body, "close", None)
+            if callable(close):
+                close()
+    except (KeyError, AttributeError, botocore.exceptions.ClientError) as error:
+        raise DifyArtifactError(
+            502,
+            "artifact_download_failed",
+            "Could not load generated HTML",
+        ) from error
+
+    if content_length != expected_size or len(raw) != expected_size:
+        raise DifyArtifactError(
+            409,
+            "artifact_changed",
+            "Generated HTML changed during validation",
+        )
+    try:
+        document = raw.decode("utf-8").lstrip("\ufeff \t\r\n").rstrip()
+    except UnicodeDecodeError as error:
+        raise DifyArtifactError(
+            400,
+            "invalid_html_artifact",
+            "Generated HTML is not valid UTF-8",
+        ) from error
+
+    if not re.match(r"<!DOCTYPE\s+html(?:\s[^>]*)?>", document, re.IGNORECASE):
+        raise DifyArtifactError(
+            400,
+            "invalid_html_artifact",
+            "Generated HTML does not begin with an HTML doctype",
+        )
+    if re.search(r"</html>\s*$", document, re.IGNORECASE) is None:
+        raise DifyArtifactError(
+            400,
+            "invalid_html_artifact",
+            "Generated HTML is incomplete",
+        )
+    if "```" in document:
+        raise DifyArtifactError(
+            400,
+            "invalid_html_artifact",
+            "Generated HTML cannot be represented in the frontend contract",
+        )
+    return document
+
+
+def _format_raw_html_artifacts(artifacts: list[dict]) -> str:
+    documents = [_load_validated_html(artifact) for artifact in artifacts]
+    return "\n".join(f"```html\n{document}\n```" for document in documents)
+
+
 def _format_artifact_references(artifacts: list[dict]) -> str:
     """Render a machine-readable artifact handoff for the frontend."""
     payload = {
@@ -1228,17 +1387,99 @@ def _format_presigned_artifact_links(artifacts: list[dict]) -> str:
 
 
 def _format_artifacts(artifacts: list[dict], output_urls: bool) -> str:
-    if output_urls:
-        return _format_presigned_artifact_links(
-            _presign_validated_artifacts(artifacts)
-        )
-    return _format_artifact_references(artifacts)
+    html_artifacts = [artifact for artifact in artifacts if _is_html_artifact(artifact)]
+    other_artifacts = [
+        artifact for artifact in artifacts if not _is_html_artifact(artifact)
+    ]
+    rendered: list[str] = []
+    if html_artifacts:
+        rendered.append(_format_raw_html_artifacts(html_artifacts))
+    if other_artifacts:
+        if output_urls:
+            rendered.append(
+                _format_presigned_artifact_links(
+                    _presign_validated_artifacts(other_artifacts)
+                )
+            )
+        else:
+            rendered.append(_format_artifact_references(other_artifacts))
+    return "\n".join(rendered)
 
 
 def _artifact_error_label(error: Exception) -> str:
     if isinstance(error, DifyArtifactError):
         return f"{type(error).__name__}:{error.code}"
     return type(error).__name__
+
+
+def _join_response_parts(*parts: str) -> str:
+    return "\n".join(part.strip() for part in parts if part and part.strip())
+
+
+def _response_chunks(content: str):
+    for start in range(0, len(content), DIFY_RESPONSE_CHUNK_CHARS):
+        yield content[start : start + DIFY_RESPONSE_CHUNK_CHARS]
+
+
+def _render_final_artifact_content(
+    clean_text: str,
+    sanitizer: _ArtifactStreamSanitizer,
+    artifact_context: tuple[str, str, dict],
+    request_started_at: float,
+    output_urls: bool,
+    session_id: str | None = None,
+) -> str:
+    text_without_direct_html, direct_html_attempted = _remove_direct_html(
+        clean_text
+    )
+    log_suffix = f" (session={session_id})" if session_id else ""
+    try:
+        artifacts = _resolve_artifacts(
+            sanitizer,
+            artifact_context,
+            request_started_at,
+        )
+        rendered_artifacts = (
+            _format_artifacts(artifacts, output_urls) if artifacts else ""
+        )
+    except Exception as error:
+        logger.warning(
+            "Dify artifact delivery failed%s: %s",
+            log_suffix,
+            _artifact_error_label(error),
+        )
+        if direct_html_attempted:
+            logger.warning(
+                "Dify HTML delivery source=direct_model_rejected%s",
+                log_suffix,
+            )
+            return _join_response_parts(
+                text_without_direct_html,
+                _DIRECT_HTML_REJECTED_TEXT,
+            )
+        return clean_text + _ARTIFACT_ERROR_TEXT
+
+    if artifacts and any(_is_html_artifact(artifact) for artifact in artifacts):
+        logger.info("Dify HTML delivery source=validated_s3%s", log_suffix)
+        return _join_response_parts(
+            text_without_direct_html,
+            rendered_artifacts,
+        )
+    if direct_html_attempted:
+        logger.warning(
+            "Dify HTML delivery source=direct_model_rejected%s",
+            log_suffix,
+        )
+        return _join_response_parts(
+            text_without_direct_html,
+            rendered_artifacts,
+            _DIRECT_HTML_REJECTED_TEXT,
+        )
+    if rendered_artifacts:
+        return _join_response_parts(clean_text, rendered_artifacts)
+    if sanitizer.artifact_problem:
+        return clean_text + _ARTIFACT_ERROR_TEXT
+    return clean_text
 
 
 def _render_buffered_result(
@@ -1250,30 +1491,13 @@ def _render_buffered_result(
     sanitizer = _ArtifactStreamSanitizer()
     clean_text = "".join(sanitizer.feed(result_text))
     clean_text += "".join(sanitizer.finish())
-    try:
-        artifacts = _resolve_artifacts(
-            sanitizer,
-            artifact_context,
-            request_started_at,
-        )
-    except Exception as error:
-        logger.warning(
-            "Dify artifact delivery failed: %s",
-            _artifact_error_label(error),
-        )
-        return clean_text + _ARTIFACT_ERROR_TEXT
-    if artifacts:
-        try:
-            return clean_text + "\n" + _format_artifacts(artifacts, output_urls)
-        except Exception as error:
-            logger.warning(
-                "Dify artifact delivery failed: %s",
-                _artifact_error_label(error),
-            )
-            return clean_text + _ARTIFACT_ERROR_TEXT
-    if sanitizer.artifact_problem:
-        return clean_text + _ARTIFACT_ERROR_TEXT
-    return clean_text
+    return _render_final_artifact_content(
+        clean_text,
+        sanitizer,
+        artifact_context,
+        request_started_at,
+        output_urls,
+    )
 
 
 def _sse_artifact_stream(
@@ -1286,6 +1510,7 @@ def _sse_artifact_stream(
     output_urls: bool = False,
 ):
     sanitizer = _ArtifactStreamSanitizer()
+    direct_html_buffer = _DirectHtmlTailBuffer()
     request_started_at = time.time()
     usage = None
     stream_failed = False
@@ -1322,8 +1547,9 @@ def _sse_artifact_stream(
                 yield stream_chunk(_format_runtime_status(item), item.as_dict())
                 continue
             for content in sanitizer.feed(item):
-                if content:
-                    yield stream_chunk(content)
+                for visible in direct_html_buffer.feed(content):
+                    if visible:
+                        yield stream_chunk(visible)
     except Exception as error:
         logger.error(
             "Dify %s stream error (session=%s): %s",
@@ -1336,24 +1562,18 @@ def _sse_artifact_stream(
         yield stream_chunk(_RUNTIME_INTERRUPTED_TEXT)
 
     sanitizer.finish()
+    held_tail = direct_html_buffer.finish()
     if not stream_failed:
-        try:
-            artifacts = _resolve_artifacts(
-                sanitizer,
-                artifact_context,
-                request_started_at,
-            )
-            if artifacts:
-                yield stream_chunk("\n" + _format_artifacts(artifacts, output_urls))
-            elif sanitizer.artifact_problem:
-                yield stream_chunk(_ARTIFACT_ERROR_TEXT)
-        except Exception as error:
-            logger.warning(
-                "Dify artifact stream delivery failed (session=%s): %s",
-                session_id,
-                _artifact_error_label(error),
-            )
-            yield stream_chunk(_ARTIFACT_ERROR_TEXT)
+        final_content = _render_final_artifact_content(
+            held_tail,
+            sanitizer,
+            artifact_context,
+            request_started_at,
+            output_urls,
+            session_id,
+        )
+        for content in _response_chunks(final_content):
+            yield stream_chunk(content)
 
     final = {
         "id": completion_id,

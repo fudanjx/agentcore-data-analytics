@@ -44,7 +44,9 @@ HARNESS_GATEWAY_POLICY_ARN = "arn:aws:iam::964340114883:policy/service-role/Amaz
 TABLE_BUCKET_ARN = f"arn:aws:s3tables:{REGION}:{ACCOUNT_ID}:bucket/ah-analytics"
 ATHENA_WORKGROUP = "ah-s3tables-wg"
 ATHENA_CATALOG = "s3tablescatalog/ah-analytics"
-ATHENA_DATABASE = "ah_analytics"
+ATHENA_DATABASE = "ah"
+NUH_ATHENA_CATALOG = "s3tablescatalog/nuh-analytics"
+NUH_ATHENA_DATABASE = "nuh"
 
 ATHENA_RESULTS_BUCKET = f"agentcore-tmp-{ACCOUNT_ID}"
 ATHENA_RESULTS_PREFIX = "athena-results/"
@@ -54,33 +56,63 @@ lambda_client = boto3.client("lambda", region_name=REGION)
 agentcore = boto3.client("bedrock-agentcore-control", region_name=REGION)
 
 
+SOURCE_PROPERTY = {
+    "type": "string",
+    "description": "Which S3 Tables source to use: 'ah' (default) or 'nuh'.",
+}
+
 TOOL_SCHEMA = [
     {
         "name": "execute_sql",
         "description": (
-            "Run a read-only SELECT/WITH query against the AH analytics S3 Tables "
-            "(Iceberg) backend via Athena and return rows as a JSON array. "
-            "Same 6 tables as ah-analytics-db (outpatient, urgentcarecenter, admission, "
-            "discharge, inflight, procedure) but served from S3 Tables — no RDS hop."
+            "Run a read-only SELECT/WITH query against the selected AH or NUH S3 "
+            "Tables (Iceberg) backend via Athena and return a small JSON result. "
+            "For results that may exceed 1,000 rows, use execute_sql_export instead."
         ),
         "inputSchema": {
             "type": "object",
-            "properties": {"query": {"type": "string", "description": "A valid Athena SELECT/WITH statement"}},
+            "properties": {
+                "query": {"type": "string", "description": "A valid Athena SELECT/WITH statement"},
+                "source": SOURCE_PROPERTY,
+            },
             "required": ["query"],
         },
     },
     {
         "name": "list_tables",
-        "description": "List all tables in the ah-analytics S3 Tables namespace with column names and types",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "List all tables in the selected AH or NUH S3 Tables namespace with column names and types.",
+        "inputSchema": {"type": "object", "properties": {"source": SOURCE_PROPERTY}},
     },
     {
         "name": "describe_table",
-        "description": "Get column details and 3 sample rows for a specific table in ah-analytics S3 Tables",
+        "description": "Get column details and 3 sample rows for a table in the selected AH or NUH S3 Tables namespace.",
         "inputSchema": {
             "type": "object",
-            "properties": {"table_name": {"type": "string", "description": "Name of the table to describe"}},
+            "properties": {
+                "table_name": {"type": "string", "description": "Name of the table to describe"},
+                "source": SOURCE_PROPERTY,
+            },
             "required": ["table_name"],
+        },
+    },
+    {
+        "name": "execute_sql_export",
+        "description": (
+            "Run a read-only SELECT/WITH query against AH or NUH S3 Tables and return "
+            "only Athena result metadata, including an S3 CSV URI. Use for large or "
+            "multi-month queries; download and process the CSV in Code Interpreter."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "query": {"type": "string", "description": "A valid Athena SELECT/WITH statement"},
+                "source": SOURCE_PROPERTY,
+                "export": {
+                    "type": "boolean",
+                    "description": "Must be true. Identifies this call as the metadata-only export operation.",
+                },
+            },
+            "required": ["query", "export"],
         },
     },
 ]
@@ -226,6 +258,9 @@ def deploy_lambda(role_arn: str) -> str:
         "ATHENA_WORKGROUP": ATHENA_WORKGROUP,
         "ATHENA_CATALOG": ATHENA_CATALOG,
         "ATHENA_DATABASE": ATHENA_DATABASE,
+        "NUH_ATHENA_WORKGROUP": ATHENA_WORKGROUP,
+        "NUH_ATHENA_CATALOG": NUH_ATHENA_CATALOG,
+        "NUH_ATHENA_DATABASE": NUH_ATHENA_DATABASE,
     }}
 
     try:
@@ -309,14 +344,28 @@ def ensure_gateway_target(gateway_id: str, lambda_arn: str):
     for page in paginator.paginate(gatewayIdentifier=gateway_id):
         for tgt in page.get("items", []):
             if tgt["name"] == TARGET_NAME:
-                print(f"  Gateway target exists: {tgt['targetId']}")
+                existing = agentcore.get_gateway_target(
+                    gatewayIdentifier=gateway_id,
+                    targetId=tgt["targetId"],
+                )
+                agentcore.update_gateway_target(
+                    gatewayIdentifier=gateway_id,
+                    targetId=tgt["targetId"],
+                    name=TARGET_NAME,
+                    description="Lambda: ah-analytics-s3tables-mcp — 4 read-only S3 Tables tools for AH and NUH",
+                    credentialProviderConfigurations=existing.get("credentialProviderConfigurations", []),
+                    targetConfiguration={
+                        "mcp": {"lambda": {"lambdaArn": lambda_arn, "toolSchema": {"inlinePayload": TOOL_SCHEMA}}}
+                    },
+                )
+                print(f"  Gateway target updated: {tgt['targetId']}")
                 return
 
     print(f"  Creating gateway target {TARGET_NAME}...")
     response = agentcore.create_gateway_target(
         gatewayIdentifier=gateway_id,
         name=TARGET_NAME,
-        description="Lambda: ah-analytics-s3tables-mcp — 3 read-only Athena tools",
+        description="Lambda: ah-analytics-s3tables-mcp — 4 read-only S3 Tables tools for AH and NUH",
         credentialProviderConfigurations=[{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
         targetConfiguration={
             "mcp": {

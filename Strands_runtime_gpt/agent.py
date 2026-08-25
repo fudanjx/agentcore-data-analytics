@@ -118,6 +118,28 @@ RUNTIME_STREAM_HEARTBEAT_SECONDS = _bounded_int_env(
     "RUNTIME_STREAM_HEARTBEAT_SECONDS", 15, 5, 300
 )
 
+S3TABLES_EXPORT_GUIDANCE = """
+## Large S3 Tables query workflow (GPT pilot)
+
+For AH or NUH S3 Tables work that can return many rows—especially multi-month
+dashboard, mapping, or department-level analysis—use the Gateway tool
+`s3tables_execute_sql_export` rather than `s3tables_execute_sql`. Supply the
+correct `source` (`ah` or `nuh`) and `export: true`. The export tool returns a
+compact result containing `result_s3_uri`, not database rows.
+
+Then use Code Interpreter to download that exact `result_s3_uri`, load the CSV
+locally, apply any approved mapping resources, perform validation and
+aggregation, and create the requested artifact. Do not ask the Gateway to put
+the full exported CSV into the model context. Keep the Code Interpreter return
+to the required compact `AGENTCORE_RESULT_JSON` contract; report only
+aggregates, samples, validation results, and artifact metadata.
+
+For small schema inspections, samples, or intentionally limited queries,
+`s3tables_execute_sql` remains appropriate. If it reports the direct-result
+limit, switch to `s3tables_execute_sql_export`; never split a large query only
+to move its raw rows through the model context.
+""".strip()
+
 
 @dataclass(frozen=True)
 class InvocationRequest:
@@ -422,6 +444,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                 system_prompt.load(),
                 document_guidance,
                 code_interpreter.system_guidance() if interpreter_enabled else "",
+                S3TABLES_EXPORT_GUIDANCE if interpreter_enabled else "",
             )
             if part
         )
