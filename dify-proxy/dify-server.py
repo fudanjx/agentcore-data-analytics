@@ -18,7 +18,7 @@ file intentionally contains no OpenWebUI, native Dify App API, or file-upload
 proxy routes.
 """
 
-import base64
+import base64 # noqa: I001
 import json
 import logging
 import mimetypes
@@ -39,6 +39,8 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import model_usage
+from dependencies import DifyConnDep, NuhsConnDep
+from lifespan import lifespan
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
@@ -150,7 +152,7 @@ _RUNTIME_INTERRUPTED_TEXT = (
     "Please retry the request."
 )
 
-app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0")
+app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0", lifespan=lifespan)
 
 _agentcore_control_client = None
 _s3_client = None
@@ -1734,7 +1736,12 @@ def models_by_slug(slug: str):
 
 
 @app.post("/{slug}/v1/chat/completions")
-async def chat_completions_by_slug(slug: str, request: Request):
+async def chat_completions_by_slug(
+    slug: str,
+    request: Request,
+    dify_conn: DifyConnDep,
+    nuhs_conn: NuhsConnDep
+):
     backend = await run_in_threadpool(get_dify_backend, slug)
     if backend is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
