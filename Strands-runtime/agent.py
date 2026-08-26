@@ -90,6 +90,7 @@ class InvocationRequest:
     session_id: str
     model_slug: str
     stream: bool
+    user_gateway_permissions: list[str]
 
     @classmethod
     def from_payload(cls, payload: dict, context: Any = None) -> "InvocationRequest":
@@ -156,6 +157,9 @@ class InvocationRequest:
             or payload.get("runtimeUserId")
             or nested_info.get("user_id")
         )
+        # Get user gateway permissions via payload
+        user_gateway_permissions: list[str] = payload.get("user_gateway_permissions", [])
+        
         return cls(
             messages=normalized,
             actor_id=str(actor) if actor else None,
@@ -169,6 +173,7 @@ class InvocationRequest:
                 if "stream" in payload
                 else has_messages
             ),
+            user_gateway_permissions=user_gateway_permissions
         )
 
 
@@ -293,18 +298,20 @@ def _log_model_usage(
     return payload
 
 
-def _make_gateway_clients() -> list[MCPClient]:
+def _make_gateway_clients(user_gateway_permissions: list[str]) -> list[MCPClient]:
     if not ENABLE_GATEWAYS:
         return []
+    ACTIVATE_ALL_PERMS = "all" in user_gateway_permissions
     clients = []
     for slug, gateway in gateway_proxy.GATEWAY_CONFIGS.items():
-        clients.append(
-            MCPClient(
-                lambda target=gateway: gateway_proxy.mcp_transport(target),
-                startup_timeout=30,
-                prefix=slug,
+        if ACTIVATE_ALL_PERMS or (slug.lower() in user_gateway_permissions):
+            clients.append(
+                MCPClient(
+                    lambda target=gateway: gateway_proxy.mcp_transport(target),
+                    startup_timeout=30,
+                    prefix=slug,
+                )
             )
-        )
     return clients
 
 
@@ -368,7 +375,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                     ),
                 )
             )
-        tools.extend(_make_gateway_clients())
+        tools.extend(_make_gateway_clients(user_gateway_permissions=request.user_gateway_permissions))
 
         model = BedrockModel(
             model_id=MODEL_ID,
