@@ -7,20 +7,15 @@ description: Column reference and SQL guidance for the ah-analytics outpatient t
 
 **One row per appointment. Primary date: `Visit_Date`.**
 
-## Mandatory WHERE filters
+## Query baseline
 
-```sql
-WHERE "prelim_flag" = 'N'
-  AND ("Status" != 'P' OR "Status" IS NULL)
-  AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
-  AND ("Trt_Cat" != 'NC' OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
-```
+Use the `outpatient` filters and canonical date in `references/data-ontology.yaml`.
 
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join to `procedure`/`urgentcarecenter`. Blank for new encounters from Feb 2026 onward. |
+| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
 | `Visit_Date` | TIMESTAMP | Date visit occurred — primary date filter |
 | `Visit_Time` | TIME | Actual visit time |
 | `APPT_TIME` | TIME | Scheduled appointment time |
@@ -39,7 +34,7 @@ WHERE "prelim_flag" = 'N'
 | `Sex` | TEXT | `M` / `F` |
 | `Referral_type` | TEXT | How patient was referred |
 | `Pri_Diag_Code` | TEXT | ICD-10 diagnosis code |
-| `PAT_ENC_CSN_ID` | TEXT | Join key to `procedure`. Null before 2023-01-01 (SAP era). |
+| `PAT_ENC_CSN_ID` | TEXT | Encounter identifier; see the ontology for candidate joins and completeness cautions. |
 | `cnt` | INTEGER | Always 1 |
 
 ## Trt_OU relabeling
@@ -121,9 +116,4 @@ GROUP BY 1 ORDER BY 1;
 
 ## Join to procedure
 
-```sql
-FROM outpatient o
-JOIN procedure p ON o."PAT_ENC_CSN_ID" = p."PAT_ENC_CSN_ID"
-```
-
-⚠️ `PAT_ENC_CSN_ID` is null on both sides before 2023-01-01 — this join effectively only works for Epic-era (2023+) data. See SKILL.md for the full era rule.
+Use the candidate join in `references/data-ontology.yaml` and validate counts for the requested period.

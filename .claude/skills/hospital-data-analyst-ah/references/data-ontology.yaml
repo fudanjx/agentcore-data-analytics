@@ -1,0 +1,82 @@
+version: 1
+source:
+  namespace: ah
+  tables: [admission, discharge, inflight, outpatient, procedure, urgentcarecenter]
+  schema_reference: docs/ah-s3tables-schema-guide.md
+  verified_at: 2026-08-26
+  verification: MCP list_tables plus aggregate values and join-existence checks
+
+# This is the agent-facing semantic source of truth. The schema guide owns the
+# complete physical schema; table reference files own detailed metric logic.
+global_rules:
+  preliminary_records: "Use prelim_flag = 'N' unless the user explicitly requests provisional data."
+  identifiers: "Treat all identifiers as strings; neither case_no nor pat_enc_csn_id is universally complete."
+  joins: "Every relationship below is a candidate join, not an enforced key. Check row counts and duplicates for the requested period."
+
+tables:
+  admission:
+    grain: inpatient admission episode
+    date: { field: adm_date, meaning: admission date }
+    identifiers: [case_no, pat_enc_csn_id]
+    filters:
+      - "adm_status <> 'P'"
+      - "adm_type IN ('EM','EL','SD','DI','TA','RA')"
+      - "derived admitting ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')"
+  discharge:
+    grain: discharged inpatient episode
+    date: { field: disch_date, meaning: discharge date }
+    identifiers: [case_no, pat_enc_csn_id]
+    filters:
+      - "adm_type IN ('EM','EL','SD','DI','TA','RA')"
+      - "nrs_ou NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')"
+  inflight:
+    grain: one inpatient census record per patient-day
+    date: { field: inflight_date, meaning: census snapshot date }
+    identifiers: [case_no, pat_enc_csn_id]
+    filters:
+      - "ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')"
+    cautions:
+      - "Raw inflight omits same-day admission/discharge cases; use the documented top-up logic for production patient-days."
+  outpatient:
+    grain: outpatient appointment / visit record
+    date: { field: visit_date, meaning: visit date }
+    identifiers: [case_no, pat_enc_csn_id]
+    filters:
+      - "status <> 'P' OR status IS NULL"
+      - "visit_type IN ('FV','RV','FW','RW','DF','DR','FD','RD')"
+      - "trt_cat <> 'NC' OR sub_specialty_id IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD')"
+  procedure:
+    grain: one procedure; a case can have multiple rows
+    date: { field: operation_date, meaning: procedure date, type: timestamp }
+    identifiers: [case_no, pat_enc_csn_id, uid, admsn_csn]
+    cautions:
+      - "Choose procedure rows (COUNT(*)) or a validated episode definition before aggregating."
+  urgentcarecenter:
+    grain: urgent-care / ED attendance
+    date: { field: visit_date, meaning: attendance date }
+    identifiers: [case_no, pat_enc_csn_id, ed_episode_id, sap_ip_case_no]
+    filters:
+      - "case_end_type <> 'Cancelled'"
+      - "att_phy_name <> 'CANCELLATION'"
+    event_times:
+      arrival: event_arrival_time
+      triage_start: triage_start_time
+      triage_end: triage_end_time
+      ed_departure: ed_departure_dttm
+      ip_bed_request: ip_bed_request_time
+      ip_admission: ip_admit_time
+
+aliases:
+  patient_name: { admission: pat_name, discharge: full_name, inflight: pat_name, outpatient: name, procedure: patient_name, urgentcarecenter: name }
+  patient_sex: { admission: sex, discharge: sex, inflight: sex, outpatient: sex, procedure: sex, urgentcarecenter: gender }
+  patient_age: { admission: age, discharge: age, inflight: age, outpatient: age, procedure: age, urgentcarecenter: pat_age }
+  primary_diagnosis: { admission: diagnosis_code, discharge: pri_diag_code, inflight: pri_diagnosis_code, outpatient: pri_diag_code, urgentcarecenter: pri_diag_code }
+
+candidate_joins:
+  - { from: admission, to: discharge, keys: [case_no, pat_enc_csn_id], expected_cardinality: "episode to episode", live_match_check: "case_no and pat_enc_csn_id both return matches" }
+  - { from: admission, to: inflight, keys: [case_no, pat_enc_csn_id], expected_cardinality: "episode to patient-day", live_match_check: "case_no returns matches" }
+  - { from: urgentcarecenter, to: admission, keys: [pat_enc_csn_id], expected_cardinality: "attendance to possible admission", live_match_check: "pat_enc_csn_id returns matches" }
+  - { from: outpatient, to: procedure, keys: [pat_enc_csn_id], expected_cardinality: "visit to possible procedure", live_match_check: "pat_enc_csn_id returns matches" }
+
+do_not_join:
+  - { from: urgentcarecenter.sap_ip_case_no, to: admission.case_no, reason: "Live equality and trimmed-equality checks returned zero matches on 2026-08-26." }
