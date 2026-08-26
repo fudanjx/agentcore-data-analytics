@@ -1,6 +1,6 @@
 ---
 name: nuh-analytics-inpatient-movement
-description: Column reference and SQL guidance for NUH inpatient_movement. Use when analyzing inpatient admissions, discharges, patient days, ALOS, TYPE_GRP, Elective, Emergency, Transfer-In, New Born, or paying and subsidised inpatient activity.
+description: Column reference and SQL guidance for NUH inpatient_movement. Use when analyzing inpatient admissions, discharges, patient days, ALOS, PATIENT_TYPE, Elective, Emergency, New Born, Others, or paying and subsidised inpatient activity.
 ---
 
 # NUH Analytics — inpatient_movement
@@ -8,6 +8,11 @@ description: Column reference and SQL guidance for NUH inpatient_movement. Use w
 **Monthly snapshot field: `CURRENT_DATE`. Always quote it.** For validated 2025
 metrics, use the hybrid rules below. `MOVEMENT_CAT` is text: compare with `'1'`,
 `'2'`, and `'20'`, never integers.
+
+For admissions, discharges, and patient days, always use
+`DATE_TRUNC('month', "CURRENT_DATE")` as the date-range filter, grouping key,
+ordering key, and displayed month. Never use `ADATE` or `DDATE` as the monthly
+bucket.
 
 | Era | Snapshot range | Episode key | Discharge category | Admission category |
 |---|---|---|---|---|
@@ -23,10 +28,12 @@ Exclude Healthy Baby records from every inpatient count:
 ```
 
 For admissions, additionally require
-`DATE_TRUNC('month', "ADATE") = DATE_TRUNC('month', "CURRENT_DATE")`.
-For patient days, calculate `SUM("LSTAY")` and additionally exclude
-`"TREATMENT_OU" NOT IN ('NW22','NWDSW','NWEDS','NWASW')`. Apply those OU
-exclusions only to patient days.
+`DATE_TRUNC('month', "ADATE") = DATE_TRUNC('month', "CURRENT_DATE")`. This is an
+eligibility filter only; it does not change the monthly bucket from
+`CURRENT_DATE`. For patient days, calculate `SUM("LSTAY")`, group by
+`CURRENT_DATE`, and additionally exclude `"TREATMENT_OU" NOT IN
+('NW22','NWDSW','NWEDS','NWASW')`. Apply those OU exclusions only to patient
+days.
 
 Use snapshot month (`CURRENT_DATE`) for the validated discharge grouping, not
 `DDATE`. Cast `"DDATE"::date` only for discharge-based ALOS arithmetic.
@@ -79,24 +86,25 @@ Alias it as `source_ou` and join it to the mapping's `organizational_unit`.
 Do not invent or manually reconstruct mapped result rows. Use fresh SQL output
 for reconciliation.
 
-## Elective, Emergency, Transfer-In, and New Born
+## Elective, Emergency, New Born, and Others
 
-For an inpatient admissions or discharges breakdown by Elective/Emergency, use
-`TYPE_GRP` and retain all five output categories:
+For an inpatient admissions or discharges breakdown by admission type, use
+`PATIENT_TYPE` in RDS and `patient_type` in S3. These are the physical source
+fields. Derive exactly four output categories:
 
 ```sql
 CASE
-  WHEN "TYPE_GRP" = 'EL' THEN 'Elective'
-  WHEN "TYPE_GRP" = 'EM' THEN 'Emergency'
-  WHEN "TYPE_GRP" = 'TA' THEN 'Transfer-In'
-  WHEN "TYPE_GRP" = 'NB' THEN 'New Born'
+  WHEN "PATIENT_TYPE" IN ('EL','SD') THEN 'Elective'
+  WHEN "PATIENT_TYPE" IN ('DI','EM','SOC') THEN 'Emergency'
+  WHEN "PATIENT_TYPE" = 'NB' THEN 'New Born'
   ELSE 'Others'
 END AS admission_type
 ```
 
-`Others` includes null and every unexpected value. Do not omit Transfer-In,
-New Born, null, or unexpected values merely because the user asks for an
-Elective/Emergency breakdown. Use `NB` for New Born.
+Known `Others` codes are `RA`, `SA`, and `TA`. Null and any newly encountered
+code also map to `Others`. Before reporting, profile every distinct source
+value. Keep four displayed categories, but state the codes and counts of null
+or newly encountered values separately in the QC notes.
 
 ## CY2025 locked benchmarks
 
@@ -116,8 +124,9 @@ count, total, and unique OU count before reporting.
 
 ## Fail-closed dashboard workflow
 
-For a monthly department dashboard, export one complete row per snapshot month
-and `source_ou` with these columns:
+For a monthly department dashboard, derive `month_date` only from
+`DATE_TRUNC('month', "CURRENT_DATE")` and export one complete row per snapshot
+month and `source_ou` with these columns:
 
 ```text
 month_date,source_ou,admissions,discharges,patient_days,
