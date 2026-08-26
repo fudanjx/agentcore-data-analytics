@@ -21,7 +21,7 @@ async def _get_email_by_user_id(
     SELECT_USER_EMAIL_SQL = dedent("""
     SELECT session_id
     FROM end_users
-    WHERE id = %s::uuid
+    WHERE id = $1::uuid
     LIMIT 1
     """
 )
