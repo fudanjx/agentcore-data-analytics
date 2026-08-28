@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AH S3 Tables pilot</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">LOCAL PILOT</p>
+      <h1>AH S3 Tables ingestion</h1>
+      <p id="scope">Loading pilot namespace…</p>
+      <p id="activity" aria-live="polite"></p>
+    </header>
+
+    <section>
+      <div class="section-title"><h2>1. Choose destination</h2><button id="refresh" class="secondary">Refresh tables</button></div>
+      <label>S3 Tables bucket and namespace <select id="bucket"></select></label>
+      <div id="tables" class="tables"></div>
+      <label class="create"><input id="create" type="checkbox"> Create a new table from this upload</label>
+      <label id="new-table-wrap" hidden>New table name <input id="new-table" pattern="[a-z][a-z0-9_-]*" placeholder="e.g. outpatient_jul"></label>
+      <p class="hint">New table names: start with a lowercase letter; valid characters are a-z, 0-9, and underscores (_). Hyphens are converted to underscores.</p>
+      <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
+    </section>
+
+    <section>
+      <h2>2. Select Parquet files</h2>
+      <input id="files" type="file" accept=".parquet,.parquet.gzip,.gzip,application/gzip,application/x-gzip,.xlsx,.xls,.csv,.tsv" multiple>
+      <p class="hint">Supported formats: Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV. The first file defines a new table’s schema. Later extra columns are ignored; missing target columns become NULL.</p>
+      <p class="placeholder">Sensitive-column scan: placeholder only — anonymisation is not enabled in this pilot.</p>
+    </section>
+
+    <section class="actions">
+      <button id="preflight" disabled>Review upload</button>
+      <button id="upload" disabled hidden>Upload and run ETL</button>
+    </section>
+
+    <details id="review" hidden>
+      <summary><strong>3. Preflight result</strong> <span class="hint">(expand details)</span></summary>
+      <pre id="review-body"></pre>
+      <label id="approval" hidden><input id="allow-casts" type="checkbox"> I approve the displayed type conversions; invalid values may become NULL.</label>
+    </details>
+
+    <section id="outcome" hidden>
+      <h2>4. ETL outcome</h2>
+      <p id="status"></p>
+      <pre id="status-body"></pre>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>
