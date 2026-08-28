@@ -27,12 +27,16 @@ For mapped reporting, use the table-specific OU field contract in
 `references/subspec-mapping.md`; schema inspection may resolve physical casing
 or source-specific names only and must never select a different semantic field.
 
+Treat a user-specified data source as authoritative. Do not switch between S3
+and RDS without the user's approval; first troubleshoot and report the failed
+query using the applicable reference rules.
+
 ## Table routing
 
 | Question | Table | Primary date | Reference |
 |---|---|---|---|
 | ED attendance, PACS, arrival mode, disposition, or ED admission | `emd` | `EMD_VISIT_DATE` | references/emd.md |
-| Inpatient admissions, discharges, patient days, ALOS, Elective/Emergency/Transfer-In/New Born, or patient class | `inpatient_movement` | `CURRENT_DATE` snapshot | references/inpatient-movement.md |
+| Inpatient admissions, discharges, patient days, ALOS, Elective/Emergency/Transfer-In/New Born, or patient class | `inpatient_movement` | RDS `"CURRENT_DATE"` / S3 `"current_date"` snapshot; never unquoted | references/inpatient-movement.md |
 | SOC visits or attendance, First/New vs Repeat, private/subsidised, clinic, or specialty | `soc` | `SOC_VISIT_DATE` | references/soc.md |
 | Surgery, day surgery, normal delivery, inpatient surgery, or emergency/elective procedures | `surgery` | `SVISITDATE` | references/surgery.md |
 | Department, cluster, MOH specialty, or subspecialty report | Relevant table + subspec mapping | — | references/subspec-mapping.md |
@@ -59,7 +63,10 @@ or source-specific names only and must never select a different semantic field.
 
 ## Query discipline
 
-- Double-quote NUH column names. Always write `"CURRENT_DATE"` (not the PostgreSQL system-date expression).
+- Double-quote NUH column names. For the inpatient snapshot field, use the exact
+  source-specific physical column: RDS `"CURRENT_DATE"`; S3 `"current_date"`.
+  Never use either identifier unquoted because it resolves to the SQL runtime
+  date. Read `references/inpatient-movement.md` before generating inpatient SQL.
 - Use half-open primary-date ranges: `>= DATE 'YYYY-MM-DD' AND < DATE 'next-period-start'`. Never use `<=` on a timestamp endpoint or `YEAR()`.
 - Do not group or filter by `Period`, `Hosp_ABBR`, or `UID` as a date-range filter. In `surgery`, use `UID` only inside the documented hybrid category CASE.
 - Generate annual totals and displayed subtotals programmatically from the same grouped result. A yearly total must equal the sum of its monthly values.
@@ -95,11 +102,10 @@ month-by-`source_ou` SQL export before building HTML:
 Preserve the validator's mapped CSV and audit JSON with the deliverable. Do not
 build or present the dashboard when the validator returns a failed QC status.
 
-When a row-limited SQL tool cannot return or persist the complete month-by-OU
-export, follow the compact mapped-result workflow in
-`references/subspec-mapping.md`. Use the bundled generated mapping CTE unchanged
-and validate the compact result with
-`scripts/validate_compact_mapped_dashboard.py`.
+When a direct SQL result is too large, use the supported SQL-export operation
+to retrieve the complete result as a file, then run the matching validator on
+that export. Never replace it with a preview, partial mapping, or manually
+reconstructed rows.
 
 ## Outputs
 

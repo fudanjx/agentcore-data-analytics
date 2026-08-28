@@ -5,9 +5,55 @@ description: Column reference and SQL guidance for NUH inpatient_movement. Use w
 
 # NUH Analytics — inpatient_movement
 
-**Monthly snapshot field: `CURRENT_DATE`. Always quote it.** For validated 2025
-metrics, use the hybrid rules below. `MOVEMENT_CAT` is text: compare with `'1'`,
-`'2'`, and `'20'`, never integers.
+## Critical identifier collision
+
+`CURRENT_DATE` / `current_date` is a physical inpatient-table column whose name
+collides with the SQL built-in current-date expression. An unquoted occurrence
+is invalid for NUH inpatient analysis.
+
+| Source | Required snapshot-column reference |
+|---|---|
+| RDS | `"CURRENT_DATE"` |
+| S3 | `"current_date"` |
+
+Before submitting any inpatient SQL, inspect the final SQL text. Every
+occurrence of `CURRENT_DATE` or `current_date` must be enclosed in double quotes.
+If any occurrence is unquoted, do not execute the query. This applies in
+`SELECT`, `WHERE`, `CASE`, `DATE_TRUNC`, `GROUP BY`, `ORDER BY`, validation, and
+coverage queries.
+
+```sql
+-- Correct S3
+DATE_TRUNC('month', "current_date") AS month_date
+
+-- Correct RDS
+DATE_TRUNC('month', "CURRENT_DATE") AS month_date
+
+-- Invalid: resolves to the SQL runtime date
+DATE_TRUNC('month', current_date)
+```
+
+For any historical inpatient request, first confirm source coverage with the
+source-specific quoted physical column. For S3 use:
+
+```sql
+SELECT
+  MIN("current_date") AS min_snapshot_date,
+  MAX("current_date") AS max_snapshot_date,
+  COUNT(DISTINCT DATE_TRUNC('month', "current_date")) AS snapshot_months
+FROM nuh.inpatient
+```
+
+Use `"CURRENT_DATE"` for the equivalent RDS query. A zero-row result, a
+one-date result, or a result showing today's runtime date is not evidence that
+historical data are absent unless this exact quoted coverage check confirms it.
+Discard any result generated with unquoted `current_date` and rerun it with the
+correct quoted identifier. Report missing history only after the quoted check.
+
+Examples below use quoted RDS column casing; for S3, substitute the exact quoted
+lowercase column name without changing the logic. For validated 2025 metrics,
+use the hybrid rules below. `MOVEMENT_CAT` is text: compare with `'1'`, `'2'`,
+and `'20'`, never integers.
 
 For admissions, discharges, and patient days, always use
 `DATE_TRUNC('month', "CURRENT_DATE")` as the date-range filter, grouping key,
@@ -51,13 +97,29 @@ CASE
   WHEN "ADM_PATIENT_CLASS_GROUP" = 'PTE' THEN 'Paying'
   WHEN "ADM_PATIENT_CLASS_GROUP" = 'SUB' THEN 'Subsidised'
   ELSE 'Unclassified'
-END AS patient_type
+END AS patient_class_group
+```
+
+Derive `patient_class_group` once for each eligible discharge episode, then
+aggregate Paying, Subsidised, and Unclassified only by equality against that
+derived value. Do not rebuild the three counts with independent Boolean
+predicates, and never define Unclassified as `NOT` of a Paying or Subsidised
+condition. The ordered `CASE` is exhaustive: an unlisted or null SAP
+`PATIENT_CLASS` is Subsidised, while a null or newly encountered Epic
+`ADM_PATIENT_CLASS_GROUP` is Unclassified.
+
+```sql
+COUNT(DISTINCT CASE WHEN patient_class_group = 'Paying' THEN episode_key END)
+COUNT(DISTINCT CASE WHEN patient_class_group = 'Subsidised' THEN episode_key END)
+COUNT(DISTINCT CASE WHEN patient_class_group = 'Unclassified' THEN episode_key END)
 ```
 
 Use `ADM_PATIENT_CLASS_GROUP`, not `DISCH_PATIENT_CLASS_GROUP`, for Epic. Include
 unclassified records in the overall total and state them separately. One Epic
 record was unclassified in August 2025; `ADM_PATIENT_CLASS_GROUP` is null for the
-entire SAP era by design.
+entire SAP era by design. At every month-and-`source_ou` grain and again at the
+monthly roll-up, require Paying + Subsidised + Unclassified = total discharges.
+SAP-period Unclassified must be zero.
 
 ## ALOS
 
@@ -83,6 +145,10 @@ For department, cluster, MOH-specialty, or subspecialty reporting, read
 SAP and Epic period; for S3 Tables use `dept_ou`. Resolve exact RDS
 capitalization from schema metadata without selecting an alternative OU field.
 Alias it as `source_ou` and join it to the mapping's `organizational_unit`.
+Never use `DEPT_OU_DESC`, `dept_ou_desc`, or another department-description
+field as a substitute for this mapping. For a requested multi-month department
+output, retain every requested month and mapped department; do not replace it
+with a latest-month or Top-N extract.
 Do not invent or manually reconstruct mapped result rows. Use fresh SQL output
 for reconciliation.
 

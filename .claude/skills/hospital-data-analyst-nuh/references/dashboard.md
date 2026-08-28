@@ -22,6 +22,12 @@ the user requests a mobile dashboard.
 - Group ED arrival mode with `ARRIVAL_MODE_DESC`; its groups must total the base-filtered EMD count. Do not use superseded raw-code normalisation rules.
 - For SOC, inpatient, or surgery department/cluster/MOH/subspecialty visuals, read `subspec-mapping.md`, use fresh SQL output, and show unmatched OU records separately before applying the clinical-reporting exclusion.
 - Compute annual totals and every displayed subtotal from the exact monthly values shown. Never manually add them.
+- Before reporting that an inpatient source lacks historical coverage, run the
+  approved coverage query from `inpatient-movement.md` using the exact quoted
+  physical snapshot column. A zero-row result produced with unquoted
+  `current_date` is a query failure, not a data-availability finding.
+- Treat a user-specified source as authoritative. Do not switch between S3 and
+  RDS without the user's approval; troubleshoot and report a failed query first.
 
 ## Historical-data integrity
 
@@ -34,17 +40,46 @@ the user requests a mobile dashboard.
 - Build the chart series, summary tables, KPIs, peak/low calculations, and
   narrative findings from one canonical processed dataset. Do not paste locked
   benchmarks into KPI cards independently of the plotted series.
+- Keep the requested source, date range, and grouping coverage consistent across
+  every visual. Do not substitute a latest-month or Top-N extract for a requested
+  full-range department view.
 - Preserve an audit manifest containing source table, date field, date range,
   SQL result row count, observed month count, unique source OUs, mapping count,
   mapped/unmapped workload, exclusions, plotted total, and QC status.
-- Show a visible `QC FAILED` state and do not describe the dashboard as ready,
-  verified, or complete when any required assertion fails.
+- For inpatient output, the audit manifest must additionally record the data
+  source, exact quoted snapshot identifier, monthly expression, minimum and
+  maximum snapshot dates, expected months, and observed months. Do not proceed
+  from SQL to dashboard construction until these values confirm the requested
+  coverage.
+- Treat the validator process exit code and audit JSON as authoritative. Never
+  hardcode `QC PASSED`, and never describe an output as ready, verified, or
+  complete when a required assertion fails.
 - For an SOC, inpatient, or surgery department dashboard, run the corresponding
   bundled `validate_*_dashboard.py` script on the complete month-by-OU export.
   Build every visual and KPI from its mapped CSV and retain its audit JSON.
-- If the SQL tool cannot persist that export, use the compact database-side
-  mapping workflow in `subspec-mapping.md`, run
-  `validate_compact_mapped_dashboard.py`, and build only from its flattened CSV.
+- If a direct SQL result is too large, use the supported SQL-export operation
+  and run the corresponding validator on the complete exported file.
+
+## Fail-visible validation output
+
+Use the validator outcome to select one of these output states:
+
+- If the validator exits successfully, `qc_status` is `PASSED`, and `errors` is
+  empty, generate the normal dashboard.
+- If complete source data are available but validation fails, generate a
+  diagnostic dashboard. Show a prominent page-level `QC FAILED` banner, plus a
+  warning panel immediately above each affected chart and a reconciliation
+  panel or table immediately below it. Keep the chart itself visually unchanged:
+  place no failure badge, warning, reference line, special bar styling,
+  watermark, or diagnostic tooltip inside the chart.
+- The reconciliation panel must identify the affected period or grouping and
+  show the source total, displayed component values, component sum, difference,
+  and failed assertion. Preserve unaffected charts and tables normally.
+- Describe a diagnostic dashboard as an investigation aid and not for official
+  reporting. Do not call it ready, verified, completed, or QC-passed.
+- If source data are incomplete or unavailable, generate only a failure report
+  explaining what is missing. Do not create charts from partial, inferred, or
+  fabricated data.
 
 ## HTML build rules
 
