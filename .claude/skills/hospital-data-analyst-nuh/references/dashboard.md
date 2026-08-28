@@ -57,6 +57,11 @@ the user requests a mobile dashboard.
 - For an SOC, inpatient, or surgery department dashboard, run the corresponding
   bundled `validate_*_dashboard.py` script on the complete month-by-OU export.
   Build every visual and KPI from its mapped CSV and retain its audit JSON.
+- If an inpatient admissions or discharges benchmark fails, rerun the canonical
+  monthly control query from `inpatient-movement.md` before constructing the
+  dashboard. If that control query passes, correct the dashboard SQL or export,
+  rerun the validator, and use only the corrected result. Use the diagnostic
+  dashboard state only if the canonical control query also fails.
 - If a direct SQL result is too large, use the supported SQL-export operation
   and run the corresponding validator on the complete exported file.
 
