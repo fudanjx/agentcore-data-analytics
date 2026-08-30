@@ -2,7 +2,7 @@ import unittest
 
 import pyarrow as pa
 
-from s3tables_delta_pilot.ingest_contract import compare_schema, normalise_name, schema_from_arrow
+from s3tables_delta_pilot.ingest_contract import compare_schema, normalise_name, schema_from_arrow, schema_from_table
 
 
 class IngestContractTests(unittest.TestCase):
@@ -23,6 +23,15 @@ class IngestContractTests(unittest.TestCase):
         self.assertEqual(["unused"], result["extra_columns"])
         self.assertEqual(["required"], result["missing_columns"])
         self.assertEqual("value", result["type_conversions"][0]["column"])
+        self.assertEqual(2, result["target_column_count"])
+        self.assertEqual(1, result["matching_column_count"])
+        self.assertEqual(50.0, result["matching_percentage"])
+
+    def test_schema_overlap_is_calculated_after_canonicalisation(self):
+        source = pa.schema([("A Col", pa.string()), ("B-COL", pa.string()), ("unmatched", pa.string())])
+        result = compare_schema(source, [{"name": "a_col", "type": "STRING"}, {"name": "b_col", "type": "STRING"}])
+        self.assertEqual(["a_col", "b_col"], result["matching_columns"])
+        self.assertEqual(100.0, result["matching_percentage"])
 
     def test_name_collision_gets_a_deterministic_suffix(self):
         schema, _ = schema_from_arrow(pa.schema([("BILL_NUM", pa.string()), ("Bill_Num", pa.string()), ("bill num", pa.string())]))
@@ -32,6 +41,36 @@ class IngestContractTests(unittest.TestCase):
         _, warnings = schema_from_arrow(pa.schema([("created_at", pa.timestamp("ns"))]))
         self.assertEqual(1, len(warnings))
         self.assertIn("nanosecond timestamps", warnings[0])
+
+    def test_new_table_profile_uses_all_populated_values_and_defaults_all_null_to_string(self):
+        table = pa.table({
+            "Empty Measure": pa.array([None, None, None], type=pa.float64()),
+            "Performing Surgeon": [None, "Dr Example", None],
+            "Visit Date": [None, "2026-08-01", None],
+            "Generic Number": [None, "12", "13"],
+            "Mixed Value": [None, "12", "not-a-number"],
+        })
+        schema, warnings = schema_from_table(table)
+        types = {field["name"]: field["type"] for field in schema}
+        self.assertEqual("STRING", types["empty_measure"])
+        self.assertEqual("STRING", types["performing_surgeon"])
+        self.assertEqual("TIMESTAMP", types["visit_date"])
+        self.assertEqual("BIGINT", types["generic_number"])
+        self.assertEqual("STRING", types["mixed_value"])
+        self.assertEqual([], warnings)
+
+    def test_new_table_profile_keeps_mcr_code_and_mode_as_strings_even_when_numeric(self):
+        table = pa.table({"Clinician MCR": [123456], "Procedure Code": [123], "Arrival Mode": [1]})
+        schema, _ = schema_from_table(table)
+        self.assertEqual(["STRING", "STRING", "STRING"], [field["type"] for field in schema])
+
+    def test_new_table_profile_never_overrides_a_sanitization_string_requirement(self):
+        table = pa.table({"Admsn CSN": [123456, 234567], "Postal Code": [120000, 130000]})
+        schema, _ = schema_from_table(
+            table,
+            force_string_columns={"Admsn CSN", "Postal Code"},
+        )
+        self.assertEqual(["STRING", "STRING"], [field["type"] for field in schema])
 
 
 if __name__ == "__main__":
