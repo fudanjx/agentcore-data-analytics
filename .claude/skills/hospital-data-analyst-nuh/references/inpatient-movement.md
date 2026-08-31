@@ -51,9 +51,9 @@ Discard any result generated with unquoted `current_date` and rerun it with the
 correct quoted identifier. Report missing history only after the quoted check.
 
 Examples below use quoted RDS column casing; for S3, substitute the exact quoted
-lowercase column name without changing the logic. For validated 2025 metrics,
-use the hybrid rules below. `MOVEMENT_CAT` is text: compare with `'1'`, `'2'`,
-and `'20'`, never integers.
+lowercase column name without changing the logic. Use the era-specific episode
+keys and movement categories below. `MOVEMENT_CAT` is text: compare with `'1'`,
+`'2'`, and `'20'`, never integers.
 
 For admissions, discharges, and patient days, always use
 `DATE_TRUNC('month', "CURRENT_DATE")` as the date-range filter, grouping key,
@@ -64,6 +64,38 @@ bucket.
 |---|---|---|---|---|
 | SAP | before `DATE '2025-05-01'` | `CASE_NO` | `'2'` | `'1'` |
 | Epic | from `DATE '2025-05-01'` | `EPIC_CSN` | `IN ('2','20')` | `IN ('1','20')` |
+
+## Canonical admission and discharge predicates
+
+Use these predicates exactly for a range that crosses the May 2025 transition.
+For a SAP-only or Epic-only range, retain only the applicable branch.
+
+Admissions:
+
+```sql
+AND (
+  ("CURRENT_DATE" < DATE '2025-05-01' AND "MOVEMENT_CAT" = '1')
+  OR
+  ("CURRENT_DATE" >= DATE '2025-05-01' AND "MOVEMENT_CAT" IN ('1','20'))
+)
+AND DATE_TRUNC('month', "ADATE") = DATE_TRUNC('month', "CURRENT_DATE")
+```
+
+Discharges:
+
+```sql
+AND (
+  ("CURRENT_DATE" < DATE '2025-05-01' AND "MOVEMENT_CAT" = '2')
+  OR
+  ("CURRENT_DATE" >= DATE '2025-05-01' AND "MOVEMENT_CAT" IN ('2','20'))
+)
+```
+
+Before executing SQL, inspect the final predicate. Never apply only
+`"MOVEMENT_CAT" = '1'` or `"MOVEMENT_CAT" = '2'` to any range containing Epic
+snapshots. A cross-era query must contain both date-qualified branches. Count
+distinct admissions and discharges at snapshot-month plus era-appropriate
+episode-key grain.
 
 ## Global and metric filters
 
@@ -81,45 +113,52 @@ eligibility filter only; it does not change the monthly bucket from
 ('NW22','NWDSW','NWEDS','NWASW')`. Apply those OU exclusions only to patient
 days.
 
+When one SQL query produces multiple inpatient metrics, keep the shared base
+limited to the requested `CURRENT_DATE` range and the Healthy Baby exclusion.
+Apply the `TREATMENT_OU` exclusions only inside the patient-days aggregation;
+admissions and discharges must not inherit them. Count discharges using the
+era-appropriate distinct episode key, never by summing a discharge-row flag.
+
 Use snapshot month (`CURRENT_DATE`) for the validated discharge grouping, not
 `DDATE`. Cast `"DDATE"::date` only for discharge-based ALOS arithmetic.
 
-## Paying / subsidised discharges
+## Universal paying / subsidised classification
 
-Use this locked hybrid classification for a cross-era discharge breakdown:
+For admissions, discharges, patient days, ALOS, and any other analysis using the
+inpatient table, use `PATIENT_CLASS` for every period. Do not use
+`ADM_PATIENT_CLASS_GROUP`, `DISCH_PATIENT_CLASS_GROUP`, or another class-group
+field as a substitute.
+
+Use this classification before aggregating the requested measure:
 
 ```sql
 CASE
-  WHEN "CURRENT_DATE" < DATE '2025-05-01'
-   AND "PATIENT_CLASS" IN ('A','AP','ARF','B1','B1P','B1RF','B2RF',
-                           'CRF','NR','NRB1','PTE','PTEP','PTRF') THEN 'Paying'
-  WHEN "CURRENT_DATE" < DATE '2025-05-01' THEN 'Subsidised'
-  WHEN "ADM_PATIENT_CLASS_GROUP" = 'PTE' THEN 'Paying'
-  WHEN "ADM_PATIENT_CLASS_GROUP" = 'SUB' THEN 'Subsidised'
-  ELSE 'Unclassified'
+  WHEN "PATIENT_CLASS" IN (
+    'A','AP','ARF','B1','B1P','B1RF','B2RF',
+    'CRF','NR','NRB1','PTE','PTEP','PTRF'
+  ) THEN 'Paying'
+  ELSE 'Subsidised'
 END AS patient_class_group
 ```
 
-Derive `patient_class_group` once for each eligible discharge episode, then
-aggregate Paying, Subsidised, and Unclassified only by equality against that
-derived value. Do not rebuild the three counts with independent Boolean
-predicates, and never define Unclassified as `NOT` of a Paying or Subsidised
-condition. The ordered `CASE` is exhaustive: an unlisted or null SAP
-`PATIENT_CLASS` is Subsidised, while a null or newly encountered Epic
-`ADM_PATIENT_CLASS_GROUP` is Unclassified.
+For S3, use the exact physical field `"patient_class"`. Null, unlisted, and newly
+encountered codes map to `Subsidised` through the `ELSE` branch.
+
+Derive `patient_class_group` once on eligible rows before aggregation. For an
+episode count, retain one derived class per snapshot month and era-appropriate
+episode key. If an eligible episode-month has more than one derived class, fail
+QC rather than choosing one. Aggregate classes only by equality against the
+derived value; do not rebuild the counts with independent predicates.
 
 ```sql
 COUNT(DISTINCT CASE WHEN patient_class_group = 'Paying' THEN episode_key END)
 COUNT(DISTINCT CASE WHEN patient_class_group = 'Subsidised' THEN episode_key END)
-COUNT(DISTINCT CASE WHEN patient_class_group = 'Unclassified' THEN episode_key END)
 ```
 
-Use `ADM_PATIENT_CLASS_GROUP`, not `DISCH_PATIENT_CLASS_GROUP`, for Epic. Include
-unclassified records in the overall total and state them separately. One Epic
-record was unclassified in August 2025; `ADM_PATIENT_CLASS_GROUP` is null for the
-entire SAP era by design. At every month-and-`source_ou` grain and again at the
-monthly roll-up, require Paying + Subsidised + Unclassified = total discharges.
-SAP-period Unclassified must be zero.
+At every reported grain and again at each roll-up, require Paying + Subsidised
+to equal the corresponding overall measure. `Unclassified` is not a valid
+output under this exhaustive rule. If the dashboard export retains the legacy
+`unclassified_discharges` compatibility column, its value must be zero.
 
 ## ALOS
 
@@ -180,13 +219,13 @@ or newly encountered values separately in the QC notes.
 | Discharges | 75,037 |
 | Patient days | 389,331 |
 | Snapshot ALOS | 5.19 |
-| Paying discharges | 18,197 |
-| Subsidised discharges | 56,839 |
+| Paying discharges | 18,548 |
+| Subsidised discharges | 56,489 |
 
 Validate monthly roll-up, the April-to-May transition (investigate over 5%),
-correct era-specific categories and keys, and Paying plus Subsidised plus stated
-Unclassified equals total discharges. After any mapped load, check the SQL row
-count, total, and unique OU count before reporting.
+correct era-specific categories and keys, and Paying plus Subsidised equals
+total discharges. After any mapped load, check the SQL row count, total, and
+unique OU count before reporting.
 
 ## Fail-closed dashboard workflow
 
@@ -202,6 +241,7 @@ paying_discharges,subsidised_discharges,unclassified_discharges
 Generate every measure in SQL with the rules above. Do not calculate distinct
 episodes from an already aggregated export. Ensure SAP rows use `CASE_NO`, Epic
 rows use `EPIC_CSN`, and patient-day OU exclusions affect only `patient_days`.
+Set the retained compatibility field `unclassified_discharges` to zero.
 
 Run `scripts/validate_inpatient_dashboard.py` with the complete export and the
 bundled mapping JSON. It must confirm exact month coverage, all 277 mapping

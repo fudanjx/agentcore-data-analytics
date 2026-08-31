@@ -20,6 +20,8 @@ the user requests a mobile dashboard.
   `UID` only inside its approved hybrid category CASE.
 - Use the current SOC and surgery hybrid classifications for any range that includes CY2023.
 - Group ED arrival mode with `ARRIVAL_MODE_DESC`; its groups must total the base-filtered EMD count. Do not use superseded raw-code normalisation rules.
+- For ED output, follow the row-counting rules in `emd.md`; do not substitute
+  distinct ID counts or duplicate-status filters.
 - For SOC, inpatient, or surgery department/cluster/MOH/subspecialty visuals, read `subspec-mapping.md`, use fresh SQL output, and show unmatched OU records separately before applying the clinical-reporting exclusion.
 - Compute annual totals and every displayed subtotal from the exact monthly values shown. Never manually add them.
 - Before reporting that an inpatient source lacks historical coverage, run the
@@ -57,6 +59,11 @@ the user requests a mobile dashboard.
 - For an SOC, inpatient, or surgery department dashboard, run the corresponding
   bundled `validate_*_dashboard.py` script on the complete month-by-OU export.
   Build every visual and KPI from its mapped CSV and retain its audit JSON.
+- If an inpatient admissions or discharges benchmark fails, rerun the canonical
+  monthly control query from `inpatient-movement.md` before constructing the
+  dashboard. If that control query passes, correct the dashboard SQL or export,
+  rerun the validator, and use only the corrected result. Use the diagnostic
+  dashboard state only if the canonical control query also fails.
 - If a direct SQL result is too large, use the supported SQL-export operation
   and run the corresponding validator on the complete exported file.
 
