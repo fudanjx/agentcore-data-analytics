@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date, datetime
 from typing import Any, Iterable
 
 import pandas as pd
@@ -39,12 +40,12 @@ def iceberg_type(field: pa.Field) -> tuple[str, bool]:
         return "BOOLEAN", False
     if pa.types.is_integer(value):
         return "BIGINT", False
-    if pa.types.is_floating(value):
+    if pa.types.is_floating(value) or pa.types.is_decimal(value):
         return "DOUBLE", False
-    if pa.types.is_decimal(value):
-        return f"DECIMAL({value.precision},{value.scale})", False
-    if pa.types.is_timestamp(value) or pa.types.is_date(value):
+    if pa.types.is_timestamp(value):
         return "TIMESTAMP", False
+    if pa.types.is_date(value):
+        return "DATE", False
     if pa.types.is_string(value) or pa.types.is_large_string(value) or pa.types.is_binary(value) or pa.types.is_large_binary(value):
         return "STRING", False
     # Nested and other uncommon Arrow types are stored as strings and surfaced
@@ -59,6 +60,13 @@ _STRING_NAME_TOKENS = {
     "race", "gender", "disposition", "reason", "source", "status", "mode",
 }
 _TIMESTAMP_NAME_TOKENS = {"date", "time", "instant", "datetime", "timestamp"}
+_DATE_ONLY_PATTERNS = (
+    (re.compile(r"^\d{8}$"), "%Y%m%d"),
+    (re.compile(r"^\d{4}-\d{2}-\d{2}$"), "%Y-%m-%d"),
+    (re.compile(r"^\d{4}\.\d{2}\.\d{2}$"), "%Y.%m.%d"),
+)
+_TIMESTAMP_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+_TIME_ONLY_PATTERN = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 
 
 def _name_tokens(name: str) -> set[str]:
@@ -73,6 +81,88 @@ def _non_empty_values(column: pa.ChunkedArray) -> pd.Series:
         text = series.astype("string").str.strip()
         present &= ~text.isin({"", "nan", "none", "nat"})
     return series[present]
+
+
+def _text_values(values: pd.Series) -> pd.Series:
+    """Normalise values for strict, format-led temporal inspection."""
+    return values.astype("string").str.strip()
+
+
+def parse_documented_date(value: object) -> date | None:
+    """Parse a documented date without pandas' 2262 timestamp ceiling.
+
+    Iceberg DATE can represent valid calendar dates such as ``9999-12-31``.
+    Python's ``datetime`` parser validates those dates while returning a plain
+    ``date`` object, avoiding pandas' nanosecond timestamp bounds.
+    """
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    text = str(value).strip()
+    for pattern, date_format in _DATE_ONLY_PATTERNS:
+        if pattern.fullmatch(text):
+            try:
+                return datetime.strptime(text, date_format).date()
+            except ValueError:
+                return None
+    return None
+
+
+def parse_documented_timestamp(value: object) -> datetime | None:
+    """Strictly parse the sole documented timestamp format."""
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, datetime):
+        return value.replace(tzinfo=None)
+    text = str(value).strip()
+    if not _TIMESTAMP_PATTERN.fullmatch(text):
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None
+
+
+def _all_valid_date_only(values: pd.Series) -> bool:
+    text = _text_values(values)
+    return bool(text.map(parse_documented_date).notna().all())
+
+
+def _all_valid_timestamp(values: pd.Series) -> bool:
+    text = _text_values(values)
+    return bool(text.map(parse_documented_timestamp).notna().all())
+
+
+def _all_valid_time_only(values: pd.Series) -> bool:
+    text = _text_values(values)
+    if not text.str.match(_TIME_ONLY_PATTERN, na=False).all():
+        return False
+    return bool(pd.to_datetime(text, format="%H:%M:%S", errors="coerce").notna().all())
+
+
+def strict_temporal_type(field: pa.Field, values: pa.ChunkedArray | None) -> str | None:
+    """Return DATE/TIMESTAMP/STRING when the documented temporal contract applies."""
+    if pa.types.is_date(field.type):
+        return "DATE"
+    if pa.types.is_timestamp(field.type):
+        return "TIMESTAMP"
+    if pa.types.is_time(field.type):
+        return "STRING"
+    if values is None:
+        return None
+    populated = _non_empty_values(values)
+    if populated.empty:
+        return None
+    if _all_valid_timestamp(populated):
+        return "TIMESTAMP"
+    if _all_valid_date_only(populated):
+        return "DATE"
+    if _all_valid_time_only(populated):
+        return "STRING"
+    return None
 
 
 def profiled_iceberg_type(field: pa.Field, values: pa.ChunkedArray | None) -> tuple[str, bool]:
@@ -90,20 +180,33 @@ def profiled_iceberg_type(field: pa.Field, values: pa.ChunkedArray | None) -> tu
     populated = _non_empty_values(values)
     if populated.empty:
         return "STRING", False
-    if tokens & _TIMESTAMP_NAME_TOKENS:
-        converted = pd.to_datetime(populated, errors="coerce")
-        return ("TIMESTAMP", False) if converted.notna().all() else ("STRING", True)
-    if pa.types.is_timestamp(field.type) or pa.types.is_date(field.type):
-        return "TIMESTAMP", False
+    temporal = strict_temporal_type(field, values)
+    if temporal is not None:
+        return temporal, False
     if pa.types.is_boolean(field.type):
         return "BOOLEAN", False
+    if pa.types.is_decimal(field.type) or pa.types.is_floating(field.type):
+        return "DOUBLE", False
+    if pa.types.is_integer(field.type):
+        return "BIGINT", False
     # Strings that are truly all numeric may represent a measure.  Any text
     # value makes the column STRING; this scans every populated value, not just
     # the first visible Excel row.
     numeric = pd.to_numeric(populated, errors="coerce")
     if numeric.notna().all():
-        as_float = numeric.astype(float)
-        return ("BIGINT", False) if (as_float % 1 == 0).all() else ("DOUBLE", False)
+        text = _text_values(populated)
+        # Any decimal/scientific representation is a decimal number, even if
+        # the concrete samples happen to be whole-valued (for example 1.0).
+        if text.str.contains(r"[.eE]", regex=True, na=False).any():
+            return "DOUBLE", False
+        return "BIGINT", False
+    # Date/time-looking values which do not comply with the documented formats
+    # require an explicit operator decision rather than a heuristic cast.
+    if tokens & _TIMESTAMP_NAME_TOKENS:
+        return "STRING", True
+    # Values containing clear prose/categorical text are unambiguously strings.
+    # The earlier implementation made every ordinary text field a manual choice,
+    # which burdened users with confirming fields such as notes and categories.
     return "STRING", False
 
 
@@ -147,8 +250,27 @@ def schema_from_table(
             data_type, warning = profiled_iceberg_type(field, raw_values)
         fields.append({"name": name, "type": data_type, "source_name": field.name})
         if warning:
-            warnings.append(f"{field.name} has date/time-like name but non-date values; it will be stored as STRING")
+            warnings.append(f"{field.name} has ambiguous values and requires an explicit initial type selection")
     return fields, warnings
+
+
+def manual_confirmation_columns(
+    table: pa.Table,
+    schema: pa.Schema | None = None,
+    force_string_columns: Iterable[str] = (),
+) -> set[str]:
+    """Return canonical first-file columns that need an operator type choice."""
+    active_schema = schema or table.schema
+    forced = set(force_string_columns)
+    result: set[str] = set()
+    for field, name in zip(active_schema, normalise_names([item.name for item in active_schema])):
+        raw_field = table.schema.field(field.name) if field.name in table.schema.names else None
+        if field.name in forced or raw_field is None or raw_field.type != field.type:
+            continue
+        _, needs_confirmation = profiled_iceberg_type(field, table[field.name])
+        if needs_confirmation:
+            result.add(name)
+    return result
 
 
 def compare_schema(source: pa.Schema, target_fields: list[dict[str, str]]) -> dict[str, Any]:

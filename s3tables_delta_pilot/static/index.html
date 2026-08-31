@@ -15,9 +15,22 @@
       <p id="activity" aria-live="polite"></p>
     </header>
 
+    <details id="identity-panel" class="identity-panel">
+      <summary><strong>Local identity and authorization test panel</strong> <span class="hint">(trusted-development placeholder)</span></summary>
+      <p class="hint">Choose a forged local user to see the exact identity header sent to the API. Roles and namespace grants are resolved by the backend; they are never sent by the browser.</p>
+      <label>Emulate user <select id="emulated-user"></select></label>
+      <div class="identity-grid">
+        <section><h2>Effective backend identity</h2><pre id="effective-identity">Loading…</pre></section>
+        <section><h2>Outgoing API identity context</h2><pre id="outgoing-identity">Loading…</pre></section>
+      </div>
+    </details>
+
     <section>
       <div class="section-title"><h2>1. Choose destination</h2><button id="refresh" class="secondary">Refresh tables</button></div>
-      <label>S3 Tables bucket and namespace <select id="bucket"></select></label>
+      <div class="destination-selectors">
+        <label>S3 Tables bucket <select id="bucket"></select></label>
+        <label>Namespace <select id="namespace" disabled></select></label>
+      </div>
       <div id="tables" class="tables"></div>
       <label class="create"><input id="create" type="checkbox"> Create a new table from this upload</label>
       <label id="new-table-wrap" hidden>New table name <input id="new-table" pattern="[a-z][a-z0-9_\-]*" placeholder="e.g. outpatient_jul"></label>
@@ -35,13 +48,18 @@
 
     <section class="actions">
       <button id="preflight" disabled>Review upload</button>
-      <button id="upload" disabled hidden>Upload and run ETL</button>
+      <p id="review-status" class="operation-status" aria-live="polite"></p>
     </section>
 
     <details id="review" hidden>
       <summary><strong>3. Preflight result</strong> <span class="hint">(expand details)</span></summary>
       <div id="review-body"></div>
     </details>
+
+    <section id="upload-actions" class="actions" hidden>
+      <button id="upload" disabled>Upload and run ETL</button>
+      <p id="upload-status" class="operation-status" aria-live="polite"></p>
+    </section>
 
     <section id="outcome" hidden>
       <h2>4. ETL outcome</h2>

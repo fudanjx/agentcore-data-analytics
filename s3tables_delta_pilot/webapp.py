@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import base64
+import csv
 import hashlib
+import hmac
 import json
 import os
 import random
@@ -16,6 +19,7 @@ from typing import Literal
 
 import boto3
 import pandas as pd
+import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
@@ -24,7 +28,15 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
-from .ingest_contract import compare_schema, normalise_names, schema_from_arrow, schema_from_table
+from .ingest_contract import (
+    compare_schema,
+    manual_confirmation_columns,
+    normalise_names,
+    parse_documented_date,
+    parse_documented_timestamp,
+    schema_from_arrow,
+    schema_from_table,
+)
 from .pilot import NAMESPACE, QC_PREFIX, REGION, ROLE_NAME, SOURCE_BUCKET, SOURCE_PREFIX, TABLE_BUCKET_ARN
 from .sanitization import encryption_key, sanitise_table, sanitised_schema
 
@@ -35,6 +47,8 @@ WEB_UPLOAD_PREFIX = f"{SOURCE_PREFIX}/web_ingest/uploads"
 WEB_HISTORY_PREFIX = f"{SOURCE_PREFIX}/web_ingest/upload_history"
 UPLOAD_HISTORY_TABLE = "uploader_upload_history"
 SNAPSHOT_RETENTION = {"minSnapshotsToKeep": 12, "maxSnapshotAgeHours": 365 * 24}
+UPLOAD_ARCHIVE_RETENTION_DAYS = 30
+UPLOAD_ARCHIVE_LIFECYCLE_RULE_ID = "agentcore-s3tables-upload-archive-30-days"
 ROOT = Path(__file__).parent
 s3 = boto3.client("s3", region_name=REGION)
 s3tables = boto3.client("s3tables", region_name=REGION)
@@ -43,7 +57,9 @@ iam = boto3.client("iam")
 app = FastAPI(title="AH S3 Tables Pilot", docs_url=None, redoc_url=None)
 SUPPORTED_UPLOAD_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 MIN_APPEND_SCHEMA_MATCH_PERCENT = 50.0
-SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "TIMESTAMP", "BOOLEAN")
+SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "DATE", "TIMESTAMP", "BOOLEAN")
+IDENTITY_EMULATION_HEADER = "X-Pilot-User-Id"
+LOCAL_TEST_USER_IDS = ("local-admin", "local-editor", "local-unassigned")
 
 
 @dataclass(frozen=True)
@@ -57,6 +73,8 @@ class BucketScope:
 class PilotUser:
     user_id: str
     is_admin: bool
+    can_view_upload_history: bool
+    can_rollback_uploads: bool
     buckets: tuple[BucketScope, ...]
 
 
@@ -64,14 +82,28 @@ def _configured_users() -> dict:
     """Placeholder for the future frontend's authenticated user/bucket relationship.
 
     Set PILOT_USER_ACCESS_JSON to a mapping of user IDs to ``is_admin`` and a
-    ``buckets`` list. Until that integration exists, local-admin is deliberately
-    scoped only to this pilot bucket and namespace.
+    ``buckets`` list. A local administrator is dynamically authorized for every
+    account-visible S3 Table bucket and namespace; non-admin users are limited
+    to their explicit scopes.
     """
     default = {
         "local-admin": {
             "is_admin": True,
+            "can_view_upload_history": True,
+            "can_rollback_uploads": True,
+            "buckets": [],
+        },
+        "local-editor": {
+            "is_admin": False,
+            # Deliberately limited recovery access for local integration tests:
+            # own audit history only, and only the globally latest update.
+            "can_view_upload_history": True,
+            "can_rollback_uploads": True,
             "buckets": [{"table_bucket_arn": TABLE_BUCKET_ARN, "namespace": NAMESPACE, "label": "AH SOC delta pilot"}],
-        }
+        },
+        # Deliberately has no bucket assignment so the UI can demonstrate the
+        # same authorization failure a real unassigned user receives.
+        "local-unassigned": {"is_admin": False, "can_view_upload_history": False, "can_rollback_uploads": False, "buckets": []},
     }
     raw = os.environ.get("PILOT_USER_ACCESS_JSON")
     if not raw:
@@ -96,16 +128,75 @@ def _current_user(x_pilot_user_id: str | None = Header(default=None, alias="X-Pi
         )
         for item in definition.get("buckets", [])
     )
-    if not buckets:
+    if not buckets and not bool(definition.get("is_admin", False)):
         raise HTTPException(403, "This user has no S3 Tables bucket assignment")
-    return PilotUser(user_id=user_id, is_admin=bool(definition.get("is_admin", False)), buckets=buckets)
+    is_admin = bool(definition.get("is_admin", False))
+    return PilotUser(
+        user_id=user_id,
+        is_admin=is_admin,
+        can_view_upload_history=is_admin or bool(definition.get("can_view_upload_history", False)),
+        can_rollback_uploads=is_admin or bool(definition.get("can_rollback_uploads", False)),
+        buckets=buckets,
+    )
 
 
 def _require_scope(user: PilotUser, table_bucket_arn: str, namespace: str) -> BucketScope:
+    if user.is_admin:
+        bucket = next((item for item in _discover_table_buckets() if item["table_bucket_arn"] == table_bucket_arn), None)
+        if not bucket or namespace not in _discover_namespaces(table_bucket_arn):
+            raise HTTPException(403, "The selected S3 Tables bucket or namespace is not visible to this administrator")
+        return BucketScope(table_bucket_arn=table_bucket_arn, namespace=namespace, label=bucket["label"])
     scope = next((item for item in user.buckets if item.table_bucket_arn == table_bucket_arn and item.namespace == namespace), None)
     if not scope:
         raise HTTPException(403, "The selected S3 Tables bucket or namespace is not assigned to this user")
     return scope
+
+
+def _discover_table_buckets() -> list[dict[str, str]]:
+    """Return all account-visible customer table buckets for administrator navigation."""
+    buckets: list[dict[str, str]] = []
+    request: dict[str, str] = {}
+    while True:
+        response = s3tables.list_table_buckets(**request)
+        buckets.extend(
+            {"table_bucket_arn": item["arn"], "label": item.get("name", item["arn"].rsplit("/", 1)[-1])}
+            for item in response.get("tableBuckets", [])
+            if item.get("type", "customer") == "customer"
+        )
+        token = response.get("continuationToken")
+        if not token:
+            break
+        request = {"continuationToken": token}
+    return sorted(buckets, key=lambda item: item["label"])
+
+
+def _discover_namespaces(table_bucket_arn: str) -> list[str]:
+    """Return one-level namespace names supported by this uploader's API contract."""
+    namespaces: list[str] = []
+    request: dict[str, str] = {"tableBucketARN": table_bucket_arn}
+    while True:
+        response = s3tables.list_namespaces(**request)
+        for item in response.get("namespaces", []):
+            value = item.get("namespace", [])
+            if isinstance(value, list) and len(value) == 1 and value[0]:
+                namespaces.append(value[0])
+        token = response.get("continuationToken")
+        if not token:
+            break
+        request = {"tableBucketARN": table_bucket_arn, "continuationToken": token}
+    return sorted(set(namespaces))
+
+
+def _require_bucket_access(user: PilotUser, table_bucket_arn: str) -> dict[str, str]:
+    if user.is_admin:
+        bucket = next((item for item in _discover_table_buckets() if item["table_bucket_arn"] == table_bucket_arn), None)
+        if bucket:
+            return bucket
+    else:
+        scope = next((item for item in user.buckets if item.table_bucket_arn == table_bucket_arn), None)
+        if scope:
+            return {"table_bucket_arn": scope.table_bucket_arn, "label": scope.label}
+    raise HTTPException(403, "The selected S3 Tables bucket is not assigned to this user")
 
 
 def _canonical_table_name(value: str) -> str:
@@ -122,6 +213,19 @@ class IngestionRequest(BaseModel):
     # Backward-compatible audit field name.  It is now a free-form user tag,
     # not a calendar month.
     reporting_month: str = Field(min_length=1, max_length=256)
+    type_overrides: dict[str, str] = Field(default_factory=dict)
+    deduplication_columns: list[str] = Field(default_factory=list)
+    key_analysis_token: str | None = Field(default=None, max_length=8192)
+    @field_validator("table", mode="before")
+    @classmethod
+    def canonicalise_table(cls, value: str) -> str:
+        return _canonical_table_name(value)
+
+
+class KeyAnalysisRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+    table: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
     type_overrides: dict[str, str] = Field(default_factory=dict)
     deduplication_columns: list[str] = Field(default_factory=list)
     @field_validator("table", mode="before")
@@ -228,8 +332,46 @@ def _load_contract(table_bucket_arn: str, namespace: str, table: str) -> list[di
     return _load_contract_record(table_bucket_arn, namespace, table)["schema"]
 
 
+def _is_uploader_managed_table(table_bucket_arn: str, namespace: str, table: str) -> bool:
+    """Whether this table has the uploader's schema and recovery contract."""
+    if table_bucket_arn == TABLE_BUCKET_ARN and namespace == NAMESPACE and table == "soc":
+        return True
+    try:
+        s3.head_object(Bucket=SOURCE_BUCKET, Key=_contract_key(table_bucket_arn, namespace, table))
+        return True
+    except Exception:
+        return False
+
+
 def _temporary_suffix(filename: str) -> str:
     return ".parquet" if filename.lower().endswith((".parquet", ".parquet.gzip")) else Path(filename).suffix
+
+
+def _ensure_upload_archive_lifecycle() -> None:
+    """Retain the sanitized Glue staging archive for 30 days, by prefix only."""
+    try:
+        current = s3.get_bucket_lifecycle_configuration(Bucket=SOURCE_BUCKET)
+        rules = list(current.get("Rules", []))
+    except s3.exceptions.NoSuchLifecycleConfiguration:
+        rules = []
+    desired = {
+        "ID": UPLOAD_ARCHIVE_LIFECYCLE_RULE_ID,
+        "Status": "Enabled",
+        "Filter": {"Prefix": f"{WEB_UPLOAD_PREFIX}/"},
+        "Expiration": {"Days": UPLOAD_ARCHIVE_RETENTION_DAYS},
+    }
+    # Also remove the superseded short-lived duplicate-backup rule. Other
+    # bucket lifecycle rules remain untouched.
+    replacement = [rule for rule in rules if rule.get("ID") not in {
+        UPLOAD_ARCHIVE_LIFECYCLE_RULE_ID,
+        "agentcore-s3tables-upload-archive-30-years",
+        "agentcore-s3tables-sanitized-upload-backups-30-days",
+    }]
+    replacement.append(desired)
+    if rules != replacement:
+        s3.put_bucket_lifecycle_configuration(
+            Bucket=SOURCE_BUCKET, LifecycleConfiguration={"Rules": replacement}
+        )
 
 
 def _read_upload_table(path: Path, filename: str) -> pa.Table:
@@ -290,7 +432,7 @@ def _read_schemas(files: list[UploadFile]) -> tuple[list[pa.Schema], list[dict]]
     return schemas, sanitization
 
 
-def _first_upload_contract(upload: UploadFile) -> tuple[list[dict[str, str]], list[str]]:
+def _first_upload_contract(upload: UploadFile) -> tuple[list[dict[str, str]], list[str], set[str]]:
     """Profile every populated value of the first upload for table creation."""
     with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
         path = Path(temp.name)
@@ -300,13 +442,16 @@ def _first_upload_contract(upload: UploadFile) -> tuple[list[dict[str, str]], li
             table = _read_upload_table(path, upload.filename or "upload")
             sanitized_schema, plan = sanitised_schema(table.schema)
             forced_strings = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-            return schema_from_table(table, sanitized_schema, forced_strings)
+            schema, warnings = schema_from_table(table, sanitized_schema, forced_strings)
+            return schema, warnings, manual_confirmation_columns(table, sanitized_schema, forced_strings)
         finally:
             path.unlink(missing_ok=True)
             upload.file.seek(0)
 
 
-def _create_type_selections(comparisons: list[dict], target: list[dict[str, str]]) -> list[dict[str, str | list[str] | bool]]:
+def _create_type_selections(
+    comparisons: list[dict], target: list[dict[str, str]], manual_columns: set[str],
+) -> list[dict[str, str | list[str] | bool]]:
     """Expose first-file conversion choices which define a new table contract.
 
     The first file alone defines a new table.  Later files in that same
@@ -316,8 +461,9 @@ def _create_type_selections(comparisons: list[dict], target: list[dict[str, str]
     selections = []
     target_by_name = {field["name"]: field for field in target}
     first_comparison = comparisons[0] if comparisons else {"type_conversions": []}
-    for conversion in first_comparison["type_conversions"]:
-        name = conversion["column"]
+    conversion_by_name = {item["column"]: item for item in first_comparison["type_conversions"]}
+    for name in sorted(manual_columns):
+        conversion = conversion_by_name.get(name, {"source_type": "STRING"})
         selections.append({
             "column": name,
             "source_type": conversion["source_type"],
@@ -418,6 +564,15 @@ def _validate_create_deduplication_columns(preview: dict, columns: list[str]) ->
     return columns
 
 
+def _validate_key_analysis_columns(columns: list[str]) -> list[str]:
+    """Validate only the client-selected raw key names for the fast review."""
+    if not columns:
+        raise HTTPException(422, "Choose at least one de-duplication column for key analysis")
+    if len(columns) != len(set(columns)):
+        raise HTTPException(422, "A de-duplication column may be selected only once")
+    return columns
+
+
 def _apply_create_type_overrides(preview: dict, overrides: dict[str, str]) -> list[dict[str, str]]:
     """Validate user choices and return the immutable initial table contract."""
     choices = {item["column"]: item for item in preview.get("type_selections", [])}
@@ -466,15 +621,21 @@ def _unsafe_cast_issues(upload: UploadFile, target: list[dict[str, str]]) -> lis
                 ) or (
                     target_type == "DOUBLE" and (pa.types.is_integer(source_type) or pa.types.is_floating(source_type))
                 ) or (
-                    target_type == "TIMESTAMP" and (pa.types.is_timestamp(source_type) or pa.types.is_date(source_type))
+                    target_type == "TIMESTAMP" and pa.types.is_timestamp(source_type)
+                ) or (
+                    target_type == "DATE" and pa.types.is_date(source_type)
                 ):
                     continue
                 series = source.to_pandas()
                 non_null = series.notna()
                 if target_type in {"BIGINT", "DOUBLE"}:
                     converted = pd.to_numeric(series, errors="coerce")
+                    if target_type == "BIGINT":
+                        converted = converted.where((converted % 1) == 0)
+                elif target_type == "DATE":
+                    converted = series.map(parse_documented_date)
                 elif target_type == "TIMESTAMP":
-                    converted = pd.to_datetime(series, errors="coerce")
+                    converted = series.map(parse_documented_timestamp)
                 elif target_type == "BOOLEAN":
                     converted = series.astype("string").str.strip().str.lower().isin({"true", "false", "0", "1"})
                     invalid = non_null & ~converted
@@ -494,16 +655,197 @@ def _unsafe_cast_issues(upload: UploadFile, target: list[dict[str, str]]) -> lis
             upload.file.seek(0)
 
 
+def _sign_key_analysis(payload: dict) -> str:
+    """Create a short-lived, tamper-evident acknowledgement token."""
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    secret = os.environ.get("PILOT_KEY_ANALYSIS_SECRET", "local-pilot-key-analysis-secret").encode()
+    signature = hmac.new(secret, encoded, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(encoded + b"." + signature).decode()
+
+
+def _read_key_analysis_token(token: str) -> dict:
+    try:
+        raw = base64.urlsafe_b64decode(token.encode())
+        # The HMAC is arbitrary bytes and can itself contain ``.``. Its length
+        # is fixed for SHA-256, so split at the known delimiter position rather
+        # than searching the signature payload.
+        if len(raw) <= hashlib.sha256().digest_size or raw[-33:-32] != b".":
+            raise ValueError("missing token delimiter")
+        encoded, signature = raw[:-33], raw[-32:]
+    except Exception as error:
+        raise HTTPException(422, "The key-impact analysis acknowledgement is invalid; run it again") from error
+    secret = os.environ.get("PILOT_KEY_ANALYSIS_SECRET", "local-pilot-key-analysis-secret").encode()
+    expected = hmac.new(secret, encoded, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(422, "The key-impact analysis acknowledgement is invalid; run it again")
+    try:
+        value = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise HTTPException(422, "The key-impact analysis acknowledgement is invalid; run it again") from error
+    if int(value.get("expires_at", 0)) < int(datetime.now(timezone.utc).timestamp()):
+        raise HTTPException(422, "The key-impact analysis has expired; run it again")
+    return value
+
+
+def _copy_upload_with_digest(upload: UploadFile) -> tuple[Path, str]:
+    """Copy one browser file locally and return a digest without any S3 write."""
+    with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
+        path = Path(temp.name)
+        digest = hashlib.sha256()
+        while chunk := upload.file.read(8 * 1024 * 1024):
+            digest.update(chunk)
+            temp.write(chunk)
+    upload.file.seek(0)
+    return path, digest.hexdigest()
+
+
+def _composite_key_metrics(frame: pd.DataFrame, key_columns: list[str]) -> dict[str, int]:
+    """Calculate the exact policy outcome used by generic_glue_job, without values."""
+    key_frame = frame[key_columns].astype("string").fillna("~").replace("", "~")
+    key_hash = pd.util.hash_pandas_object(key_frame, index=False)
+    row_hash = pd.util.hash_pandas_object(frame, index=False)
+    grouped = pd.DataFrame({"key": key_hash, "row": row_hash}).groupby("key", sort=False).agg(
+        rows=("row", "size"), variants=("row", "nunique")
+    )
+    exact = grouped[grouped["variants"] == 1]
+    conflicts = grouped[grouped["variants"] > 1]
+    total = int(len(frame))
+    retained = int(len(exact))
+    return {
+        "incoming_rows": total,
+        "unique_composite_keys": int(len(grouped)),
+        "exact_duplicate_rows": int((exact["rows"] - 1).sum()),
+        "conflicting_key_groups": int(len(conflicts)),
+        "rows_in_conflicting_key_groups": int(conflicts["rows"].sum()),
+        "expected_retained_rows": retained,
+        "expected_skipped_rows": total - retained,
+    }
+
+
+def _raw_analysis_lazy_frame(path: Path, filename: str) -> pl.LazyFrame:
+    """Read an upload locally for preliminary key analysis without sanitizing it.
+
+    Parquet and delimited files retain Polars' lazy scan; spreadsheet formats
+    necessarily use the existing reader once, then move into Polars. No raw
+    bytes or values leave the local process in either case.
+    """
+    lower_name = filename.lower()
+    if lower_name.endswith((".parquet", ".parquet.gzip")):
+        return pl.scan_parquet(path)
+    if lower_name.endswith((".csv", ".tsv")):
+        # Key impact is deliberately an *untyped raw* comparison.  Letting
+        # Polars infer a CSV schema can make the review fail when an early
+        # numeric-looking value is followed by a valid mixed value such as
+        # ``83%``.  Reading every delimited source field as text both preserves
+        # the submitted values and avoids applying data-type policy before the
+        # user has confirmed the key.
+        separator = "\t" if lower_name.endswith(".tsv") else ","
+        with path.open("r", encoding="utf-8-sig", newline="") as stream:
+            header = next(csv.reader(stream, delimiter=separator), None)
+        if not header:
+            raise HTTPException(422, "The selected file has no header row for key analysis")
+        return pl.scan_csv(
+            path,
+            separator=separator,
+            schema_overrides={name: pl.String for name in header},
+            infer_schema=False,
+            try_parse_dates=False,
+        )
+    return pl.from_arrow(_read_upload_table(path, filename)).lazy()
+
+
+def _raw_key_impact_metrics(paths: list[tuple[Path, str]], key_columns: list[str]) -> dict[str, int]:
+    """Calculate incoming key impact using raw local values and Polars.
+
+    This deliberately runs *before* sanitization, type projection, S3 staging,
+    or Glue. Canonical column names and blank-key semantics match the uploader,
+    but all full-row comparisons use source values only.
+    """
+    frames: list[tuple[pl.LazyFrame, dict[str, str]]] = []
+    all_columns: set[str] = set()
+    for path, filename in paths:
+        frame = _raw_analysis_lazy_frame(path, filename)
+        source_names = list(frame.collect_schema().names())
+        canonical_names = normalise_names(source_names)
+        lookup = dict(zip(canonical_names, source_names))
+        frames.append((frame, lookup))
+        all_columns.update(canonical_names)
+    if not all_columns:
+        raise HTTPException(422, "The selected file has no columns for key analysis")
+    missing_keys = sorted(set(key_columns) - all_columns)
+    if missing_keys:
+        raise HTTPException(422, f"The selected key columns are not present in the upload: {', '.join(missing_keys)}")
+
+    columns = sorted(all_columns)
+    projected = []
+    for frame, lookup in frames:
+        projected.append(frame.select([
+            pl.col(lookup[name]).cast(pl.String, strict=False).alias(name)
+            if name in lookup else pl.lit(None, dtype=pl.String).alias(name)
+            for name in columns
+        ]))
+    incoming = pl.concat(projected, how="vertical_relaxed")
+    key_components = [
+        pl.when(pl.col(name).is_null() | (pl.col(name).str.strip_chars() == ""))
+        .then(pl.lit("~"))
+        .otherwise(pl.col(name))
+        .alias(name)
+        for name in key_columns
+    ]
+    grouped = (
+        incoming.with_columns(pl.struct(key_components).alias("__uploader_composite_key"))
+        .group_by("__uploader_composite_key")
+        .agg(
+            pl.len().alias("rows"),
+            pl.struct([pl.col(name) for name in columns]).n_unique().alias("variants"),
+        )
+    )
+    summary = grouped.select(
+        pl.col("rows").sum().alias("incoming_rows"),
+        pl.len().alias("unique_composite_keys"),
+        pl.when(pl.col("variants") == 1).then(pl.col("rows") - 1).otherwise(0).sum().alias("exact_duplicate_rows"),
+        (pl.col("variants") > 1).sum().alias("conflicting_key_groups"),
+        pl.when(pl.col("variants") > 1).then(pl.col("rows")).otherwise(0).sum().alias("rows_in_conflicting_key_groups"),
+        (pl.col("variants") == 1).sum().alias("expected_retained_rows"),
+    ).collect().row(0, named=True)
+    total = int(summary["incoming_rows"] or 0)
+    retained = int(summary["expected_retained_rows"] or 0)
+    return {
+        "incoming_rows": total,
+        "unique_composite_keys": int(summary["unique_composite_keys"] or 0),
+        "exact_duplicate_rows": int(summary["exact_duplicate_rows"] or 0),
+        "conflicting_key_groups": int(summary["conflicting_key_groups"] or 0),
+        "rows_in_conflicting_key_groups": int(summary["rows_in_conflicting_key_groups"] or 0),
+        "expected_retained_rows": retained,
+        "expected_skipped_rows": total - retained,
+    }
+
+
+def _analyse_selected_key(
+    files: list[UploadFile], key_columns: list[str],
+) -> tuple[dict[str, int], list[str]]:
+    paths, file_digests = [], []
+    for upload in files:
+        path, digest = _copy_upload_with_digest(upload)
+        paths.append((path, upload.filename or "upload"))
+        file_digests.append(digest)
+    try:
+        return _raw_key_impact_metrics(paths, key_columns), file_digests
+    finally:
+        for path, _ in paths:
+            path.unlink(missing_ok=True)
+
+
 def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, files: list[UploadFile]) -> dict:
     schemas, sanitization = _read_schemas(files)
     if not schemas:
         raise HTTPException(400, "Choose at least one Parquet file")
     if mode == "create":
-        target, creation_warnings = _first_upload_contract(files[0])
+        target, creation_warnings, manual_type_columns = _first_upload_contract(files[0])
         contract = {"schema": target, "deduplication_columns": [], "deduplication_policy": "skip-existing-key-report-conflict-v1"}
     else:
         contract = _load_contract_record(table_bucket_arn, namespace, table)
-        target, creation_warnings = contract["schema"], []
+        target, creation_warnings, manual_type_columns = contract["schema"], [], set()
     comparisons = [compare_schema(schema, target) for schema in schemas]
     target_by_name = {field["name"]: field["type"] for field in target}
     incompatible_sensitive_columns = []
@@ -560,7 +902,9 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
         rejection_reasons.append(
             "The selected table has non-string sensitive columns and cannot accept encrypted or masked values."
         )
-    type_selections = _create_type_selection_samples(files[0], _create_type_selections(comparisons, target)) if mode == "create" else []
+    type_selections = _create_type_selection_samples(
+        files[0], _create_type_selections(comparisons, target, manual_type_columns)
+    ) if mode == "create" else []
     return {
         "mode": mode, "table_bucket_arn": table_bucket_arn, "namespace": namespace, "table": table, "target_schema": target, "creation_warnings": creation_warnings,
         "initial_table_column_count": len(target),
@@ -577,7 +921,27 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
     }
 
 
-def _make_glue_compatible_parquet(source: Path, filename: str, key=None) -> tuple[Path, bool, dict]:
+def _normalise_temporal_column(column: pa.ChunkedArray, target_type: str) -> pa.Array:
+    """Apply the documented date/time rules before Spark sees the staged file."""
+    series = column.to_pandas()
+    if target_type == "DATE":
+        parsed = series.map(parse_documented_date)
+        invalid = series.notna() & parsed.isna()
+        if invalid.any():
+            raise ValueError(f"DATE conversion would discard {int(invalid.sum())} value(s)")
+        return pa.array(parsed.tolist(), type=pa.date32(), from_pandas=True)
+    if target_type == "TIMESTAMP":
+        parsed = series.map(parse_documented_timestamp)
+        invalid = series.notna() & parsed.isna()
+        if invalid.any():
+            raise ValueError(f"TIMESTAMP conversion would discard {int(invalid.sum())} value(s)")
+        return pa.array(parsed.tolist(), type=pa.timestamp("us"), from_pandas=True)
+    raise ValueError(f"Unsupported temporal target type: {target_type}")
+
+
+def _make_glue_compatible_parquet(
+    source: Path, filename: str, key=None, target_schema: list[dict[str, str]] | None = None,
+) -> tuple[Path, bool, dict]:
     """Stage every supported file as Spark-safe Parquet for the Glue job."""
     table = _read_upload_table(source, filename)
     schema, plan = sanitised_schema(table.schema)
@@ -588,6 +952,14 @@ def _make_glue_compatible_parquet(source: Path, filename: str, key=None) -> tupl
     else:
         schema = table.schema
     names = normalise_names([field.name for field in schema])
+    table = table.rename_columns(names)
+    target_types = {field["name"]: field["type"] for field in (target_schema or [])}
+    arrays = []
+    for name in names:
+        column = table[name]
+        target_type = target_types.get(name)
+        arrays.append(_normalise_temporal_column(column, target_type) if target_type in {"DATE", "TIMESTAMP"} else column)
+    table = pa.table(arrays, names=names)
     has_nanosecond_timestamps = any(
         pa.types.is_timestamp(field.type) and field.type.unit == "ns" for field in schema
     )
@@ -599,12 +971,19 @@ def _make_glue_compatible_parquet(source: Path, filename: str, key=None) -> tupl
     has_unsafe_names = names != list(schema.names)
     is_parquet = filename.lower().endswith((".parquet", ".parquet.gzip"))
     if is_parquet and not sanitization_required and not has_nanosecond_timestamps and not has_time_of_day_values and not has_unsafe_names:
-        return source, False, audit
+        # Temporal fields need a rewritten Parquet payload even when the input
+        # was already Parquet, because DATE/TIMESTAMP parsing is explicit.
+        if not any(kind in {"DATE", "TIMESTAMP"} for kind in target_types.values()):
+            return source, False, audit
 
     fields = [
         pa.field(
             name,
-            pa.timestamp("us", tz=field.type.tz)
+            pa.date32()
+            if target_types.get(name) == "DATE"
+            else pa.timestamp("us")
+            if target_types.get(name) == "TIMESTAMP"
+            else pa.timestamp("us", tz=field.type.tz)
             if pa.types.is_timestamp(field.type) and field.type.unit == "ns"
             else pa.string()
             if pa.types.is_time(field.type)
@@ -615,7 +994,7 @@ def _make_glue_compatible_parquet(source: Path, filename: str, key=None) -> tupl
         for field, name in zip(schema, names)
     ]
     target_schema = pa.schema(fields, metadata=schema.metadata)
-    table = table.rename_columns(names).cast(target_schema, safe=False)
+    table = table.cast(target_schema, safe=False)
     converted = source.with_name(f"{source.stem}-glue-compatible.parquet")
     pq.write_table(table, converted, compression="snappy")
     return converted, True, audit
@@ -673,6 +1052,7 @@ def _table_summary(table_bucket_arn: str, namespace: str, item: dict) -> dict:
         "created_at": str(item.get("createdAt")),
         "modified_at": str(item.get("modifiedAt")),
         "row_count": _iceberg_row_count(details.get("metadataLocation")),
+        "uploader_managed": _is_uploader_managed_table(table_bucket_arn, namespace, item["name"]),
     }
 
 
@@ -690,13 +1070,80 @@ def static(asset: str):
 
 @app.get("/api/buckets")
 def list_buckets(user: PilotUser = Depends(_current_user)):
+    buckets = _discover_table_buckets() if user.is_admin else [
+        {"table_bucket_arn": item.table_bucket_arn, "label": item.label}
+        for item in user.buckets
+    ]
     return {
         "user_id": user.user_id,
         "is_admin": user.is_admin,
+        "can_view_upload_history": user.can_view_upload_history,
+        "can_rollback_uploads": user.can_rollback_uploads,
+        "buckets": list({item["table_bucket_arn"]: item for item in buckets}.values()),
+    }
+
+
+@app.get("/api/namespaces")
+def list_namespaces(table_bucket_arn: str, user: PilotUser = Depends(_current_user)):
+    _require_bucket_access(user, table_bucket_arn)
+    namespaces = _discover_namespaces(table_bucket_arn) if user.is_admin else sorted({
+        item.namespace for item in user.buckets if item.table_bucket_arn == table_bucket_arn
+    })
+    return {"table_bucket_arn": table_bucket_arn, "namespaces": namespaces}
+
+
+@app.get("/api/dev/identity-profiles")
+def local_identity_profiles():
+    """Expose safe local-only test identities for the trusted-placeholder UI.
+
+    This route exists only for the localhost pilot.  It describes configured
+    access grants but never authenticates a user or accepts client-supplied
+    roles.  Production must replace both this panel and ``_current_user`` with
+    verified frontend identity claims.
+    """
+    definitions = _configured_users()
+    profiles = []
+    for user_id in LOCAL_TEST_USER_IDS:
+        definition = definitions.get(user_id)
+        if definition is None:
+            continue
+        profiles.append({
+            "user_id": user_id,
+            "is_admin": bool(definition.get("is_admin", False)),
+            "can_view_upload_history": bool(definition.get("is_admin", False) or definition.get("can_view_upload_history", False)),
+            "can_rollback_uploads": bool(definition.get("is_admin", False) or definition.get("can_rollback_uploads", False)),
+            "buckets": definition.get("buckets", []),
+            "expected_access": bool(definition.get("is_admin", False) or definition.get("buckets", [])),
+        })
+    return {
+        "local_only": True,
+        "header_name": IDENTITY_EMULATION_HEADER,
+        "profiles": profiles,
+        "note": "The browser sends only the user-ID header; the backend resolves roles and bucket grants.",
+    }
+
+
+@app.get("/api/identity")
+def current_identity(
+    x_pilot_user_id: str | None = Header(default=None, alias=IDENTITY_EMULATION_HEADER),
+    user: PilotUser = Depends(_current_user),
+):
+    """Return the effective, backend-resolved identity for the local UI."""
+    return {
+        "user_id": user.user_id,
+        "is_admin": user.is_admin,
+        "can_view_upload_history": user.can_view_upload_history,
+        "can_rollback_uploads": user.can_rollback_uploads,
+        "scope_mode": "all-discoverable-buckets-and-namespaces" if user.is_admin else "configured-bucket-and-namespace-scopes",
         "buckets": [
             {"table_bucket_arn": item.table_bucket_arn, "namespace": item.namespace, "label": item.label}
             for item in user.buckets
         ],
+        "request_context": {
+            "header_name": IDENTITY_EMULATION_HEADER,
+            "header_value": x_pilot_user_id or os.environ.get("PILOT_LOCAL_USER_ID", "local-admin"),
+            "roles_and_grants_sent_by_browser": False,
+        },
     }
 
 
@@ -727,7 +1174,78 @@ async def preflight(
     user: PilotUser = Depends(_current_user),
 ):
     _require_scope(user, table_bucket_arn, namespace)
+    if mode == "append" and not _is_uploader_managed_table(table_bucket_arn, namespace, _canonical_table_name(table)):
+        raise HTTPException(409, "This table is browse-only because it has no uploader schema and recovery contract")
     return _preflight(mode, table_bucket_arn, namespace, _canonical_table_name(table), files)
+
+
+@app.post("/api/key-impact-analysis")
+async def key_impact_analysis(
+    request: str = Form(),
+    files: list[UploadFile] = File(),
+    user: PilotUser = Depends(_current_user),
+):
+    """Evaluate the proposed immutable key without S3 writes or Glue work."""
+    try:
+        payload = KeyAnalysisRequest.model_validate_json(request)
+    except Exception as error:
+        raise HTTPException(400, f"Invalid key-impact analysis request: {error}") from error
+    _require_scope(user, payload.table_bucket_arn, payload.namespace)
+    if not files:
+        raise HTTPException(400, "Choose at least one supported file")
+    key_columns = _validate_key_analysis_columns(payload.deduplication_columns)
+    try:
+        metrics, file_digests = _analyse_selected_key(files, key_columns)
+    except HTTPException:
+        raise
+    except (pl.exceptions.PolarsError, UnicodeError, ValueError) as error:
+        # Keep raw cell values out of the browser response.  The server log
+        # retains the implementation detail for diagnosis.
+        raise HTTPException(
+            422,
+            "The selected file could not be analysed locally. Check its delimiter, encoding, and header row, then try again.",
+        ) from error
+    expires_at = int(datetime.now(timezone.utc).timestamp()) + 30 * 60
+    acknowledgement = {
+        "v": 1, "expires_at": expires_at, "user_id": user.user_id,
+        "table_bucket_arn": payload.table_bucket_arn, "namespace": payload.namespace, "table": payload.table,
+        "type_overrides": payload.type_overrides, "deduplication_columns": key_columns, "file_digests": file_digests,
+    }
+    return {
+        "metrics": metrics,
+        "deduplication_columns": key_columns,
+        "acknowledgement_token": _sign_key_analysis(acknowledgement),
+        "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+        "no_storage_or_glue_side_effects": True,
+        "analysis_basis": "raw-local-pre-sanitization",
+    }
+
+
+def _validate_key_analysis_acknowledgement(
+    payload: IngestionRequest, key_columns: list[str],
+    files: list[UploadFile], user: PilotUser,
+) -> None:
+    if not payload.key_analysis_token:
+        raise HTTPException(422, "Run and acknowledge the composite-key impact analysis before uploading")
+    acknowledgement = _read_key_analysis_token(payload.key_analysis_token)
+    expected = {
+        "user_id": user.user_id,
+        "table_bucket_arn": payload.table_bucket_arn,
+        "namespace": payload.namespace,
+        "table": payload.table,
+        "type_overrides": payload.type_overrides,
+        "deduplication_columns": key_columns,
+    }
+    for key, value in expected.items():
+        if acknowledgement.get(key) != value:
+            raise HTTPException(422, "The key-impact analysis is stale; run it again")
+    digests = []
+    for upload in files:
+        path, digest = _copy_upload_with_digest(upload)
+        path.unlink(missing_ok=True)
+        digests.append(digest)
+    if acknowledgement.get("file_digests") != digests:
+        raise HTTPException(422, "The selected files changed after key analysis; run it again")
 
 
 @app.post("/api/ingestions")
@@ -743,6 +1261,8 @@ async def start_ingestion(
     _require_scope(user, payload.table_bucket_arn, payload.namespace)
     if payload.table == UPLOAD_HISTORY_TABLE:
         raise HTTPException(400, "The reserved uploader audit table cannot be selected as an ingestion destination")
+    if payload.mode == "append" and not _is_uploader_managed_table(payload.table_bucket_arn, payload.namespace, payload.table):
+        raise HTTPException(409, "This table is browse-only because it has no uploader schema and recovery contract")
     if not files:
         raise HTTPException(400, "Choose at least one supported file")
     preview = _preflight(payload.mode, payload.table_bucket_arn, payload.namespace, payload.table, files)
@@ -772,6 +1292,7 @@ async def start_ingestion(
                     "unsafe_casts": override_issues,
                 },
             )
+        _validate_key_analysis_acknowledgement(payload, deduplication_columns, files, user)
     if payload.mode == "append":
         try:
             _configure_snapshot_retention(payload.table_bucket_arn, payload.namespace, payload.table)
@@ -784,6 +1305,10 @@ async def start_ingestion(
         active_key = encryption_key() if sensitive_columns_present else None
     except Exception as error:
         raise HTTPException(500, "Unable to retrieve the configured encryption key") from error
+    try:
+        _ensure_upload_archive_lifecycle()
+    except Exception as error:
+        raise HTTPException(500, "Unable to configure the 30-day sanitized-upload archive lifecycle") from error
     request_prefix = f"{WEB_UPLOAD_PREFIX}/{payload.request_id}"
     objects, sanitization_audits = [], []
     for number, upload in enumerate(files):
@@ -797,7 +1322,9 @@ async def start_ingestion(
                 temp.flush()
                 original_filename = upload.filename or "upload.parquet"
                 key = f"{request_prefix}/input/{number:02d}-{Path(original_filename).stem}.parquet"
-                staged, transformed, audit = _make_glue_compatible_parquet(path, original_filename, active_key)
+                staged, transformed, audit = _make_glue_compatible_parquet(
+                    path, original_filename, active_key, target_schema
+                )
                 try:
                     with staged.open("rb") as stream:
                         s3.put_object(Bucket=SOURCE_BUCKET, Key=key, Body=stream, ContentType="application/octet-stream", Metadata={"sha256": digest.hexdigest(), "original_filename": original_filename, "spark_compatible_staging": str(transformed).lower(), "sanitized": str(bool(audit["dropped_columns"] or audit["encrypted_columns"] or audit["postal_columns"] or audit["age_banded_columns"])).lower()}, ServerSideEncryption="AES256")
@@ -805,7 +1332,7 @@ async def start_ingestion(
                     if staged != path:
                         staged.unlink(missing_ok=True)
                 objects.append(f"s3://{SOURCE_BUCKET}/{key}")
-                sanitization_audits.append({"filename": original_filename, **audit})
+                sanitization_audits.append({"filename": original_filename, "sanitized_archive_uri": f"s3://{SOURCE_BUCKET}/{key}", **audit})
             finally:
                 path.unlink(missing_ok=True)
     if payload.mode == "create":
@@ -862,6 +1389,8 @@ def delete_table(payload: DeleteTableRequest, user: PilotUser = Depends(_current
         raise HTTPException(403, "Only administrators may delete S3 Tables")
     if payload.table == UPLOAD_HISTORY_TABLE:
         raise HTTPException(400, "The reserved uploader audit table cannot be deleted through this UI")
+    if not _is_uploader_managed_table(payload.table_bucket_arn, payload.namespace, payload.table):
+        raise HTTPException(409, "This table is browse-only because it was not created by this uploader")
     s3tables.delete_table(
         tableBucketARN=payload.table_bucket_arn,
         namespace=payload.namespace,
@@ -873,33 +1402,46 @@ def delete_table(payload: DeleteTableRequest, user: PilotUser = Depends(_current
 @app.get("/api/upload-history")
 def upload_history(table_bucket_arn: str, namespace: str, table: str, user: PilotUser = Depends(_current_user)):
     _require_scope(user, table_bucket_arn, namespace)
-    if not user.is_admin:
-        raise HTTPException(403, "Only administrators may view upload history and snapshot IDs")
+    if not user.can_view_upload_history:
+        raise HTTPException(403, "This user is not permitted to view uploader history")
     if table == UPLOAD_HISTORY_TABLE:
         raise HTTPException(400, "The reserved uploader audit table is not a master-data destination")
+    if not _is_uploader_managed_table(table_bucket_arn, namespace, table):
+        raise HTTPException(409, "This table is browse-only because it has no uploader history contract")
+    history = _history_entries(table_bucket_arn, namespace, table)
+    successful = [item for item in history if item.get("status") == "SUCCESS" and item.get("previous_snapshot_id")]
+    latest = max(successful, key=lambda item: item.get("uploaded_at") or "", default=None)
+    visible_history = history if user.is_admin else [item for item in history if item.get("uploaded_by") == user.user_id]
     return {
         "table_bucket_arn": table_bucket_arn,
         "namespace": namespace,
         "table": table,
-        "history": _history_entries(table_bucket_arn, namespace, table),
+        "history": visible_history,
+        # This carries no audit content for another user; it lets the client
+        # correctly disable an editor's stale rollback button.
+        "latest_rollback_upload_id": latest.get("upload_id") if latest else None,
     }
 
 
 @app.post("/api/rollbacks")
 def start_rollback(payload: RollbackRequest, user: PilotUser = Depends(_current_user)):
     _require_scope(user, payload.table_bucket_arn, payload.namespace)
-    if not user.is_admin:
-        raise HTTPException(403, "Only administrators may roll back S3 Tables uploads")
+    if not user.can_rollback_uploads:
+        raise HTTPException(403, "This user is not permitted to roll back uploader-managed updates")
     if not payload.confirm:
         raise HTTPException(400, "Explicit rollback confirmation is required")
     if payload.table == UPLOAD_HISTORY_TABLE:
         raise HTTPException(400, "The reserved uploader audit table cannot be rolled back through this UI")
+    if not _is_uploader_managed_table(payload.table_bucket_arn, payload.namespace, payload.table):
+        raise HTTPException(409, "This table is browse-only because it has no uploader history contract")
     history = _history_entries(payload.table_bucket_arn, payload.namespace, payload.table)
     selected = next((item for item in history if item.get("upload_id") == payload.upload_id), None)
     successful = [item for item in history if item.get("status") == "SUCCESS"]
     latest = max(successful, key=lambda item: item.get("uploaded_at") or "", default=None)
     if not selected or selected.get("status") != "SUCCESS":
         raise HTTPException(409, "Only a successful upload that has not already been rolled back can be restored")
+    if not user.is_admin and selected.get("uploaded_by") != user.user_id:
+        raise HTTPException(403, "A non-admin user may roll back only their own upload")
     if selected != latest:
         raise HTTPException(409, "Only the latest successful uploader-managed update may be rolled back")
     snapshot_id = selected.get("previous_snapshot_id")

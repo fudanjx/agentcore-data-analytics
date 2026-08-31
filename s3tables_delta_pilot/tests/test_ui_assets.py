@@ -1,5 +1,8 @@
+import asyncio
+import json
 import unittest
-from datetime import time
+from datetime import date, time
+from datetime import datetime, timezone
 from io import BytesIO
 from tempfile import TemporaryDirectory
 from pathlib import Path
@@ -7,6 +10,7 @@ from unittest.mock import patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pandas as pd
 
 from s3tables_delta_pilot.pilot import NAMESPACE, TABLE_BUCKET_ARN
 from s3tables_delta_pilot.webapp import (
@@ -16,12 +20,21 @@ from s3tables_delta_pilot.webapp import (
     _apply_create_type_overrides,
     _create_deduplication_candidates,
     _create_type_selection_samples,
+    _composite_key_metrics,
     _current_user,
     _history_prefix,
+    key_impact_analysis,
+    list_buckets,
+    list_namespaces,
+    local_identity_profiles,
     _make_glue_compatible_parquet,
     _read_upload_table,
+    _read_key_analysis_token,
     _require_scope,
+    _sign_key_analysis,
+    _unsafe_cast_issues,
     _preflight,
+    _raw_key_impact_metrics,
     _validate_create_deduplication_columns,
 )
 from starlette.datastructures import UploadFile
@@ -69,6 +82,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn('id="destination-help"', html)
         self.assertIn('id="reporting-month" type="text"', html)
         self.assertIn('id="history"', html)
+        self.assertIn('id="namespace"', html)
         self.assertIn('Select one existing table', javascript)
         self.assertIn('/api/rollbacks', javascript)
         self.assertIn('Rollback upload', javascript)
@@ -115,6 +129,67 @@ class UiAssetTests(unittest.TestCase):
                 if staged != source:
                     staged.unlink(missing_ok=True)
 
+    def test_staging_normalizes_documented_date_values_to_date(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "dates.parquet"
+            pq.write_table(pa.table({"Visit Date": ["20240513", "2024.05.14"]}), source)
+            staged, transformed, _ = _make_glue_compatible_parquet(
+                source, source.name, target_schema=[{"name": "visit_date", "type": "DATE"}]
+            )
+            try:
+                self.assertTrue(transformed)
+                self.assertEqual(pa.date32(), pq.read_schema(staged).field("visit_date").type)
+            finally:
+                if staged != source:
+                    staged.unlink(missing_ok=True)
+
+    def test_staging_preserves_a_valid_year_9999_date(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "sentinel.parquet"
+            pq.write_table(pa.table({"End Date": ["9999-12-31", "2024-02-29"]}), source)
+            staged, transformed, _ = _make_glue_compatible_parquet(
+                source, source.name, target_schema=[{"name": "end_date", "type": "DATE"}]
+            )
+            try:
+                self.assertTrue(transformed)
+                self.assertEqual([date(9999, 12, 31), date(2024, 2, 29)], pq.read_table(staged)["end_date"].to_pylist())
+            finally:
+                if staged != source:
+                    staged.unlink(missing_ok=True)
+
+    def test_unsafe_date_validation_reports_invalid_values_without_crashing(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"End Date": ["9999-12-31", "9999-02-29"]}), sink)
+        upload = UploadFile(filename="dates.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        issues = _unsafe_cast_issues(upload, [{"name": "end_date", "type": "DATE"}])
+        self.assertEqual([{"column": "end_date", "source_type": "string", "target_type": "DATE", "unsafe_value_count": 1}], issues)
+
+    def test_key_impact_analysis_accepts_year_9999_without_s3_or_glue_work(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"End Date": ["9999-12-31"], "Case": ["C1"]}), sink)
+        upload = UploadFile(filename="sentinel.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        request = json.dumps({
+            "table": "sentinel_dates",
+            "table_bucket_arn": TABLE_BUCKET_ARN,
+            "namespace": NAMESPACE,
+            "type_overrides": {},
+            "deduplication_columns": ["case"],
+        })
+        user = _current_user("local-editor")
+        with patch("s3tables_delta_pilot.webapp.s3.put_object") as put_object, patch(
+            "s3tables_delta_pilot.webapp.glue.start_job_run"
+        ) as start_job, patch("s3tables_delta_pilot.webapp.sanitise_table") as sanitise, patch(
+            "s3tables_delta_pilot.webapp.encryption_key"
+        ) as key, patch("s3tables_delta_pilot.webapp._preflight") as preflight:
+            result = asyncio.run(key_impact_analysis(request=request, files=[upload], user=user))
+        self.assertEqual(1, result["metrics"]["incoming_rows"])
+        self.assertTrue(result["no_storage_or_glue_side_effects"])
+        put_object.assert_not_called()
+        start_job.assert_not_called()
+        sanitise.assert_not_called()
+        key.assert_not_called()
+        preflight.assert_not_called()
+
     def test_retention_configuration_uses_local_service_not_glue_boto3(self):
         job = GLUE_JOB.read_text()
         webapp = (Path(__file__).parents[1] / "webapp.py").read_text()
@@ -130,7 +205,9 @@ class UiAssetTests(unittest.TestCase):
 
     def test_history_ui_allows_only_the_latest_successful_upload_to_roll_back(self):
         javascript = (STATIC / "app.js").read_text()
-        self.assertIn("activeRollbackUploadId", javascript)
+        self.assertIn("latestRollbackUploadId", javascript)
+        self.assertIn("state.canRollbackUploads", javascript)
+        self.assertIn("item.uploaded_by === state.userId", javascript)
         self.assertIn("rollback.disabled = !canRollback", javascript)
         self.assertIn("Original upload:", javascript)
         self.assertIn("Latest action:", javascript)
@@ -147,7 +224,7 @@ class UiAssetTests(unittest.TestCase):
 
     def test_create_preflight_exposes_type_selection_and_submission_sends_it(self):
         javascript = (STATIC / "app.js").read_text()
-        self.assertIn("Choose initial column types", javascript)
+        self.assertIn("Choose ambiguous initial column types", javascript)
         self.assertIn("data-type-override", javascript)
         self.assertIn("type_overrides: selectedTypeOverrides()", javascript)
         self.assertIn("Random non-empty examples", javascript)
@@ -222,6 +299,68 @@ class UiAssetTests(unittest.TestCase):
             _apply_create_type_overrides(preview, {"unknown": "STRING"})
         with self.assertRaises(Exception):
             _apply_create_type_overrides(preview, {"arrival_mode": "DECIMAL"})
+
+    def test_key_impact_analysis_matches_the_glue_conflict_policy(self):
+        frame = pd.DataFrame({
+            "case": ["A", "A", "B", "B", "C"],
+            "value": [1, 1, 1, 2, 1],
+        })
+        result = _composite_key_metrics(frame, ["case"])
+        self.assertEqual(5, result["incoming_rows"])
+        self.assertEqual(3, result["unique_composite_keys"])
+        self.assertEqual(1, result["exact_duplicate_rows"])
+        self.assertEqual(1, result["conflicting_key_groups"])
+        self.assertEqual(2, result["rows_in_conflicting_key_groups"])
+        self.assertEqual(2, result["expected_retained_rows"])
+        self.assertEqual(3, result["expected_skipped_rows"])
+
+    def test_raw_csv_key_analysis_treats_percentage_values_as_text(self):
+        """A later percentage must not break raw CSV key review via inference."""
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "bmu.csv"
+            source.write_text("case,bor\nA,82\nB,83%\nA,82\n", encoding="utf-8")
+            result = _raw_key_impact_metrics([(source, source.name)], ["case"])
+        self.assertEqual(3, result["incoming_rows"])
+        self.assertEqual(1, result["exact_duplicate_rows"])
+        self.assertEqual(2, result["expected_retained_rows"])
+
+    def test_ui_requires_a_current_acknowledged_key_analysis_before_create_upload(self):
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn("/api/key-impact-analysis", javascript)
+        self.assertIn("acknowledge-key-analysis", javascript)
+        self.assertIn("key_analysis_token", javascript)
+        self.assertIn("Analyse selected key impact", javascript)
+        self.assertIn("Current composite key:", javascript)
+        self.assertIn("key-analysis-status", javascript)
+        self.assertIn("Analysing selected key…", javascript)
+
+    def test_ui_shows_in_progress_and_failure_status_for_upload_review(self):
+        html = (STATIC / "index.html").read_text()
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn('id="review-status"', html)
+        self.assertLess(html.index('id="review"'), html.index('id="upload-actions"'))
+        self.assertIn('id="upload-status"', html)
+        self.assertIn("Reviewing upload…", javascript)
+        self.assertIn("Analysing file structure, column names, types, and sanitization requirements…", javascript)
+        self.assertIn("Upload review failed:", javascript)
+        self.assertIn("Starting upload…", javascript)
+        self.assertIn("Preparing the sanitized upload, recovery point, and ETL job…", javascript)
+        self.assertIn("Upload could not start:", javascript)
+
+    def test_staged_upload_archive_has_a_30_day_lifecycle_contract(self):
+        source = (Path(__file__).parents[1] / "webapp.py").read_text()
+        self.assertIn("WEB_UPLOAD_PREFIX", source)
+        self.assertIn("UPLOAD_ARCHIVE_RETENTION_DAYS = 30", source)
+        self.assertIn("_ensure_upload_archive_lifecycle", source)
+        self.assertIn("sanitized_archive_uri", source)
+        self.assertNotIn("WEB_BACKUP_PREFIX", source)
+        self.assertNotIn("sanitized_backup_uri", source)
+
+    def test_key_analysis_acknowledgement_is_tamper_evident(self):
+        token = _sign_key_analysis({"expires_at": int(datetime.now(timezone.utc).timestamp()) + 60, "user_id": "local-admin"})
+        self.assertEqual("local-admin", _read_key_analysis_token(token)["user_id"])
+        with self.assertRaises(Exception):
+            _read_key_analysis_token(token[:-1] + ("A" if token[-1] != "A" else "B"))
 
     def test_append_preflight_rejects_less_than_50_percent_schema_overlap(self):
         sink = pa.BufferOutputStream()
@@ -341,6 +480,51 @@ class UiAssetTests(unittest.TestCase):
             self.assertEqual("arn:test:one", _require_scope(user, "arn:test:one", "pilot").table_bucket_arn)
             with self.assertRaises(Exception):
                 _require_scope(user, "arn:test:two", "pilot")
+
+    def test_admin_discovers_all_buckets_and_namespaces_while_editor_stays_scoped(self):
+        with patch.dict("os.environ", {}, clear=True):
+            admin = _current_user("local-admin")
+            editor = _current_user("local-editor")
+        discovered = [
+            {"table_bucket_arn": "arn:test:ah", "label": "ah-analytics"},
+            {"table_bucket_arn": "arn:test:nuh", "label": "nuh-analytics"},
+        ]
+        with patch("s3tables_delta_pilot.webapp._discover_table_buckets", return_value=discovered), patch(
+            "s3tables_delta_pilot.webapp._discover_namespaces", return_value=["ah", "pilot"]
+        ):
+            self.assertEqual(discovered, list_buckets(admin)["buckets"])
+            self.assertEqual(["ah", "pilot"], list_namespaces("arn:test:ah", admin)["namespaces"])
+            self.assertEqual("nuh-analytics", _require_scope(admin, "arn:test:nuh", "pilot").label)
+        self.assertEqual([NAMESPACE], list_namespaces(TABLE_BUCKET_ARN, editor)["namespaces"])
+        with self.assertRaises(Exception):
+            _require_scope(editor, TABLE_BUCKET_ARN, "ah")
+
+    def test_local_identity_profiles_expose_only_header_based_test_context(self):
+        with patch.dict("os.environ", {}, clear=True):
+            profiles = local_identity_profiles()["profiles"]
+        self.assertEqual(["local-admin", "local-editor", "local-unassigned"], [item["user_id"] for item in profiles])
+        self.assertTrue(profiles[0]["is_admin"])
+        self.assertTrue(profiles[1]["expected_access"])
+        self.assertTrue(profiles[1]["can_view_upload_history"])
+        self.assertTrue(profiles[1]["can_rollback_uploads"])
+        self.assertFalse(profiles[2]["expected_access"])
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(Exception):
+                _current_user("local-unassigned")
+
+    def test_identity_test_panel_sends_only_the_user_id_header(self):
+        html = (STATIC / "index.html").read_text()
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn('id="identity-panel"', html)
+        self.assertIn('id="effective-identity"', html)
+        self.assertIn('id="outgoing-identity"', html)
+        self.assertIn("function apiFetch", javascript)
+        self.assertIn("X-Pilot-User-Id", javascript)
+        self.assertIn("body_user_fields: {}", javascript)
+        self.assertIn("function loadNamespaces", javascript)
+        self.assertIn("/api/namespaces", javascript)
+        self.assertIn("browse-only", javascript)
+        self.assertIn("/api/identity", javascript)
 
 
 if __name__ == "__main__":

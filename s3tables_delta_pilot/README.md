@@ -6,10 +6,16 @@ run it only on the operator's Mac with the existing AWS credential chain. Its
 current identity check is a trusted development placeholder, not production
 authentication.
 
+Install the local service dependencies:
+
+```bash
+.venv/bin/pip install -r s3tables_delta_pilot/requirements.txt
+```
+
 Start it from the repository root:
 
 ```bash
-uvicorn s3tables_delta_pilot.webapp:app --host 127.0.0.1 --port 8090
+.venv/bin/uvicorn s3tables_delta_pilot.webapp:app --host 127.0.0.1 --port 8090
 ```
 
 Open `http://127.0.0.1:8090`.
@@ -34,13 +40,15 @@ upload column counts, matches and percentage, sanitised column names, and any
 hard rejection reason before the upload action is enabled.
 
 For a new table, the first file is profiled across every populated value in
-each column—not merely its first data row. All-empty and mixed-value columns
-default to `STRING`; wholly numeric values become `BIGINT` or `DOUBLE`; and
-parseable date/time fields become `TIMESTAMP`. Healthcare-oriented names such
+each column—not merely its first data row. The documented date/time rules are
+applied automatically: valid `YYYYMMDD`, `YYYY-MM-DD`, and `YYYY.MM.DD` values
+become `DATE`; valid `YYYY-MM-DD HH:mm:ss` values become `TIMESTAMP`; and
+time-only `HH:mm:ss` values remain `STRING`. Decimal numbers always become
+`DOUBLE`; only wholly integral numbers become `BIGINT`. Healthcare-oriented names such
 as surgeon, clinician, specialty, ward, MCR, code, ID, OU, and mode are always
 `STRING`, preventing blank Excel columns from creating an incorrect numeric
-contract. The first preflight displays every inferred type conversion and lets
-the operator select the supported target type for that column. The selected
+contract. Only mixed or otherwise ambiguous columns are presented for an
+operator type selection, with ephemeral safe samples. The selected
 types become the immutable initial table contract; the service validates every
 value against those choices before staging, so an unsafe selection is rejected
 instead of silently becoming `NULL`. Later uploads always follow that stored
@@ -52,7 +60,13 @@ For a new table, the preflight also presents every stored column as a possible
 de-duplication component. It shows up to five ephemeral sample values for
 non-sensitive fields, with non-null and distinct-value counts. Samples for
 healthcare-sanitized fields remain masked. These review-only values are never
-written to S3 staging, Glue arguments, QC reports, or upload history.
+written to S3 staging, Glue arguments, QC reports, or upload history. After an
+operator selects a composite key, the local service analyses the complete
+incoming dataset before upload can be enabled. It reports exact duplicates,
+same-key/different-row conflicts, expected retained rows, and expected skipped
+rows without writing to S3 or starting Glue. The operator may revise the key
+and repeat the analysis; changing files, types, or key columns invalidates the
+required acknowledgement.
 
 The table picker shows every S3 Tables bucket/namespace assigned to the current
 user and, for each table, its creation time, last-modified time, and current
@@ -92,8 +106,19 @@ New table names must begin with a lowercase letter and contain only `a-z`,
 The local server accepts `X-Pilot-User-Id`. This is a **trusted placeholder**,
 not authentication: replace `_current_user()` with verified frontend identity
 claims before exposing this outside an operator's machine. Until then,
-`local-admin` is the default local identity and has access only to this pilot
-bucket/namespace.
+`local-admin` is the default local identity and dynamically discovers every S3
+Tables bucket and one-level namespace visible to the local service's IAM role.
+`local-editor` remains limited to `ah-soc-delta-pilot/pilot`.
+
+The expander at the top of the local UI is an identity-integration aid. It
+shows the exact user context sent by the browser—currently only the
+`X-Pilot-User-Id` header—and separately shows the backend-resolved role and
+bucket/namespace grants. The browser never sends `is_admin` or grants. With no
+custom access configuration, it offers three local test identities:
+`local-admin` (administrator), `local-editor` (scoped editor with recovery), and
+`local-unassigned` (expected authorization denial). This panel and the
+`/api/dev/identity-profiles` endpoint are strictly local development helpers
+and must be removed or replaced by verified claims before external deployment.
 
 The future frontend relationship can be supplied for testing through
 `PILOT_USER_ACCESS_JSON`:
@@ -123,9 +148,13 @@ The future frontend relationship can be supplied for testing through
 }
 ```
 
-Each request is restricted to a configured bucket/namespace scope. Only an
-`is_admin: true` user sees the delete control and can call the delete API.
-Deletion is permanent and the browser requires confirmation.
+Each non-admin request is restricted to a configured bucket/namespace scope.
+An `is_admin: true` user may select any account-visible table bucket, then any
+namespace within it; the backend independently validates both selections.
+Only admins see the delete control and can call the delete API. Deletion is
+permanent and the browser requires confirmation. Tables without an uploader
+schema/de-duplication contract are listed as browse-only; they cannot be
+appended, deleted, recovered, or have uploader history viewed through this UI.
 
 Uploads are written under a unique
 `s3://ah-data-analytics/temp_s3_update/web_ingest/uploads/<request-id>/`
@@ -134,6 +163,14 @@ prefix. The local service creates or updates a separate Glue job named
 same append-only Iceberg/S3 Tables configuration. The original SOC delta job
 remains unchanged and is still the correct path for its business-key-aware
 full-snapshot delta policy.
+
+For troubleshooting, the exact **sanitized, canonicalized, Glue-compatible
+Parquet** submitted to Glue is retained only under its request-scoped
+`temp_s3_update/web_ingest/uploads/<request-id>/input/` path. This is both the
+Glue staging input and the sole uploader archive; no duplicate object is
+written under a separate backup prefix. Raw pre-sanitization upload bytes are
+never retained. A prefix-only lifecycle rule retains this archive for 30 days
+before expiry.
 
 For tables created after the key-policy enhancement, the first upload defines
 both the immutable schema and one or more de-duplication columns. Later uploads
@@ -153,6 +190,12 @@ missing values are retained as explicit blank components. For example,
 therefore different records. No full-row fallback is used for key-enabled
 tables; all de-duplication and conflict decisions depend only on the selected
 composite key.
+
+Before the user acknowledges a new table's key contract, key-impact analysis
+reads the raw file locally with Polars. It does not sanitize, encrypt, mask,
+stage to S3, or call Glue. The result is therefore a fast source-data estimate
+of exact duplicates and same-key conflicts; sanitization remains mandatory only
+when the acknowledged upload actually begins.
 
 ## Snapshot recovery and upload history
 
@@ -175,13 +218,19 @@ original uploader/time, rollback executor/time, previous/new snapshot IDs, row
 counts, status, and an error summary. It never records source row values,
 identifiers, encryption keys, or temporary object locations.
 
-Administrators see an upload-history panel after selecting a table. A rollback
-requires a browser confirmation and is allowed only for the latest successful
-uploader-managed update with a recorded prior snapshot. The Glue job calls the
-Iceberg `rollback_to_snapshot` procedure, reloads the table, verifies the
-restored row count against the selected historical snapshot, and records either
+Administrators see full upload history after selecting a table. The local editor
+sees only its own uploader-managed history. A rollback requires a browser
+confirmation and is allowed only for the latest successful uploader-managed
+update with a recorded prior snapshot. The Glue job calls the Iceberg
+`rollback_to_snapshot` procedure, reloads the table, verifies the restored row
+count against the selected historical snapshot, and records either
 `ROLLED_BACK` or `ROLLBACK_FAILED`. It never tries to delete the bad upload's
 rows manually.
+
+The local editor may roll back only its own upload and only when that upload is
+also the table's latest successful uploader-managed update. It cannot delete a
+table or inspect another user's upload history. The backend enforces these
+rules; the UI merely reflects its resolved capabilities.
 
 The local uploader service identity needs the existing table-control rights plus
 `s3tables:PutTableMaintenanceConfiguration` for each assigned table bucket.
@@ -191,3 +240,7 @@ existing data-plane table read/write permissions.
 The UI's history projection is under
 `temp_s3_update/web_ingest/upload_history/` and is also scoped by a hash of the
 assigned bucket/namespace and the selected table.
+
+The local uploader also needs `s3:GetLifecycleConfiguration` and
+`s3:PutLifecycleConfiguration` on `ah-data-analytics` to maintain the
+prefix-only 30-day sanitized-upload archive rule.
