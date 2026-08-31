@@ -1,0 +1,120 @@
+import unittest
+
+import pyarrow as pa
+
+from s3tables_delta_pilot.ingest_contract import (
+    compare_schema,
+    manual_confirmation_columns,
+    normalise_name,
+    parse_documented_date,
+    schema_from_arrow,
+    schema_from_table,
+)
+
+
+class IngestContractTests(unittest.TestCase):
+    def test_schema_normalisation_and_types(self):
+        schema, warnings = schema_from_arrow(pa.schema([("Visit Date", pa.timestamp("us")), ("Count", pa.int32())]))
+        self.assertEqual([], warnings)
+        self.assertEqual(
+            [
+                {"name": "visit_date", "type": "TIMESTAMP", "source_name": "Visit Date"},
+                {"name": "count", "type": "BIGINT", "source_name": "Count"},
+            ],
+            schema,
+        )
+
+    def test_extra_is_ignored_missing_is_null_and_cast_is_visible(self):
+        source = pa.schema([("value", pa.string()), ("unused", pa.string())])
+        result = compare_schema(source, [{"name": "value", "type": "BIGINT"}, {"name": "required", "type": "STRING"}])
+        self.assertEqual(["unused"], result["extra_columns"])
+        self.assertEqual(["required"], result["missing_columns"])
+        self.assertEqual("value", result["type_conversions"][0]["column"])
+        self.assertEqual(2, result["target_column_count"])
+        self.assertEqual(1, result["matching_column_count"])
+        self.assertEqual(50.0, result["matching_percentage"])
+
+    def test_schema_overlap_is_calculated_after_canonicalisation(self):
+        source = pa.schema([("A Col", pa.string()), ("B-COL", pa.string()), ("unmatched", pa.string())])
+        result = compare_schema(source, [{"name": "a_col", "type": "STRING"}, {"name": "b_col", "type": "STRING"}])
+        self.assertEqual(["a_col", "b_col"], result["matching_columns"])
+        self.assertEqual(100.0, result["matching_percentage"])
+
+    def test_name_collision_gets_a_deterministic_suffix(self):
+        schema, _ = schema_from_arrow(pa.schema([("BILL_NUM", pa.string()), ("Bill_Num", pa.string()), ("bill num", pa.string())]))
+        self.assertEqual(["bill_num", "bill_num_01", "bill_num_02"], [field["name"] for field in schema])
+
+    def test_nanosecond_timestamp_requires_explicit_confirmation(self):
+        _, warnings = schema_from_arrow(pa.schema([("created_at", pa.timestamp("ns"))]))
+        self.assertEqual(1, len(warnings))
+        self.assertIn("nanosecond timestamps", warnings[0])
+
+    def test_new_table_profile_uses_all_populated_values_and_defaults_all_null_to_string(self):
+        table = pa.table({
+            "Empty Measure": pa.array([None, None, None], type=pa.float64()),
+            "Performing Surgeon": [None, "Dr Example", None],
+            "Visit Date": [None, "2026-08-01", None],
+            "Generic Number": [None, "12", "13"],
+            "Mixed Value": [None, "12", "not-a-number"],
+        })
+        schema, warnings = schema_from_table(table)
+        types = {field["name"]: field["type"] for field in schema}
+        self.assertEqual("STRING", types["empty_measure"])
+        self.assertEqual("STRING", types["performing_surgeon"])
+        self.assertEqual("DATE", types["visit_date"])
+        self.assertEqual("BIGINT", types["generic_number"])
+        self.assertEqual("STRING", types["mixed_value"])
+        self.assertEqual([], warnings)
+
+    def test_documented_temporal_and_numeric_rules_are_deterministic(self):
+        table = pa.table({
+            "compact_date": ["20240513", "20240229"],
+            "dotted_date": ["2024.05.13", "2024.02.29"],
+            "timestamp_value": ["2024-05-13 14:35:21", "2024-02-29 00:00:00"],
+            "time_only": ["14:35:21", "00:00:00"],
+            "integer_text": ["1", "2"],
+            "decimal_text": ["1.0", "2.5"],
+            "invalid_date_number": ["20241304", "20240230"],
+        })
+        schema, _ = schema_from_table(table)
+        types = {field["name"]: field["type"] for field in schema}
+        self.assertEqual("DATE", types["compact_date"])
+        self.assertEqual("DATE", types["dotted_date"])
+        self.assertEqual("TIMESTAMP", types["timestamp_value"])
+        self.assertEqual("STRING", types["time_only"])
+        self.assertEqual("BIGINT", types["integer_text"])
+        self.assertEqual("DOUBLE", types["decimal_text"])
+        self.assertEqual("BIGINT", types["invalid_date_number"])
+
+    def test_date_parser_accepts_the_year_9999_without_pandas_timestamp_bounds(self):
+        self.assertEqual("9999-12-31", parse_documented_date("9999-12-31").isoformat())
+        self.assertIsNone(parse_documented_date("9999-02-29"))
+
+    def test_plain_text_is_automatic_string_but_invalid_date_like_values_are_manual(self):
+        table = pa.table({
+            "Free Text": ["ward A", "ward B"],
+            "Mixed Label": ["12", "not-a-number"],
+            "Event Date": ["2024-02-30", "2024-13-01"],
+        })
+        schema, warnings = schema_from_table(table)
+        types = {field["name"]: field["type"] for field in schema}
+        self.assertEqual({"free_text": "STRING", "mixed_label": "STRING", "event_date": "STRING"}, types)
+        self.assertEqual({"event_date"}, manual_confirmation_columns(table))
+        self.assertEqual(1, len(warnings))
+
+    def test_new_table_profile_keeps_mcr_code_and_mode_as_strings_even_when_numeric(self):
+        table = pa.table({"Clinician MCR": [123456], "Procedure Code": [123], "Arrival Mode": [1]})
+        schema, _ = schema_from_table(table)
+        self.assertEqual(["STRING", "STRING", "STRING"], [field["type"] for field in schema])
+
+    def test_new_table_profile_never_overrides_a_sanitization_string_requirement(self):
+        table = pa.table({"Admsn CSN": [123456, 234567], "Postal Code": [120000, 130000]})
+        schema, _ = schema_from_table(
+            table,
+            force_string_columns={"Admsn CSN", "Postal Code"},
+        )
+        self.assertEqual(["STRING", "STRING"], [field["type"] for field in schema])
+
+
+if __name__ == "__main__":
+    unittest.main()
