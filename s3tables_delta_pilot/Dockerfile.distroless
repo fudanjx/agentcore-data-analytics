@@ -1,0 +1,39 @@
+# Experimental hardened runtime for the local S3 Tables uploader.
+#
+# Build from this directory:
+#   docker build -f Dockerfile.distroless -t local/s3tables-delta-pilot:distroless .
+#
+# Run with the host AWS credential chain mounted/readable as appropriate for
+# the operator's environment. This image is deliberately distroless: it has
+# no shell, package manager, pip, or debugging utilities at runtime.
+
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+COPY requirements.txt ./requirements.txt
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --target /app/dependencies -r requirements.txt
+
+# Keep the source in its package directory because it uses relative imports.
+COPY . ./s3tables_delta_pilot
+
+
+FROM mcr.microsoft.com/azurelinux/distroless/python:3.12
+
+WORKDIR /app
+
+COPY --from=builder /app/dependencies /app/dependencies
+COPY --from=builder /app/s3tables_delta_pilot /app/s3tables_delta_pilot
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/dependencies:/app
+
+EXPOSE 8090
+
+# Do not use a shell-form command: distroless images do not contain /bin/sh.
+CMD ["python3", "-m", "uvicorn", "s3tables_delta_pilot.webapp:app", "--host", "0.0.0.0", "--port", "8090"]
