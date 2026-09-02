@@ -213,6 +213,34 @@ function selectedDeduplicationColumns() {
     .map(control => control.dataset.deduplicationColumn);
 }
 
+function updateDeduplicationSelectionControls() {
+  const controls = [...document.querySelectorAll('[data-deduplication-column]')].filter(control => !control.disabled);
+  const selectedCount = controls.filter(control => control.checked).length;
+  const allSelected = controls.length > 0 && selectedCount === controls.length;
+  const selectAll = $('select-all-deduplication');
+  if (selectAll) {
+    selectAll.disabled = controls.length === 0;
+    selectAll.textContent = allSelected ? 'Clear all columns' : 'Select all columns';
+    selectAll.setAttribute('aria-pressed', String(allSelected));
+  }
+  const count = $('deduplication-selection-count');
+  if (count) count.textContent = `${selectedCount} of ${controls.length} eligible columns selected.`;
+  const analyse = $('analyse-key');
+  if (analyse) analyse.disabled = selectedCount === 0;
+}
+
+function deduplicationSelectionChanged() {
+  invalidateKeyAnalysis();
+  updateDeduplicationSelectionControls();
+}
+
+function toggleAllDeduplicationColumns() {
+  const controls = [...document.querySelectorAll('[data-deduplication-column]')].filter(control => !control.disabled);
+  const selectAll = !controls.every(control => control.checked);
+  controls.forEach(control => { control.checked = selectAll; });
+  deduplicationSelectionChanged();
+}
+
 function updateCreateUploadEligibility() {
   if (!state.review || state.review.mode !== 'create') return;
   const selected = selectedDeduplicationColumns();
@@ -327,10 +355,12 @@ function renderPreflight(result) {
       const quality = choice.samples_masked ? '' : `<small>Non-empty: ${Number(choice.non_null_count || 0).toLocaleString()}; distinct: ${Number(choice.distinct_non_null_count || 0).toLocaleString()}.</small>`;
       return `<label class="deduplication-candidate ${unavailable ? 'ineligible' : ''}"><input type="checkbox" data-deduplication-column="${escapeHtml(choice.column)}" ${unavailable ? 'disabled' : ''}><span><strong>${escapeHtml(choice.column)}</strong><small>Stored type: ${escapeHtml(choice.target_type)}; detected: ${escapeHtml(choice.source_type)}.</small>${quality}${examples}${reason}</span></label>`;
     }).join('');
-    section.innerHTML = `<h3>Choose de-duplication columns</h3><p>Select one stable identifier, or multiple fields for a composite key. CSN, case, HRN, MRN, and other encrypted identifiers may be selected; their examples remain masked. This selection becomes the table’s immutable de-duplication contract. Before upload, analyse the full incoming dataset to see the duplicate/conflict impact. Per-column non-empty and distinct counts help assess a single-column key.</p><p class="deduplication-notice" id="deduplication-selection-notice">Choose at least one de-duplication column before uploading.</p><div class="deduplication-candidates">${rows}</div><button type="button" id="analyse-key" class="key-analysis-action" disabled>Analyse selected key impact</button><p id="key-analysis-status" class="operation-status" aria-live="polite"></p><div id="key-analysis-result"></div>`;
+    section.innerHTML = `<h3>Choose de-duplication columns</h3><p>Select one stable identifier, or multiple fields for a composite key. CSN, case, HRN, MRN, and other encrypted identifiers may be selected; their examples remain masked. This selection becomes the table’s immutable de-duplication contract. Before upload, analyse the full incoming dataset to see the duplicate/conflict impact. Per-column non-empty and distinct counts help assess a single-column key.</p><p class="deduplication-notice" id="deduplication-selection-notice">Choose at least one de-duplication column before uploading.</p><div class="deduplication-actions"><button type="button" id="select-all-deduplication" class="secondary" aria-pressed="false">Select all columns</button><span id="deduplication-selection-count" class="hint"></span></div><div class="deduplication-candidates">${rows}</div><button type="button" id="analyse-key" class="key-analysis-action" disabled>Analyse selected key impact</button><p id="key-analysis-status" class="operation-status" aria-live="polite"></p><div id="key-analysis-result"></div>`;
     holder.append(section);
-    section.querySelectorAll('[data-deduplication-column]').forEach(control => control.addEventListener('change', () => { invalidateKeyAnalysis(); $('analyse-key').disabled = selectedDeduplicationColumns().length === 0; }));
+    section.querySelectorAll('[data-deduplication-column]').forEach(control => control.addEventListener('change', deduplicationSelectionChanged));
+    $('select-all-deduplication').onclick = toggleAllDeduplicationColumns;
     $('analyse-key').onclick = analyseSelectedKey;
+    updateDeduplicationSelectionControls();
   }
   for (const file of result.files || []) {
     const item = document.createElement('article'); item.className = `preflight-file ${file.accepted ? 'accepted' : 'rejected'}`;

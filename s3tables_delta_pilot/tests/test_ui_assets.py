@@ -286,6 +286,10 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("samples_masked", javascript)
         self.assertIn("Choose de-duplication columns", javascript)
         self.assertIn("deduplication_columns: selectedDeduplicationColumns()", javascript)
+        self.assertIn('id="select-all-deduplication"', javascript)
+        self.assertIn("function toggleAllDeduplicationColumns()", javascript)
+        self.assertIn("control => !control.disabled", javascript)
+        self.assertIn("Clear all columns", javascript)
 
     def test_type_selection_samples_are_random_and_sensitive_samples_are_masked(self):
         sink = pa.BufferOutputStream()
