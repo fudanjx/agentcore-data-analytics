@@ -32,6 +32,14 @@ Only matching columns are appended, additional source columns are ignored, and
 missing target columns become `NULL`. Healthcare sanitization is mandatory
 before temporary S3 staging.
 
+When the local identity test panel is set to `local-admin`, the destination
+section also allows the operator to create an S3 Tables bucket and to create a
+one-level namespace in the selected bucket. These control-plane actions are
+enforced as administrator-only by the backend; hiding the controls in the
+browser is not the authorization boundary. The AWS credential chain used to
+start the service must allow `s3tables:CreateTableBucket` and
+`s3tables:CreateNamespace`.
+
 All column names are normalised before the first schema is created or an
 append is checked: names are lowercased; blanks, `/`, hyphens, and parentheses
 become `_`; and collisions are retained deterministically as `column`,

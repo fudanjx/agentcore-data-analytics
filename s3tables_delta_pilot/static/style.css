@@ -14,6 +14,10 @@ section, details { background: white; border: 1px solid #e0e7f0; border-radius: 
 .section-title { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .destination-selectors { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px; }
 .destination-selectors label { margin-top: 0; }
+.admin-provisioning { padding: 14px; border-color: #b8cee0; background: #f8fbfd; }
+.provisioning-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 12px; }
+.provisioning-grid > div { min-width: 0; }
+.provisioning-grid button { margin-top: 10px; }
 .tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .table { text-align: left; border: 1px solid #b9c9dc; background: #fff; color: #14213d; border-radius: 7px; padding: 12px; }
 .table-select { display: block; width: 100%; padding: 0; background: transparent; color: inherit; text-align: left; }

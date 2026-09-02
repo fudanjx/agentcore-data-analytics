@@ -40,3 +40,5 @@ Strands-runtime/.bundle-build/
 Strands-runtime/dist/
 /tests/
 docs/architecture/
+nuh_s3tables_migration/_build/
+

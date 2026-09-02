@@ -21,10 +21,18 @@ function apiFetch(url, options = {}) {
   return fetch(url, { ...options, headers });
 }
 function renderOutgoingIdentity() { $('outgoing-identity').textContent = JSON.stringify(identityRequestPayload(), null, 2); }
+function renderAdminProvisioning() {
+  $('admin-provisioning').hidden = !state.isAdmin;
+  const bucketName = $('new-bucket').value.trim();
+  const namespace = $('new-namespace').value.trim();
+  $('create-bucket').disabled = !state.isAdmin || !/^[a-z0-9-]{3,63}$/.test(bucketName);
+  $('create-namespace').disabled = !state.isAdmin || !state.bucket || !/^[a-z][a-z0-9_]{0,254}$/.test(namespace);
+}
 function clearDestination() {
   state.bucket = null; state.namespace = null; state.table = null; state.tableManaged = false; state.isAdmin = false; state.userId = null;
   state.canViewHistory = false; state.canRollbackUploads = false;
   $('bucket').replaceChildren(); $('namespace').replaceChildren(); $('namespace').disabled = true; $('tables').replaceChildren(); $('history').hidden = true;
+  $('admin-provisioning').hidden = true;
   clearPreflight(); valid();
 }
 async function loadEffectiveIdentity() {
@@ -51,7 +59,7 @@ async function loadIdentityProfiles() {
   renderOutgoingIdentity();
 }
 
-async function loadBuckets() {
+async function loadBuckets(preferredBucketArn = null) {
   const identity = await loadEffectiveIdentity();
   if (!identity) { clearDestination(); return; }
   const response = await apiFetch('/api/buckets'); const data = await response.json();
@@ -64,26 +72,67 @@ async function loadBuckets() {
     const option = document.createElement('option'); option.value = JSON.stringify(bucket);
     option.textContent = bucket.label; return option;
   }));
-  state.bucket = data.buckets[0] || null;
+  state.bucket = data.buckets.find(bucket => bucket.table_bucket_arn === preferredBucketArn) || data.buckets[0] || null;
   $('bucket').value = state.bucket ? JSON.stringify(state.bucket) : '';
+  $('bucket').disabled = !data.buckets.length;
   $('history').hidden = !state.canViewHistory;
+  renderAdminProvisioning();
   await loadNamespaces();
 }
 
-async function loadNamespaces() {
+async function loadNamespaces(preferredNamespace = null) {
   state.namespace = null; state.table = null; state.tableManaged = false;
   $('namespace').replaceChildren(); $('tables').replaceChildren(); clearPreflight();
-  if (!state.bucket) { $('namespace').disabled = true; valid(); return; }
+  if (!state.bucket) { $('namespace').disabled = true; $('scope').textContent = state.isAdmin ? 'Create an S3 Tables bucket to begin.' : 'No assigned S3 Tables bucket.'; renderAdminProvisioning(); valid(); return; }
   const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
   const response = await apiFetch(`/api/namespaces?${query}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load namespaces');
   $('namespace').replaceChildren(...data.namespaces.map(namespace => {
     const option = document.createElement('option'); option.value = namespace; option.textContent = namespace; return option;
   }));
-  state.namespace = data.namespaces[0] || null;
+  state.namespace = data.namespaces.includes(preferredNamespace) ? preferredNamespace : data.namespaces[0] || null;
   $('namespace').value = state.namespace || '';
   $('namespace').disabled = !state.namespace;
+  $('scope').textContent = state.namespace ? `Target: ${state.bucket.label} / ${state.namespace}` : `Create a namespace in ${state.bucket.label} to begin.`;
+  renderAdminProvisioning();
   await loadTables();
+}
+
+async function createTableBucket() {
+  const name = $('new-bucket').value.trim(); const button = $('create-bucket'); const status = $('create-bucket-status');
+  button.disabled = true; button.classList.add('is-busy'); status.className = 'operation-status'; status.textContent = `Creating ${name}…`;
+  try {
+    const response = await apiFetch('/api/buckets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Bucket creation failed.'; return; }
+    $('new-bucket').value = '';
+    await loadBuckets(result.table_bucket_arn);
+    $('admin-provisioning').open = true;
+    status.className = 'operation-status complete'; status.textContent = `Created ${result.label}. Create a namespace in it next.`;
+    $('new-namespace').focus();
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Bucket creation failed: ${error.message}`;
+  } finally {
+    button.classList.remove('is-busy'); renderAdminProvisioning();
+  }
+}
+
+async function createSelectedNamespace() {
+  const namespace = $('new-namespace').value.trim(); const bucket = state.bucket; const button = $('create-namespace'); const status = $('create-namespace-status');
+  button.disabled = true; button.classList.add('is-busy'); status.className = 'operation-status'; status.textContent = `Creating ${namespace}…`;
+  try {
+    const response = await apiFetch('/api/namespaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: bucket.table_bucket_arn, namespace }) });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Namespace creation failed.'; return; }
+    $('new-namespace').value = '';
+    await loadNamespaces(result.namespace);
+    $('admin-provisioning').open = true;
+    status.className = 'operation-status complete'; status.textContent = `Created namespace ${result.namespace}.`;
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Namespace creation failed: ${error.message}`;
+  } finally {
+    button.classList.remove('is-busy'); renderAdminProvisioning();
+  }
 }
 
 async function loadTables() {
@@ -104,6 +153,10 @@ async function loadTables() {
     return card;
   }));
   if (!data.tables.some(table => table.name === state.table)) { state.table = null; state.tableManaged = false; }
+  if (data.tables.length === 0) {
+    state.mode = 'create'; state.tableManaged = true;
+    $('create').checked = true; $('new-table-wrap').hidden = false;
+  }
   selectTable(); valid(); await loadHistory();
 }
 
@@ -121,7 +174,18 @@ function valid() {
   const table = selectedTable(); const hasFiles = $('files').files.length > 0;
   const tableIsValid = typeof table === 'string' && /^[a-z][a-z0-9_]{0,254}$/.test(table);
   const tagIsValid = userTag().length > 0;
-  $('preflight').disabled = !(state.bucket && state.namespace && tableIsValid && hasFiles && tagIsValid && (state.mode === 'create' || state.tableManaged));
+  const requirements = [];
+  if (!state.bucket) requirements.push('choose or create a bucket');
+  if (!state.namespace) requirements.push('choose or create a namespace');
+  if (!table) requirements.push(state.mode === 'create' ? 'enter a new table name' : 'select a table');
+  else if (!tableIsValid) requirements.push('enter a valid table name');
+  if (state.mode === 'append' && table && !state.tableManaged) requirements.push('choose an uploader-managed table or create a new table');
+  if (!tagIsValid) requirements.push('enter a user tag');
+  if (!hasFiles) requirements.push('select one or more files');
+  const ready = requirements.length === 0;
+  $('preflight').disabled = !ready;
+  $('preflight').title = ready ? 'Review the selected upload.' : `Still required: ${requirements.join('; ')}.`;
+  $('review-requirements').textContent = ready ? 'All required fields are complete. The upload is ready for review.' : `To enable Review upload: ${requirements.join('; ')}.`;
   if (!state.bucket) $('destination-help').textContent = 'No S3 Tables bucket is assigned to this user.';
   else if (!table) $('destination-help').textContent = state.mode === 'create' ? 'Enter a new table name to continue.' : 'Select one existing table, or check “Create a new table from this upload”.';
   else if (state.mode === 'append' && !state.tableManaged) $('destination-help').textContent = 'This existing table is browse-only because it has no uploader schema and recovery contract.';
@@ -352,6 +416,10 @@ async function rollbackUpload(item) {
 
 $('refresh').onclick = loadNamespaces;
 $('refresh-history').onclick = loadHistory;
+$('new-bucket').oninput = renderAdminProvisioning;
+$('new-namespace').oninput = renderAdminProvisioning;
+$('create-bucket').onclick = createTableBucket;
+$('create-namespace').onclick = createSelectedNamespace;
 $('emulated-user').onchange = async () => {
   state.emulatedUserId = $('emulated-user').value || null;
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;

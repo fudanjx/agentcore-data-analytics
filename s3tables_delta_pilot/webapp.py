@@ -12,6 +12,8 @@ import random
 import shutil
 import tempfile
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ import polars as pl
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from botocore.exceptions import ClientError
 from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
@@ -248,6 +251,36 @@ class RollbackRequest(BaseModel):
     confirm: bool = False
 
 
+class CreateTableBucketRequest(BaseModel):
+    name: str = Field(pattern=r"^[a-z0-9-]{3,63}$")
+
+
+class CreateNamespaceRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+
+
+def _admin_only(user: PilotUser) -> None:
+    if not user.is_admin:
+        raise HTTPException(403, "Only administrators may create S3 Tables buckets and namespaces")
+
+
+def _control_plane_http_error(error: ClientError, resource: str) -> HTTPException:
+    """Convert expected AWS control-plane failures into useful API responses."""
+    details = error.response.get("Error", {})
+    code = details.get("Code", "")
+    message = details.get("Message") or f"AWS could not create the {resource}"
+    if code in {"ConflictException", "AlreadyExistsException"}:
+        status = 409
+    elif code in {"AccessDenied", "AccessDeniedException", "UnauthorizedException"}:
+        status = 403
+    elif code in {"BadRequestException", "ValidationException"}:
+        status = 400
+    else:
+        status = 502
+    return HTTPException(status, message)
+
+
 def _soc_schema() -> list[dict[str, str]]:
     return [{"name": column, "type": "TIMESTAMP" if column in TIMESTAMP_TARGET_COLUMNS else "BIGINT" if column == "cnt" else "STRING"} for column in TARGET_COLUMNS]
 
@@ -347,6 +380,28 @@ def _temporary_suffix(filename: str) -> str:
     return ".parquet" if filename.lower().endswith((".parquet", ".parquet.gzip")) else Path(filename).suffix
 
 
+@contextmanager
+def _temporary_upload_path(upload: UploadFile) -> Iterator[Path]:
+    """Copy an upload to a closed local file before opening or deleting it.
+
+    Windows does not allow another reader or ``unlink`` to operate reliably on
+    a still-open ``NamedTemporaryFile``. Keep creation/writing in the inner
+    context, then yield only after that handle has closed.
+    """
+    temp = tempfile.NamedTemporaryFile(
+        suffix=_temporary_suffix(upload.filename or "upload"), delete=False
+    )
+    path = Path(temp.name)
+    try:
+        with temp:
+            shutil.copyfileobj(upload.file, temp)
+            temp.flush()
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+        upload.file.seek(0)
+
+
 def _ensure_upload_archive_lifecycle() -> None:
     """Retain the sanitized Glue staging archive for 30 days, by prefix only."""
     try:
@@ -416,37 +471,24 @@ def _read_schemas(files: list[UploadFile]) -> tuple[list[pa.Schema], list[dict]]
     for upload in files:
         if not upload.filename or not upload.filename.lower().endswith(SUPPORTED_UPLOAD_SUFFIXES):
             raise HTTPException(400, f"Supported files are Parquet, XLSX, XLS, CSV, and TSV: {upload.filename or '<unnamed>'}")
-        with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename), delete=False) as temp:
-            path = Path(temp.name)
-            try:
-                shutil.copyfileobj(upload.file, temp)
-                temp.flush()
+        try:
+            with _temporary_upload_path(upload) as path:
                 schema, details = _sanitization_details(_read_upload_table(path, upload.filename).schema)
                 schemas.append(schema)
                 sanitization.append(details)
-            except Exception as error:
-                raise HTTPException(400, f"Cannot read {upload.filename} as Parquet: {error}") from error
-            finally:
-                path.unlink(missing_ok=True)
-                upload.file.seek(0)
+        except Exception as error:
+            raise HTTPException(400, f"Cannot read {upload.filename} as Parquet: {error}") from error
     return schemas, sanitization
 
 
 def _first_upload_contract(upload: UploadFile) -> tuple[list[dict[str, str]], list[str], set[str]]:
     """Profile every populated value of the first upload for table creation."""
-    with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
-        path = Path(temp.name)
-        try:
-            shutil.copyfileobj(upload.file, temp)
-            temp.flush()
-            table = _read_upload_table(path, upload.filename or "upload")
-            sanitized_schema, plan = sanitised_schema(table.schema)
-            forced_strings = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-            schema, warnings = schema_from_table(table, sanitized_schema, forced_strings)
-            return schema, warnings, manual_confirmation_columns(table, sanitized_schema, forced_strings)
-        finally:
-            path.unlink(missing_ok=True)
-            upload.file.seek(0)
+    with _temporary_upload_path(upload) as path:
+        table = _read_upload_table(path, upload.filename or "upload")
+        sanitized_schema, plan = sanitised_schema(table.schema)
+        forced_strings = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+        schema, warnings = schema_from_table(table, sanitized_schema, forced_strings)
+        return schema, warnings, manual_confirmation_columns(table, sanitized_schema, forced_strings)
 
 
 def _create_type_selections(
@@ -476,56 +518,49 @@ def _create_type_selections(
 
 def _create_deduplication_candidates(upload: UploadFile, target: list[dict[str, str]]) -> list[dict]:
     """Return every stored first-upload column with ephemeral safe examples."""
-    with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
-        path = Path(temp.name)
-        try:
-            shutil.copyfileobj(upload.file, temp)
-            temp.flush()
-            source = _read_upload_table(path, upload.filename or "upload")
-            _, plan = sanitised_schema(source.schema)
-            sensitive_sources = set(plan.drop_columns) | set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-            source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
-            candidates = []
-            for field in target:
-                source_name = source_by_canonical.get(field["name"])
-                masked = source_name in sensitive_sources
-                values = []
-                non_null_count = 0
-                distinct_non_null_count = 0
-                if source_name and not masked:
-                    column = source[source_name]
-                    # Keep preflight bounded even for large healthcare files:
-                    # Arrow calculates counts natively, while sampling reads a
-                    # small random set of scalars rather than materialising an
-                    # entire column as a Python list.
-                    non_null_count = int(pc.count(column).as_py())
-                    distinct_non_null_count = int(pc.count_distinct(column).as_py())
-                    indexes = random.SystemRandom().sample(range(len(column)), min(1024, len(column)))
-                    for index in indexes:
-                        value = column[index].as_py()
-                        if value is not None and str(value).strip().lower() not in {"", "nan", "none", "nat"}:
-                            values.append(str(value)[:160])
-                            if len(values) == 5:
-                                break
-                candidates.append({
-                    "column": field["name"], "target_type": field["type"],
-                    "source_type": str(source.schema.field(source_name).type) if source_name else "MISSING",
-                    "sample_values": values, "samples_masked": bool(masked),
-                    # The uploader normalises then encrypts identifiers using
-                    # the configured stable legacy-compatible representation.
-                    # They are therefore valid case-level keys, but values
-                    # remain masked in the browser.
-                    "deduplication_eligible": True,
-                    "deduplication_ineligible_reason": None,
-                    # Quality is metadata only. Sensitive fields deliberately
-                    # do not expose their value distribution to the browser.
-                    "non_null_count": non_null_count if not masked else None,
-                    "distinct_non_null_count": distinct_non_null_count if not masked else None,
-                })
-            return candidates
-        finally:
-            path.unlink(missing_ok=True)
-            upload.file.seek(0)
+    with _temporary_upload_path(upload) as path:
+        source = _read_upload_table(path, upload.filename or "upload")
+        _, plan = sanitised_schema(source.schema)
+        sensitive_sources = set(plan.drop_columns) | set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+        source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
+        candidates = []
+        for field in target:
+            source_name = source_by_canonical.get(field["name"])
+            masked = source_name in sensitive_sources
+            values = []
+            non_null_count = 0
+            distinct_non_null_count = 0
+            if source_name and not masked:
+                column = source[source_name]
+                # Keep preflight bounded even for large healthcare files:
+                # Arrow calculates counts natively, while sampling reads a
+                # small random set of scalars rather than materialising an
+                # entire column as a Python list.
+                non_null_count = int(pc.count(column).as_py())
+                distinct_non_null_count = int(pc.count_distinct(column).as_py())
+                indexes = random.SystemRandom().sample(range(len(column)), min(1024, len(column)))
+                for index in indexes:
+                    value = column[index].as_py()
+                    if value is not None and str(value).strip().lower() not in {"", "nan", "none", "nat"}:
+                        values.append(str(value)[:160])
+                        if len(values) == 5:
+                            break
+            candidates.append({
+                "column": field["name"], "target_type": field["type"],
+                "source_type": str(source.schema.field(source_name).type) if source_name else "MISSING",
+                "sample_values": values, "samples_masked": bool(masked),
+                # The uploader normalises then encrypts identifiers using
+                # the configured stable legacy-compatible representation.
+                # They are therefore valid case-level keys, but values
+                # remain masked in the browser.
+                "deduplication_eligible": True,
+                "deduplication_ineligible_reason": None,
+                # Quality is metadata only. Sensitive fields deliberately
+                # do not expose their value distribution to the browser.
+                "non_null_count": non_null_count if not masked else None,
+                "distinct_non_null_count": distinct_non_null_count if not masked else None,
+            })
+        return candidates
 
 
 def _create_type_selection_samples(upload: UploadFile, selections: list[dict]) -> list[dict]:
@@ -596,63 +631,56 @@ def _unsafe_cast_issues(upload: UploadFile, target: list[dict[str, str]]) -> lis
     returns only column names and counts: raw healthcare values never enter the
     preflight response or logs.
     """
-    with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
-        path = Path(temp.name)
-        try:
-            shutil.copyfileobj(upload.file, temp)
-            temp.flush()
-            table = _read_upload_table(path, upload.filename or "upload")
-            sanitized_schema, plan = sanitised_schema(table.schema)
-            normalized = normalise_names([field.name for field in sanitized_schema])
-            source_columns = dict(zip(normalized, sanitized_schema.names))
-            sensitive = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-            target_by_name = {field["name"]: field["type"] for field in target}
-            issues = []
-            for name, source_name in source_columns.items():
-                target_type = target_by_name.get(name)
-                if not target_type or source_name in sensitive:
-                    # Sanitization converts these selected source fields to
-                    # STRING before Glue sees them.
-                    continue
-                source = table[source_name]
-                source_type = source.type
-                if target_type == "STRING" or (
-                    target_type == "BIGINT" and pa.types.is_integer(source_type)
-                ) or (
-                    target_type == "DOUBLE" and (pa.types.is_integer(source_type) or pa.types.is_floating(source_type))
-                ) or (
-                    target_type == "TIMESTAMP" and pa.types.is_timestamp(source_type)
-                ) or (
-                    target_type == "DATE" and pa.types.is_date(source_type)
-                ):
-                    continue
-                series = source.to_pandas()
-                non_null = series.notna()
-                if target_type in {"BIGINT", "DOUBLE"}:
-                    converted = pd.to_numeric(series, errors="coerce")
-                    if target_type == "BIGINT":
-                        converted = converted.where((converted % 1) == 0)
-                elif target_type == "DATE":
-                    converted = series.map(parse_documented_date)
-                elif target_type == "TIMESTAMP":
-                    converted = series.map(parse_documented_timestamp)
-                elif target_type == "BOOLEAN":
-                    converted = series.astype("string").str.strip().str.lower().isin({"true", "false", "0", "1"})
-                    invalid = non_null & ~converted
-                    count = int(invalid.sum())
-                    if count:
-                        issues.append({"column": name, "source_type": str(source_type), "target_type": target_type, "unsafe_value_count": count})
-                    continue
-                else:
-                    continue
-                invalid = non_null & converted.isna()
+    with _temporary_upload_path(upload) as path:
+        table = _read_upload_table(path, upload.filename or "upload")
+        sanitized_schema, plan = sanitised_schema(table.schema)
+        normalized = normalise_names([field.name for field in sanitized_schema])
+        source_columns = dict(zip(normalized, sanitized_schema.names))
+        sensitive = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+        target_by_name = {field["name"]: field["type"] for field in target}
+        issues = []
+        for name, source_name in source_columns.items():
+            target_type = target_by_name.get(name)
+            if not target_type or source_name in sensitive:
+                # Sanitization converts these selected source fields to
+                # STRING before Glue sees them.
+                continue
+            source = table[source_name]
+            source_type = source.type
+            if target_type == "STRING" or (
+                target_type == "BIGINT" and pa.types.is_integer(source_type)
+            ) or (
+                target_type == "DOUBLE" and (pa.types.is_integer(source_type) or pa.types.is_floating(source_type))
+            ) or (
+                target_type == "TIMESTAMP" and pa.types.is_timestamp(source_type)
+            ) or (
+                target_type == "DATE" and pa.types.is_date(source_type)
+            ):
+                continue
+            series = source.to_pandas()
+            non_null = series.notna()
+            if target_type in {"BIGINT", "DOUBLE"}:
+                converted = pd.to_numeric(series, errors="coerce")
+                if target_type == "BIGINT":
+                    converted = converted.where((converted % 1) == 0)
+            elif target_type == "DATE":
+                converted = series.map(parse_documented_date)
+            elif target_type == "TIMESTAMP":
+                converted = series.map(parse_documented_timestamp)
+            elif target_type == "BOOLEAN":
+                converted = series.astype("string").str.strip().str.lower().isin({"true", "false", "0", "1"})
+                invalid = non_null & ~converted
                 count = int(invalid.sum())
                 if count:
                     issues.append({"column": name, "source_type": str(source_type), "target_type": target_type, "unsafe_value_count": count})
-            return issues
-        finally:
-            path.unlink(missing_ok=True)
-            upload.file.seek(0)
+                continue
+            else:
+                continue
+            invalid = non_null & converted.isna()
+            count = int(invalid.sum())
+            if count:
+                issues.append({"column": name, "source_type": str(source_type), "target_type": target_type, "unsafe_value_count": count})
+        return issues
 
 
 def _sign_key_analysis(payload: dict) -> str:
@@ -1083,6 +1111,16 @@ def list_buckets(user: PilotUser = Depends(_current_user)):
     }
 
 
+@app.post("/api/buckets", status_code=201)
+def create_table_bucket(payload: CreateTableBucketRequest, user: PilotUser = Depends(_current_user)):
+    _admin_only(user)
+    try:
+        result = s3tables.create_table_bucket(name=payload.name)
+    except ClientError as error:
+        raise _control_plane_http_error(error, "S3 Tables bucket") from error
+    return {"table_bucket_arn": result["arn"], "label": payload.name}
+
+
 @app.get("/api/namespaces")
 def list_namespaces(table_bucket_arn: str, user: PilotUser = Depends(_current_user)):
     _require_bucket_access(user, table_bucket_arn)
@@ -1090,6 +1128,24 @@ def list_namespaces(table_bucket_arn: str, user: PilotUser = Depends(_current_us
         item.namespace for item in user.buckets if item.table_bucket_arn == table_bucket_arn
     })
     return {"table_bucket_arn": table_bucket_arn, "namespaces": namespaces}
+
+
+@app.post("/api/namespaces", status_code=201)
+def create_namespace(payload: CreateNamespaceRequest, user: PilotUser = Depends(_current_user)):
+    _admin_only(user)
+    _require_bucket_access(user, payload.table_bucket_arn)
+    try:
+        result = s3tables.create_namespace(
+            tableBucketARN=payload.table_bucket_arn,
+            namespace=[payload.namespace],
+        )
+    except ClientError as error:
+        raise _control_plane_http_error(error, "namespace") from error
+    namespace = result.get("namespace", [payload.namespace])
+    return {
+        "table_bucket_arn": result.get("tableBucketARN", payload.table_bucket_arn),
+        "namespace": namespace[0],
+    }
 
 
 @app.get("/api/dev/identity-profiles")
@@ -1312,29 +1368,40 @@ async def start_ingestion(
     request_prefix = f"{WEB_UPLOAD_PREFIX}/{payload.request_id}"
     objects, sanitization_audits = [], []
     for number, upload in enumerate(files):
-        digest = hashlib.sha256()
-        with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload.parquet"), delete=False) as temp:
-            path = Path(temp.name)
+        path, digest = _copy_upload_with_digest(upload)
+        try:
+            original_filename = upload.filename or "upload.parquet"
+            key = f"{request_prefix}/input/{number:02d}-{Path(original_filename).stem}.parquet"
+            staged, transformed, audit = _make_glue_compatible_parquet(
+                path, original_filename, active_key, target_schema
+            )
             try:
-                while block := await upload.read(8 * 1024 * 1024):
-                    digest.update(block)
-                    temp.write(block)
-                temp.flush()
-                original_filename = upload.filename or "upload.parquet"
-                key = f"{request_prefix}/input/{number:02d}-{Path(original_filename).stem}.parquet"
-                staged, transformed, audit = _make_glue_compatible_parquet(
-                    path, original_filename, active_key, target_schema
-                )
-                try:
-                    with staged.open("rb") as stream:
-                        s3.put_object(Bucket=SOURCE_BUCKET, Key=key, Body=stream, ContentType="application/octet-stream", Metadata={"sha256": digest.hexdigest(), "original_filename": original_filename, "spark_compatible_staging": str(transformed).lower(), "sanitized": str(bool(audit["dropped_columns"] or audit["encrypted_columns"] or audit["postal_columns"] or audit["age_banded_columns"])).lower()}, ServerSideEncryption="AES256")
-                finally:
-                    if staged != path:
-                        staged.unlink(missing_ok=True)
-                objects.append(f"s3://{SOURCE_BUCKET}/{key}")
-                sanitization_audits.append({"filename": original_filename, "sanitized_archive_uri": f"s3://{SOURCE_BUCKET}/{key}", **audit})
+                with staged.open("rb") as stream:
+                    s3.put_object(
+                        Bucket=SOURCE_BUCKET,
+                        Key=key,
+                        Body=stream,
+                        ContentType="application/octet-stream",
+                        Metadata={
+                            "sha256": digest,
+                            "original_filename": original_filename,
+                            "spark_compatible_staging": str(transformed).lower(),
+                            "sanitized": str(bool(
+                                audit["dropped_columns"]
+                                or audit["encrypted_columns"]
+                                or audit["postal_columns"]
+                                or audit["age_banded_columns"]
+                            )).lower(),
+                        },
+                        ServerSideEncryption="AES256",
+                    )
             finally:
-                path.unlink(missing_ok=True)
+                if staged != path:
+                    staged.unlink(missing_ok=True)
+            objects.append(f"s3://{SOURCE_BUCKET}/{key}")
+            sanitization_audits.append({"filename": original_filename, "sanitized_archive_uri": f"s3://{SOURCE_BUCKET}/{key}", **audit})
+        finally:
+            path.unlink(missing_ok=True)
     if payload.mode == "create":
         s3.put_object(
             Bucket=SOURCE_BUCKET,

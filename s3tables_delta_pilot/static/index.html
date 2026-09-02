@@ -31,6 +31,23 @@
         <label>S3 Tables bucket <select id="bucket"></select></label>
         <label>Namespace <select id="namespace" disabled></select></label>
       </div>
+      <details id="admin-provisioning" class="admin-provisioning" hidden>
+        <summary><strong>Create bucket or namespace</strong> <span class="hint">(administrators only)</span></summary>
+        <p class="hint">Create an empty S3 Tables bucket, then create a namespace in the selected bucket before uploading a table.</p>
+        <div class="provisioning-grid">
+          <div>
+            <label>New bucket name <input id="new-bucket" maxlength="63" placeholder="e.g. hospital-analytics"></label>
+            <button id="create-bucket" type="button" disabled>Create S3 Tables bucket</button>
+            <p id="create-bucket-status" class="operation-status" aria-live="polite"></p>
+          </div>
+          <div>
+            <label>New namespace <input id="new-namespace" maxlength="255" placeholder="e.g. reporting"></label>
+            <button id="create-namespace" type="button" disabled>Create namespace in selected bucket</button>
+            <p id="create-namespace-status" class="operation-status" aria-live="polite"></p>
+          </div>
+        </div>
+        <p class="hint">Bucket names use 3–63 lowercase letters, numbers, and hyphens. Namespace names start with a lowercase letter and use lowercase letters, numbers, or underscores.</p>
+      </details>
       <div id="tables" class="tables"></div>
       <label class="create"><input id="create" type="checkbox"> Create a new table from this upload</label>
       <label id="new-table-wrap" hidden>New table name <input id="new-table" pattern="[a-z][a-z0-9_\-]*" placeholder="e.g. outpatient_jul"></label>
@@ -48,6 +65,7 @@
 
     <section class="actions">
       <button id="preflight" disabled>Review upload</button>
+      <p id="review-requirements" class="hint" aria-live="polite">Complete the destination and file fields to enable review.</p>
       <p id="review-status" class="operation-status" aria-live="polite"></p>
     </section>
 

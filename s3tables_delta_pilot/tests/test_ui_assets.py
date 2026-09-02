@@ -14,6 +14,8 @@ import pandas as pd
 
 from s3tables_delta_pilot.pilot import NAMESPACE, TABLE_BUCKET_ARN
 from s3tables_delta_pilot.webapp import (
+    CreateNamespaceRequest,
+    CreateTableBucketRequest,
     IngestionRequest,
     RollbackRequest,
     UPLOAD_HISTORY_TABLE,
@@ -22,6 +24,8 @@ from s3tables_delta_pilot.webapp import (
     _create_type_selection_samples,
     _composite_key_metrics,
     _current_user,
+    create_namespace,
+    create_table_bucket,
     _history_prefix,
     key_impact_analysis,
     list_buckets,
@@ -80,6 +84,7 @@ class UiAssetTests(unittest.TestCase):
         html = (STATIC / "index.html").read_text()
         javascript = (STATIC / "app.js").read_text()
         self.assertIn('id="destination-help"', html)
+        self.assertIn('id="review-requirements"', html)
         self.assertIn('id="reporting-month" type="text"', html)
         self.assertIn('id="history"', html)
         self.assertIn('id="namespace"', html)
@@ -88,6 +93,56 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn('Rollback upload', javascript)
         self.assertIn('function userTag()', javascript)
         self.assertIn('Enter a user tag', javascript)
+        self.assertIn('To enable Review upload:', javascript)
+        self.assertIn("if (data.tables.length === 0)", javascript)
+
+    def test_admin_ui_can_create_table_buckets_and_namespaces(self):
+        html = (STATIC / "index.html").read_text()
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn('id="admin-provisioning"', html)
+        self.assertIn('id="new-bucket"', html)
+        self.assertIn('id="new-namespace"', html)
+        self.assertIn("async function createTableBucket", javascript)
+        self.assertIn("async function createSelectedNamespace", javascript)
+        self.assertIn("'/api/buckets'", javascript)
+        self.assertIn("'/api/namespaces'", javascript)
+
+    def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
+        with patch.dict("os.environ", {}, clear=True):
+            admin = _current_user("local-admin")
+            editor = _current_user("local-editor")
+
+        bucket_request = CreateTableBucketRequest(name="hospital-analytics")
+        with patch(
+            "s3tables_delta_pilot.webapp.s3tables.create_table_bucket",
+            return_value={"arn": "arn:aws:s3tables:ap-southeast-1:123456789012:bucket/hospital-analytics"},
+        ) as create_bucket:
+            result = create_table_bucket(bucket_request, admin)
+        self.assertEqual("hospital-analytics", result["label"])
+        create_bucket.assert_called_once_with(name="hospital-analytics")
+
+        bucket_arn = result["table_bucket_arn"]
+        namespace_request = CreateNamespaceRequest(table_bucket_arn=bucket_arn, namespace="reporting")
+        with patch(
+            "s3tables_delta_pilot.webapp._discover_table_buckets",
+            return_value=[{"table_bucket_arn": bucket_arn, "label": "hospital-analytics"}],
+        ), patch(
+            "s3tables_delta_pilot.webapp.s3tables.create_namespace",
+            return_value={"tableBucketARN": bucket_arn, "namespace": ["reporting"]},
+        ) as create_namespace_call:
+            namespace_result = create_namespace(namespace_request, admin)
+        self.assertEqual("reporting", namespace_result["namespace"])
+        create_namespace_call.assert_called_once_with(tableBucketARN=bucket_arn, namespace=["reporting"])
+
+        with self.assertRaises(Exception) as denied:
+            create_table_bucket(bucket_request, editor)
+        self.assertEqual(403, denied.exception.status_code)
+
+    def test_bucket_and_namespace_creation_names_are_validated(self):
+        with self.assertRaises(Exception):
+            CreateTableBucketRequest(name="Uppercase Bucket")
+        with self.assertRaises(Exception):
+            CreateNamespaceRequest(table_bucket_arn="arn:test", namespace="not-valid")
 
     def test_history_projection_is_scoped_to_table_bucket_namespace_and_table(self):
         prefix = _history_prefix("arn:aws:s3tables:ap-southeast-1:123:bucket/example", "pilot", "soc")
