@@ -106,6 +106,9 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("async function createSelectedNamespace", javascript)
         self.assertIn("'/api/buckets'", javascript)
         self.assertIn("'/api/namespaces'", javascript)
+        self.assertIn("await loadBuckets(result);", javascript)
+        self.assertIn("buckets.push(preferredBucket)", javascript)
+        self.assertIn("namespaces.push(preferredNamespace)", javascript)
 
     def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -124,8 +127,8 @@ class UiAssetTests(unittest.TestCase):
         bucket_arn = result["table_bucket_arn"]
         namespace_request = CreateNamespaceRequest(table_bucket_arn=bucket_arn, namespace="reporting")
         with patch(
-            "s3tables_delta_pilot.webapp._discover_table_buckets",
-            return_value=[{"table_bucket_arn": bucket_arn, "label": "hospital-analytics"}],
+            "s3tables_delta_pilot.webapp.s3tables.get_table_bucket",
+            return_value={"arn": bucket_arn, "name": "hospital-analytics"},
         ), patch(
             "s3tables_delta_pilot.webapp.s3tables.create_namespace",
             return_value={"tableBucketARN": bucket_arn, "namespace": ["reporting"]},
@@ -550,6 +553,15 @@ class UiAssetTests(unittest.TestCase):
         ]
         with patch("s3tables_delta_pilot.webapp._discover_table_buckets", return_value=discovered), patch(
             "s3tables_delta_pilot.webapp._discover_namespaces", return_value=["ah", "pilot"]
+        ), patch(
+            "s3tables_delta_pilot.webapp.s3tables.get_table_bucket",
+            side_effect=lambda tableBucketARN: {
+                "arn": tableBucketARN,
+                "name": "nuh-analytics" if tableBucketARN == "arn:test:nuh" else "ah-analytics",
+            },
+        ), patch(
+            "s3tables_delta_pilot.webapp.s3tables.get_namespace",
+            return_value={"namespace": "pilot"},
         ):
             self.assertEqual(discovered, list_buckets(admin)["buckets"])
             self.assertEqual(["ah", "pilot"], list_namespaces("arn:test:ah", admin)["namespaces"])

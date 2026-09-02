@@ -145,9 +145,13 @@ def _current_user(x_pilot_user_id: str | None = Header(default=None, alias="X-Pi
 
 def _require_scope(user: PilotUser, table_bucket_arn: str, namespace: str) -> BucketScope:
     if user.is_admin:
-        bucket = next((item for item in _discover_table_buckets() if item["table_bucket_arn"] == table_bucket_arn), None)
-        if not bucket or namespace not in _discover_namespaces(table_bucket_arn):
-            raise HTTPException(403, "The selected S3 Tables bucket or namespace is not visible to this administrator")
+        bucket = _require_bucket_access(user, table_bucket_arn)
+        try:
+            s3tables.get_namespace(tableBucketARN=table_bucket_arn, namespace=namespace)
+        except ClientError as error:
+            raise HTTPException(
+                403, "The selected S3 Tables bucket or namespace is not visible to this administrator"
+            ) from error
         return BucketScope(table_bucket_arn=table_bucket_arn, namespace=namespace, label=bucket["label"])
     scope = next((item for item in user.buckets if item.table_bucket_arn == table_bucket_arn and item.namespace == namespace), None)
     if not scope:
@@ -192,14 +196,19 @@ def _discover_namespaces(table_bucket_arn: str) -> list[str]:
 
 def _require_bucket_access(user: PilotUser, table_bucket_arn: str) -> dict[str, str]:
     if user.is_admin:
-        bucket = next((item for item in _discover_table_buckets() if item["table_bucket_arn"] == table_bucket_arn), None)
-        if bucket:
-            return bucket
+        try:
+            bucket = s3tables.get_table_bucket(tableBucketARN=table_bucket_arn)
+        except ClientError as error:
+            raise HTTPException(403, "The selected S3 Tables bucket is not visible to this administrator") from error
+        return {
+            "table_bucket_arn": bucket.get("arn", table_bucket_arn),
+            "label": bucket.get("name", table_bucket_arn.rsplit("/", 1)[-1]),
+        }
     else:
         scope = next((item for item in user.buckets if item.table_bucket_arn == table_bucket_arn), None)
         if scope:
             return {"table_bucket_arn": scope.table_bucket_arn, "label": scope.label}
-    raise HTTPException(403, "The selected S3 Tables bucket is not assigned to this user")
+        raise HTTPException(403, "The selected S3 Tables bucket is not assigned to this user")
 
 
 def _canonical_table_name(value: str) -> str:

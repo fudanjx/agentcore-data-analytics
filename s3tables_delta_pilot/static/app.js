@@ -59,7 +59,7 @@ async function loadIdentityProfiles() {
   renderOutgoingIdentity();
 }
 
-async function loadBuckets(preferredBucketArn = null) {
+async function loadBuckets(preferredBucket = null) {
   const identity = await loadEffectiveIdentity();
   if (!identity) { clearDestination(); return; }
   const response = await apiFetch('/api/buckets'); const data = await response.json();
@@ -68,13 +68,18 @@ async function loadBuckets(preferredBucketArn = null) {
   state.userId = data.user_id;
   state.canViewHistory = Boolean(data.can_view_upload_history);
   state.canRollbackUploads = Boolean(data.can_rollback_uploads);
-  $('bucket').replaceChildren(...data.buckets.map(bucket => {
+  const preferredBucketArn = typeof preferredBucket === 'string' ? preferredBucket : preferredBucket?.table_bucket_arn;
+  const buckets = [...data.buckets];
+  if (preferredBucket && typeof preferredBucket === 'object' && !buckets.some(bucket => bucket.table_bucket_arn === preferredBucketArn)) {
+    buckets.push(preferredBucket);
+  }
+  $('bucket').replaceChildren(...buckets.map(bucket => {
     const option = document.createElement('option'); option.value = JSON.stringify(bucket);
     option.textContent = bucket.label; return option;
   }));
-  state.bucket = data.buckets.find(bucket => bucket.table_bucket_arn === preferredBucketArn) || data.buckets[0] || null;
+  state.bucket = buckets.find(bucket => bucket.table_bucket_arn === preferredBucketArn) || buckets[0] || null;
   $('bucket').value = state.bucket ? JSON.stringify(state.bucket) : '';
-  $('bucket').disabled = !data.buckets.length;
+  $('bucket').disabled = !buckets.length;
   $('history').hidden = !state.canViewHistory;
   renderAdminProvisioning();
   await loadNamespaces();
@@ -87,10 +92,12 @@ async function loadNamespaces(preferredNamespace = null) {
   const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
   const response = await apiFetch(`/api/namespaces?${query}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load namespaces');
-  $('namespace').replaceChildren(...data.namespaces.map(namespace => {
+  const namespaces = [...data.namespaces];
+  if (preferredNamespace && !namespaces.includes(preferredNamespace)) namespaces.push(preferredNamespace);
+  $('namespace').replaceChildren(...namespaces.map(namespace => {
     const option = document.createElement('option'); option.value = namespace; option.textContent = namespace; return option;
   }));
-  state.namespace = data.namespaces.includes(preferredNamespace) ? preferredNamespace : data.namespaces[0] || null;
+  state.namespace = namespaces.includes(preferredNamespace) ? preferredNamespace : namespaces[0] || null;
   $('namespace').value = state.namespace || '';
   $('namespace').disabled = !state.namespace;
   $('scope').textContent = state.namespace ? `Target: ${state.bucket.label} / ${state.namespace}` : `Create a namespace in ${state.bucket.label} to begin.`;
@@ -106,7 +113,7 @@ async function createTableBucket() {
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Bucket creation failed.'; return; }
     $('new-bucket').value = '';
-    await loadBuckets(result.table_bucket_arn);
+    await loadBuckets(result);
     $('admin-provisioning').open = true;
     status.className = 'operation-status complete'; status.textContent = `Created ${result.label}. Create a namespace in it next.`;
     $('new-namespace').focus();
