@@ -26,7 +26,7 @@ from claude_agent_sdk.types import (
     UserMessage,
 )
 
-from app import code_interpreter, gateway_proxy, memory
+from app import code_interpreter, gateway_proxy, memory, skills_sync
 
 logger = logging.getLogger(__name__)
 
@@ -148,7 +148,9 @@ def _build_agent_options(system_prompt: str, mcp_servers: dict) -> ClaudeAgentOp
             "mcp__code_interpreter__execute_code",
             "mcp__code_interpreter__execute_command",
         ],
-        skills="all",
+        # [] is the Claude SDK's explicit "skills off" value. None would still
+        # allow the CLI's own defaults to expose skills.
+        skills="all" if skills_sync.skills_enabled() else [],
         permission_mode="bypassPermissions",
         max_turns=50,
         max_buffer_size=MAX_SDK_BUFFER_BYTES,

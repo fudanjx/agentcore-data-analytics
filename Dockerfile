@@ -27,10 +27,8 @@ COPY --from=builder /install /usr/local
 # Copy application code
 COPY app/ ./app/
 
-# Claude Agent SDK discovers project skills from /app/.claude/skills.
-# COPY .claude/skills/ /app/.claude/skills/
-
-# Skills directory (populated at container startup from S3)
+# Claude Agent SDK discovers project skills from /app/.claude/skills. The image
+# intentionally contains no default skills; an optional S3 sync populates it.
 RUN useradd --create-home --uid 1000 appuser \
     && mkdir -p /app/.claude/skills \
     && chown -R 1000:1000 /app/.claude

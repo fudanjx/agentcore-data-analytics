@@ -42,6 +42,10 @@ GATEWAY_CONFIGS = load_gateway_configs()
 GATEWAY_ARNS = [config.arn for config in GATEWAY_CONFIGS.values()]
 AGENTCORE_GATEWAYS_JSON = serialize_gateway_configs(GATEWAY_CONFIGS)
 
+# Optional Claude Agent Skills. An empty bucket keeps skills disabled.
+SKILLS_BUCKET = os.environ.get("SKILLS_BUCKET", "").strip()
+SKILLS_PREFIX = os.environ.get("SKILLS_PREFIX", "").strip().strip("/")
+
 # Managed Code Interpreter exposed to the Claude Agent SDK as an MCP tool.
 CODE_INTERPRETER_ID = os.environ.get(
     "CODE_INTERPRETER_ID",
@@ -160,6 +164,33 @@ def ensure_runtime_role() -> str:
         ],
     }
 
+    if not GATEWAY_ARNS:
+        inline["Statement"] = [
+            statement
+            for statement in inline["Statement"]
+            if statement.get("Action") != ["bedrock-agentcore:InvokeGateway"]
+        ]
+
+    if SKILLS_BUCKET:
+        object_prefix = f"{SKILLS_PREFIX}/" if SKILLS_PREFIX else ""
+        inline["Statement"].extend(
+            [
+                {
+                    "Effect": "Allow",
+                    "Action": ["s3:ListBucket"],
+                    "Resource": f"arn:aws:s3:::{SKILLS_BUCKET}",
+                    "Condition": {
+                        "StringLike": {"s3:prefix": [f"{object_prefix}*"]}
+                    },
+                },
+                {
+                    "Effect": "Allow",
+                    "Action": ["s3:GetObject"],
+                    "Resource": f"arn:aws:s3:::{SKILLS_BUCKET}/{object_prefix}*",
+                },
+            ]
+        )
+
     try:
         arn = iam.get_role(RoleName=RUNTIME_ROLE_NAME)["Role"]["Arn"]
         print(f"  Role exists: {arn}")
@@ -191,6 +222,8 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
     env_vars = {
         "AWS_DEFAULT_REGION": REGION,
         "AGENTCORE_GATEWAYS_JSON": AGENTCORE_GATEWAYS_JSON,
+        "SKILLS_BUCKET": SKILLS_BUCKET,
+        "SKILLS_PREFIX": SKILLS_PREFIX,
         "CODE_INTERPRETER_ID": CODE_INTERPRETER_ID,
         "CODE_INTERPRETER_REGION": REGION,
         "MEMORY_ID": MEMORY_ID,
@@ -309,9 +342,9 @@ def main():
     print("\nDone.")
     print(f"\nAgentCore Runtime ID : {runtime_id}")
     print(f"AgentCore Endpoint   : {endpoint_arn}")
-    print(f"\nAccess via EKS proxy (VPC-internal, no auth required):")
-    print(f"  DIFY (in-cluster) :    http://agentcore-proxy.agentcore.svc.cluster.local/poc/v1")
-    print(f"  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/poc/v1")
+    print("\nAccess via EKS proxy (VPC-internal, no auth required):")
+    print("  DIFY (in-cluster) :    http://agentcore-proxy.agentcore.svc.cluster.local/poc/v1")
+    print("  Open WebUI (via NLB):  http://k8s-agentcor-agentcor-a9dbd8956e-c923dee5a7cceccb.elb.ap-southeast-1.amazonaws.com/poc/v1")
 
 
 if __name__ == "__main__":

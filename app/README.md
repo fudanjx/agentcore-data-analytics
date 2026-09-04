@@ -3,8 +3,8 @@
 This folder contains the container application deployed as an Amazon Bedrock AgentCore Runtime. It runs a Claude Agent SDK data analyst, streams its response as OpenAI-compatible server-sent events (SSE), and connects the agent to:
 
 - AgentCore Memory for conversation history and long-term user context;
-- project skills stored in `.claude/skills` and optionally updated from S3;
-- remote AgentCore Gateway MCP servers for database and forecasting tools; and
+- optional project skills synchronized from S3;
+- optional remote AgentCore Gateway MCP servers; and
 - AgentCore Code Interpreter for Python, shell commands, uploaded-file analysis, and artifact generation.
 
 The wider platform, proxy, data services, and deployment resources are documented in the [root README](../README.md) and [deployment guide](../docs/DEPLOY.md).
@@ -28,7 +28,7 @@ app/agent.py
         |                                      AgentCore Memory
         |
         +-- load project instructions --------> /app/.claude/skills
-        |                                      bundled files + S3 startup sync
+        |                                      optional S3 startup sync
         |
         +-- call remote MCP tools ------------> localhost:9000
         |                                      app/gateway_proxy.py
@@ -49,7 +49,7 @@ app/agent.py
 | `main.py` | FastAPI lifecycle, health endpoints, request parsing, identity extraction, and SSE formatting |
 | `agent.py` | Claude Agent SDK configuration and agent loop; combines prompts, memory, skills, MCP, and Code Interpreter |
 | `memory.py` | Retrieves current-session events and long-term records, then saves completed turns |
-| `skills_sync.py` | Downloads Markdown skill files from S3 into the Claude project skills directory at startup |
+| `skills_sync.py` | Downloads complete skill packages from an optional S3 location into Claude's project skills directory |
 | `gateway_config.py` | Loads and validates Gateway slugs, labels, HTTPS URLs, ARNs, and regions |
 | `gateway_proxy.py` | Local HTTP proxy that signs outbound AgentCore Gateway requests with AWS SigV4 |
 | `code_interpreter.py` | Starts/stops managed interpreter sessions and exposes them to Claude as MCP tools |
@@ -57,7 +57,7 @@ app/agent.py
 ## Request lifecycle
 
 1. AgentCore starts the ARM64 container with `uvicorn app.main:app` on port `8080`.
-2. The FastAPI lifespan hook syncs skills from S3 and starts the local Gateway proxy on `127.0.0.1:9000`.
+2. The FastAPI lifespan hook syncs skills and starts the local Gateway proxy only when those integrations are configured.
 3. AgentCore checks `GET /ping` and forwards invocation bodies to `POST /invocations`.
 4. `main.py` accepts either an OpenAI-style `messages` array or a simple `prompt`, `input`, or `inputText` field.
 5. It obtains the conversation identity from AgentCore headers, with request-body fallbacks, and pads session IDs shorter than 33 characters.
@@ -164,14 +164,11 @@ Claude Agent SDK project skills live at:
 /app/.claude/skills/<skill-name>/SKILL.md
 ```
 
-The runtime sets `cwd="/app"`, `setting_sources=["project"]`, and `skills="all"`, so Claude discovers and selects these skills during the agent loop.
+When `SKILLS_BUCKET` is configured, the runtime sets `cwd="/app"`, `setting_sources=["project"]`, and `skills="all"`, so Claude discovers and selects synchronized skills during the agent loop. Without a bucket, it passes `skills=[]`, which explicitly prevents the Claude CLI from exposing any default skills.
 
-Skills reach the container in two ways:
+At container startup, `skills_sync.sync_skills()` downloads every object beneath the configured S3 prefix into `/app/.claude/skills/`, preserving the package hierarchy. This includes `SKILL.md`, references, scripts, and assets. Per-object and total download limits guard the sync, and unsafe paths are rejected.
 
-1. The Docker image copies the repository's `.claude/skills/` directory into `/app/.claude/skills/`.
-2. At every container start, `skills_sync.sync_skills()` overlays Markdown files from `s3://ah-data-analytics/skills/`, preserving directories below the prefix.
-
-S3 sync failure is non-fatal; the image-bundled skills remain available. The current sync downloads files ending in `.md` only.
+An empty or omitted `SKILLS_BUCKET` disables the integration. An empty `SKILLS_PREFIX` means skill directories are stored at the bucket root. S3 sync failures are logged and remain non-fatal.
 
 ### Adding a skill
 
@@ -185,14 +182,10 @@ Create a normal skill directory in the repository:
       definitions.md
 ```
 
-Then choose one update path:
+Upload the complete package to the configured bucket and prefix:
 
 ```bash
-# Persistent image update
-bash infra/build_and_push.sh
-
-# Startup overlay without rebuilding the image
-aws s3 sync .claude/skills/ s3://ah-data-analytics/skills/
+aws s3 sync .claude/skills/ s3://YOUR_SKILLS_BUCKET/YOUR_SKILLS_PREFIX/
 ```
 
 Restart or redeploy the Runtime after changing S3 content because sync runs only during container startup. The Runtime role requires `s3:ListBucket` on the bucket and `s3:GetObject` on the skills prefix.
@@ -221,12 +214,12 @@ Gateway configuration is supplied by `AGENTCORE_GATEWAYS_JSON`. Its shape is:
 }
 ```
 
-Configuration is validated at import time. Each slug must be safe for a URL path, the endpoint must be HTTPS, and the hostname, Gateway ID, region, partition, and ARN must agree. When the environment variable is absent, the project defaults in `gateway_config.py` are used.
+Configuration is validated at import time. Each slug must be safe for a URL path, the endpoint must be HTTPS, and the hostname, Gateway ID, region, partition, and ARN must agree. Empty, unset, or `{}` configuration exposes no Gateway tools and does not start the local proxy.
 
 ### Adding an MCP Gateway
 
 1. Deploy an AgentCore Gateway and at least one Gateway target that exposes MCP tools.
-2. Add its slug, display label, base URL, and ARN to `AGENTCORE_GATEWAYS_JSON`, or to `DEFAULT_GATEWAYS` for a checked-in default.
+2. Add its slug, display label, base URL, and ARN to `AGENTCORE_GATEWAYS_JSON`.
 3. Grant `bedrock-agentcore:InvokeGateway` on its ARN to the Runtime role.
 4. Redeploy the Runtime.
 
@@ -268,7 +261,11 @@ To expose another interpreter operation, add a decorated tool in `build_mcp_serv
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `MODEL_ARN` | Project inference profile ARN | Bedrock model or inference profile used by Claude Agent SDK |
-| `AGENTCORE_GATEWAYS_JSON` | `DEFAULT_GATEWAYS` | Validated remote MCP Gateway mapping |
+| `AGENTCORE_GATEWAYS_JSON` | Empty | Validated remote MCP Gateway mapping; empty, unset, or `{}` disables Gateway tools |
+| `SKILLS_BUCKET` | Empty | S3 bucket containing Claude Agent Skill packages; empty disables skills |
+| `SKILLS_PREFIX` | Empty | Optional S3 prefix; empty reads skill directories from the bucket root |
+| `SKILLS_MAX_OBJECT_BYTES` | `50000000` | Maximum size of one downloaded skill object |
+| `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined bytes downloaded during startup |
 | `MEMORY_ID` | Project Memory ID | AgentCore Memory resource |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory service region |
 | `MEMORY_MAX_SHORT_TERM_EVENTS` | `30` | Maximum current-session events loaded per request |
@@ -281,16 +278,16 @@ To expose another interpreter operation, add a decorated tool in `build_mcp_serv
 | `AWS_DEFAULT_REGION` | Set by deployment | Default AWS region |
 | `CLAUDE_CODE_USE_BEDROCK` | `1` | Makes the Claude SDK use Amazon Bedrock with IAM credentials |
 
-The S3 skills bucket, prefix, and local directory are currently constants in `skills_sync.py`.
+The local skill directory remains `/app/.claude/skills` because it is coupled to the Claude project discovery path for `cwd="/app"`.
 
 ## IAM and networking
 
 The Runtime role created by `infra/deploy.py` grants access to:
 
 - the Bedrock model/inference profile;
-- every configured AgentCore Gateway;
+- every configured AgentCore Gateway, when present;
 - the configured Code Interpreter;
-- the S3 skills bucket and prefix;
+- the S3 skills bucket and prefix, when configured;
 - the configured AgentCore Memory resource; and
 - CloudWatch Logs, ECR, and VPC network-interface operations.
 
@@ -338,4 +335,3 @@ The Docker image must be `linux/arm64`, listens on port `8080`, and runs as the 
 | Code Interpreter tool fails | A tool error is returned to the agent |
 | Agent stream fails | An SSE error message is emitted, followed by `[DONE]` |
 | Code Interpreter stop fails | Warning is logged; it does not replace the agent response |
-

@@ -12,7 +12,6 @@ Slugs, URLs, display labels, and IAM ARNs come from AGENTCORE_GATEWAYS_JSON.
 The proxy loops in a background thread started by main.py's lifespan.
 """
 
-import asyncio
 import logging
 import threading
 from typing import Optional
@@ -111,8 +110,16 @@ def _run_server():
     uvicorn.run(app, host="127.0.0.1", port=LISTEN_PORT, log_level="warning")
 
 
-def start_background() -> threading.Thread:
-    """Start the proxy in a daemon thread. Returns the thread handle."""
+def gateways_enabled() -> bool:
+    """Return whether any AgentCore Gateways are configured."""
+    return bool(GATEWAY_CONFIGS)
+
+
+def start_background() -> threading.Thread | None:
+    """Start the proxy when Gateways are configured."""
+    if not gateways_enabled():
+        logger.info("Gateway proxy disabled: AGENTCORE_GATEWAYS_JSON is empty")
+        return None
     t = threading.Thread(target=_run_server, daemon=True, name="gateway-proxy")
     t.start()
     logger.info("Gateway SigV4 proxy listening on 127.0.0.1:%d", LISTEN_PORT)

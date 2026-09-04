@@ -1,6 +1,8 @@
 import asyncio
+import importlib
 import sys
 import types
+from pathlib import Path
 
 
 class FakeClaudeAgentOptions:
@@ -98,6 +100,81 @@ def test_latest_user_text_excludes_flattened_history():
     ) == "current question"
 
 
+def test_agent_options_enable_only_configured_skills(monkeypatch):
+    monkeypatch.setattr(agent.skills_sync, "BUCKET", "")
+    assert agent._build_agent_options("prompt", {}).skills == []
+
+    monkeypatch.setattr(agent.skills_sync, "BUCKET", "skill-bucket")
+    assert agent._build_agent_options("prompt", {}).skills == "all"
+
+
+def test_skills_are_disabled_without_a_bucket(monkeypatch):
+    monkeypatch.delenv("SKILLS_BUCKET", raising=False)
+    monkeypatch.delenv("SKILLS_PREFIX", raising=False)
+    module = importlib.reload(agent.skills_sync)
+
+    assert module.BUCKET == ""
+    assert module.PREFIX == ""
+    assert module.skills_enabled() is False
+    assert module.sync_skills() == []
+
+
+def test_skill_sync_downloads_complete_safe_packages(tmp_path, monkeypatch):
+    module = agent.skills_sync
+    objects = {
+        "skills/example/SKILL.md": b"---\nname: example\ndescription: Test\n---\n",
+        "skills/example/references/schema.json": b'{"field":"value"}',
+        "skills/example/scripts/process.py": b"print('ok')",
+        "skills/example/assets/template.bin": b"\x00\x01\x02",
+        "skills/example/assets/oversized.bin": b"x" * 101,
+        "skills/../escape.txt": b"unsafe",
+    }
+
+    class FakeS3:
+        def list_objects_v2(self, **request):
+            assert request["Bucket"] == "bucket"
+            if "ContinuationToken" not in request:
+                keys = list(objects)[:3]
+                return {
+                    "Contents": [
+                        {"Key": key, "Size": len(objects[key])} for key in keys
+                    ],
+                    "IsTruncated": True,
+                    "NextContinuationToken": "page-2",
+                }
+            assert request["ContinuationToken"] == "page-2"
+            keys = list(objects)[3:]
+            return {
+                "Contents": [
+                    {"Key": key, "Size": len(objects[key])} for key in keys
+                ],
+                "IsTruncated": False,
+            }
+
+        def download_file(self, _bucket, key, destination):
+            Path(destination).write_bytes(objects[key])
+
+    skill_root = tmp_path / "skills"
+    monkeypatch.setattr(module, "BUCKET", "bucket")
+    monkeypatch.setattr(module, "PREFIX", "skills/")
+    monkeypatch.setattr(module, "LOCAL_DIR", skill_root)
+    monkeypatch.setattr(module, "MAX_OBJECT_BYTES", 100)
+    monkeypatch.setattr(module, "MAX_SYNC_BYTES", 10_000)
+    monkeypatch.setattr(module.boto3, "client", lambda *_args, **_kwargs: FakeS3())
+
+    downloaded = module.sync_skills()
+
+    assert len(downloaded) == 4
+    assert (skill_root / "example" / "SKILL.md").is_file()
+    assert (skill_root / "example" / "references" / "schema.json").is_file()
+    assert (skill_root / "example" / "scripts" / "process.py").is_file()
+    assert (skill_root / "example" / "assets" / "template.bin").read_bytes() == (
+        b"\x00\x01\x02"
+    )
+    assert not (skill_root / "example" / "assets" / "oversized.bin").exists()
+    assert not (tmp_path / "escape.txt").exists()
+
+
 def test_document_input_reaches_agent_unchanged(monkeypatch):
     document_input = (
         "<DOCUMENT_INPUT>"
@@ -171,6 +248,7 @@ def test_document_input_reaches_agent_unchanged(monkeypatch):
         "session_id": "code-interpreter-session-id"
     }
     assert "mcp__code_interpreter__execute_code" in captured["options"].allowed_tools
+    assert captured["options"].skills == []
     assert stopped_sessions == ["code-interpreter-session-id"]
     assert "downloaded by application" not in captured["options"].system_prompt
     assert not hasattr(agent, "_document_payload_from_s3_uris")
