@@ -42,6 +42,7 @@ from .ingest_contract import (
 )
 from .pilot import NAMESPACE, QC_PREFIX, REGION, ROLE_NAME, SOURCE_BUCKET, SOURCE_PREFIX, TABLE_BUCKET_ARN
 from .sanitization import encryption_key, sanitise_table, sanitised_schema
+from . import skill_builder
 
 WEB_JOB_NAME = "ah-soc-delta-pilot-web-ingest"
 WEB_SCRIPT_KEY = f"{SOURCE_PREFIX}/_pilot_assets/generic_glue_job.py"
@@ -267,6 +268,23 @@ class CreateTableBucketRequest(BaseModel):
 class CreateNamespaceRequest(BaseModel):
     table_bucket_arn: str = Field(min_length=1)
     namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+
+
+class SkillBuildRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    instruction: str = Field(min_length=1, max_length=20_000)
+
+    @field_validator("instruction")
+    @classmethod
+    def instruction_must_not_be_blank(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Skill-building instructions cannot be blank")
+        return value
+
+
+class SkillPublishRequest(BaseModel):
+    content: str = Field(min_length=1)
 
 
 def _admin_only(user: PilotUser) -> None:
@@ -1155,6 +1173,41 @@ def create_namespace(payload: CreateNamespaceRequest, user: PilotUser = Depends(
         "table_bucket_arn": result.get("tableBucketARN", payload.table_bucket_arn),
         "namespace": namespace[0],
     }
+
+
+@app.post("/api/skills/build")
+def build_bucket_skill(
+    payload: SkillBuildRequest,
+    user: PilotUser = Depends(_current_user),
+):
+    """Build and normalize an editable skill draft for an authorized bucket."""
+    _require_bucket_access(user, payload.table_bucket_arn)
+    try:
+        return skill_builder.build_skill_draft(
+            payload.instruction,
+            user.user_id,
+            payload.table_bucket_arn,
+        )
+    except skill_builder.SkillBuildError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post("/api/skills/publish")
+def publish_bucket_skill(
+    payload: SkillPublishRequest,
+    table_bucket_arn: str,
+    user: PilotUser = Depends(_current_user),
+):
+    """Publish user-confirmed Markdown beneath the authorized bucket's skill name."""
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        return skill_builder.publish_skill(
+            payload.content,
+            user.user_id,
+            table_bucket_arn,
+        )
+    except skill_builder.SkillBuildError as error:
+        raise HTTPException(error.status_code, str(error)) from error
 
 
 @app.get("/api/dev/identity-profiles")

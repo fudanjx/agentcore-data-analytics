@@ -18,6 +18,14 @@ section, details { background: white; border: 1px solid #e0e7f0; border-radius: 
 .provisioning-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 18px; margin-top: 12px; }
 .provisioning-grid > div { min-width: 0; }
 .provisioning-grid button { margin-top: 10px; }
+.skill-builder { padding: 14px; border-color: #8fb6cb; background: #f7fbfe; }
+.skill-builder textarea { box-sizing: border-box; width: 100%; margin-top: 8px; resize: vertical; border: 1px solid #b9c9dc; border-radius: 7px; padding: 10px; color: #14213d; background: #fff; font: inherit; }
+.skill-builder .skill-content { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; line-height: 1.45; }
+.skill-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
+.skill-locations { display: grid; gap: 8px; margin: 18px 0; }
+.skill-locations div { min-width: 0; padding: 10px; background: #edf5fa; border-radius: 7px; }
+.skill-locations dt { color: #526176; font-size: .8rem; font-weight: 700; }
+.skill-locations dd { margin: 4px 0 0; overflow-wrap: anywhere; }
 .tables { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px; margin-bottom: 14px; }
 .table { text-align: left; border: 1px solid #b9c9dc; background: #fff; color: #14213d; border-radius: 7px; padding: 12px; }
 .table-select { display: block; width: 100%; padding: 0; background: transparent; color: inherit; text-align: left; }

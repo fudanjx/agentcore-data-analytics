@@ -53,6 +53,29 @@
       <label id="new-table-wrap" hidden>New table name <input id="new-table" pattern="[a-z][a-z0-9_\-]*" placeholder="e.g. outpatient_jul"></label>
       <p class="hint">New table names: start with a lowercase letter; valid characters are a-z, 0-9, and underscores (_). Hyphens are converted to underscores.</p>
       <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
+      <details id="skill-builder" class="skill-builder" hidden>
+        <summary><strong>Build a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
+        <p class="hint">Describe the skill to build. The generated SKILL.md will be downloaded from Dify and its frontmatter name will be locked to the selected bucket name.</p>
+        <label for="skill-instruction">Skill-building instructions</label>
+        <textarea id="skill-instruction" maxlength="20000" rows="6" placeholder="Describe the analyses, tables, business definitions, and operating rules this skill should contain."></textarea>
+        <div class="skill-actions">
+          <button id="build-skill" type="button" disabled>Build skill</button>
+          <p id="skill-build-status" class="operation-status" aria-live="polite"></p>
+        </div>
+        <div id="skill-review" hidden>
+          <dl class="skill-locations">
+            <div><dt>Generated source</dt><dd><code id="skill-source-uri"></code></dd></div>
+            <div><dt>Publish destination</dt><dd><code id="skill-destination-uri"></code></dd></div>
+          </dl>
+          <label for="skill-content">Review and edit SKILL.md</label>
+          <textarea id="skill-content" class="skill-content" rows="24" spellcheck="false"></textarea>
+          <p class="hint">The server will enforce <code>name: &lt;s3-table-bucket-name&gt;</code> again when publishing.</p>
+          <div class="skill-actions">
+            <button id="publish-skill" type="button" disabled>Confirm and publish SKILL.md</button>
+            <p id="skill-publish-status" class="operation-status" aria-live="polite"></p>
+          </div>
+        </div>
+      </details>
     </section>
 
     <section>

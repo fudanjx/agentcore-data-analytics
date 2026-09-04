@@ -20,6 +20,48 @@ Start it from the repository root:
 
 Open `http://127.0.0.1:8090`.
 
+## Bucket skill builder
+
+After selecting an authorized S3 Tables bucket, an administrator or assigned
+editor can send instructions to the configured Dify skill-building agent. The
+pilot uses Dify's blocking chat-message mode, extracts the returned
+`s3://.../SKILL.md` URI, downloads the generated Markdown, and replaces its
+YAML frontmatter `name` with the selected S3 Tables bucket name. The user can
+review and edit the complete file before confirming publication.
+
+Configure the integration through environment variables:
+
+```dotenv
+SKILL_BUILD_DIFY_URL=https://dify-eks.bot-alex.com/v1/chat-messages
+SKILL_BUILD_DIFY_API_KEY=<secret>
+SKILL_BUILD_DESTINATION_BUCKET=agentcore-harness-dev
+SKILL_BUILD_DESTINATION_PREFIX=skills/
+SKILL_BUILD_MAX_BYTES=200000
+SKILL_BUILD_TIMEOUT_SECONDS=300
+```
+
+The final object uses the Agent Skills directory contract. For a table bucket
+named `ah-soc-delta-pilot`, the destination and normalized frontmatter are:
+
+```text
+s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/SKILL.md
+```
+
+```yaml
+---
+name: ah-soc-delta-pilot
+description: ...
+---
+```
+
+The backend enforces the name again when the edited document is published.
+The browser never receives the Dify API key, and all bucket authorization is
+rechecked on both build and publish requests. Give the pilot service narrowly
+scoped `s3:GetObject` access to Dify's generated `SKILL.md` objects and
+`s3:PutObject` access to the configured destination prefix. Current agent
+runtimes synchronize skills at startup, so restart or resynchronize them after
+publishing a new skill.
+
 The UI lists the S3 Tables buckets and namespaces assigned to the current user,
 then lists tables only in the selected scope. It supports creating a new table
 from the first selected file schema and appending one selected table per

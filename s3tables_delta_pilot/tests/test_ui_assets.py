@@ -18,8 +18,11 @@ from s3tables_delta_pilot.webapp import (
     CreateTableBucketRequest,
     IngestionRequest,
     RollbackRequest,
+    SkillBuildRequest,
+    SkillPublishRequest,
     UPLOAD_HISTORY_TABLE,
     _apply_create_type_overrides,
+    build_bucket_skill,
     _create_deduplication_candidates,
     _create_type_selection_samples,
     _composite_key_metrics,
@@ -38,6 +41,7 @@ from s3tables_delta_pilot.webapp import (
     _sign_key_analysis,
     _unsafe_cast_issues,
     _preflight,
+    publish_bucket_skill,
     _raw_key_impact_metrics,
     _validate_create_deduplication_columns,
 )
@@ -109,6 +113,68 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("await loadBuckets(result);", javascript)
         self.assertIn("buckets.push(preferredBucket)", javascript)
         self.assertIn("namespaces.push(preferredNamespace)", javascript)
+
+    def test_bucket_skill_builder_ui_supports_edit_and_confirm(self):
+        html = (STATIC / "index.html").read_text()
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn('id="skill-instruction"', html)
+        self.assertIn('id="skill-content"', html)
+        self.assertIn('id="publish-skill"', html)
+        self.assertIn("'/api/skills/build'", javascript)
+        self.assertIn("/api/skills/publish?", javascript)
+        self.assertIn("clearSkillDraft(true)", javascript)
+        self.assertIn("Confirm and publish SKILL.md", javascript)
+        self.assertNotIn("SKILL_BUILD_DIFY_API_KEY", html + javascript)
+
+    def test_editor_can_build_and_publish_only_for_an_assigned_bucket(self):
+        with patch.dict("os.environ", {}, clear=True):
+            editor = _current_user("local-editor")
+        draft = {
+            "source_uri": "s3://ah-dify/run/SKILL.md",
+            "destination_uri": "s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/SKILL.md",
+            "skill_name": "ah-soc-delta-pilot",
+            "content": "---\nname: ah-soc-delta-pilot\ndescription: Test\n---\n",
+        }
+        with patch(
+            "s3tables_delta_pilot.webapp.skill_builder.build_skill_draft",
+            return_value=draft,
+        ) as build:
+            result = build_bucket_skill(
+                SkillBuildRequest(
+                    table_bucket_arn=TABLE_BUCKET_ARN,
+                    instruction="Build an admissions skill",
+                ),
+                editor,
+            )
+        self.assertEqual(draft, result)
+        build.assert_called_once_with(
+            "Build an admissions skill", "local-editor", TABLE_BUCKET_ARN
+        )
+
+        published = {**draft, "etag": "etag", "version_id": None}
+        with patch(
+            "s3tables_delta_pilot.webapp.skill_builder.publish_skill",
+            return_value=published,
+        ) as publish:
+            result = publish_bucket_skill(
+                SkillPublishRequest(content=draft["content"]),
+                TABLE_BUCKET_ARN,
+                editor,
+            )
+        self.assertEqual(published, result)
+        publish.assert_called_once_with(
+            draft["content"], "local-editor", TABLE_BUCKET_ARN
+        )
+
+        with self.assertRaises(Exception) as denied:
+            build_bucket_skill(
+                SkillBuildRequest(
+                    table_bucket_arn="arn:aws:s3tables:ap-southeast-1:123456789012:bucket/other-bucket",
+                    instruction="Build an unauthorized skill",
+                ),
+                editor,
+            )
+        self.assertEqual(403, denied.exception.status_code)
 
     def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
         with patch.dict("os.environ", {}, clear=True):

@@ -1,4 +1,4 @@
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [] };
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], skillDraftBucketArn: null };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
@@ -20,6 +20,77 @@ function apiFetch(url, options = {}) {
   if (state.emulatedUserId) headers.set('X-Pilot-User-Id', state.emulatedUserId);
   return fetch(url, { ...options, headers });
 }
+function updateSkillControls() {
+  const hasBucket = Boolean(state.bucket);
+  const hasInstruction = $('skill-instruction').value.trim().length > 0;
+  const draftMatchesBucket = hasBucket && state.skillDraftBucketArn === state.bucket.table_bucket_arn;
+  $('skill-builder').hidden = !hasBucket;
+  $('build-skill').disabled = !hasBucket || !hasInstruction;
+  $('publish-skill').disabled = !draftMatchesBucket || !$('skill-content').value.trim();
+}
+function clearSkillDraft(clearInstruction = false) {
+  state.skillDraftBucketArn = null;
+  $('skill-review').hidden = true;
+  $('skill-source-uri').textContent = '';
+  $('skill-destination-uri').textContent = '';
+  $('skill-content').value = '';
+  $('skill-build-status').textContent = '';
+  $('skill-build-status').className = 'operation-status';
+  $('skill-publish-status').textContent = '';
+  $('skill-publish-status').className = 'operation-status';
+  if (clearInstruction) $('skill-instruction').value = '';
+  updateSkillControls();
+}
+async function buildSkill() {
+  if (!state.bucket) return;
+  const bucketArn = state.bucket.table_bucket_arn;
+  const instruction = $('skill-instruction').value.trim();
+  const button = $('build-skill'); const status = $('skill-build-status');
+  button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Building skill…';
+  status.className = 'operation-status'; status.textContent = 'Waiting for the Dify skill-building agent…';
+  try {
+    const response = await apiFetch('/api/skills/build', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ table_bucket_arn: bucketArn, instruction }),
+    });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill generation failed.'; return; }
+    if (!state.bucket || state.bucket.table_bucket_arn !== bucketArn) return;
+    state.skillDraftBucketArn = bucketArn;
+    $('skill-source-uri').textContent = result.source_uri;
+    $('skill-destination-uri').textContent = result.destination_uri;
+    $('skill-content').value = result.content;
+    $('skill-review').hidden = false;
+    status.className = 'operation-status complete'; status.textContent = `Generated ${result.skill_name}/SKILL.md. Review it before publishing.`;
+    updateSkillControls();
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Skill generation failed: ${error.message || 'network request failed'}`;
+  } finally {
+    button.classList.remove('is-busy'); button.textContent = 'Build skill'; updateSkillControls();
+  }
+}
+async function publishSkill() {
+  if (!state.bucket || state.skillDraftBucketArn !== state.bucket.table_bucket_arn) return;
+  const button = $('publish-skill'); const status = $('skill-publish-status');
+  const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
+  button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Publishing SKILL.md…';
+  status.className = 'operation-status'; status.textContent = 'Publishing the confirmed skill to S3…';
+  try {
+    const response = await apiFetch(`/api/skills/publish?${query}`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content: $('skill-content').value }),
+    });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill publication failed.'; return; }
+    $('skill-content').value = result.content;
+    $('skill-destination-uri').textContent = result.destination_uri;
+    status.className = 'operation-status complete'; status.textContent = `Published ${result.destination_uri}`;
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Skill publication failed: ${error.message || 'network request failed'}`;
+  } finally {
+    button.classList.remove('is-busy'); button.textContent = 'Confirm and publish SKILL.md'; updateSkillControls();
+  }
+}
 function renderOutgoingIdentity() { $('outgoing-identity').textContent = JSON.stringify(identityRequestPayload(), null, 2); }
 function renderAdminProvisioning() {
   $('admin-provisioning').hidden = !state.isAdmin;
@@ -33,7 +104,7 @@ function clearDestination() {
   state.canViewHistory = false; state.canRollbackUploads = false;
   $('bucket').replaceChildren(); $('namespace').replaceChildren(); $('namespace').disabled = true; $('tables').replaceChildren(); $('history').hidden = true;
   $('admin-provisioning').hidden = true;
-  clearPreflight(); valid();
+  clearPreflight(); clearSkillDraft(true); valid();
 }
 async function loadEffectiveIdentity() {
   renderOutgoingIdentity();
@@ -60,6 +131,7 @@ async function loadIdentityProfiles() {
 }
 
 async function loadBuckets(preferredBucket = null) {
+  const previousBucketArn = state.bucket?.table_bucket_arn || null;
   const identity = await loadEffectiveIdentity();
   if (!identity) { clearDestination(); return; }
   const response = await apiFetch('/api/buckets'); const data = await response.json();
@@ -81,6 +153,8 @@ async function loadBuckets(preferredBucket = null) {
   $('bucket').value = state.bucket ? JSON.stringify(state.bucket) : '';
   $('bucket').disabled = !buckets.length;
   $('history').hidden = !state.canViewHistory;
+  if (previousBucketArn !== state.bucket?.table_bucket_arn) clearSkillDraft(true);
+  else updateSkillControls();
   renderAdminProvisioning();
   await loadNamespaces();
 }
@@ -457,12 +531,17 @@ $('new-bucket').oninput = renderAdminProvisioning;
 $('new-namespace').oninput = renderAdminProvisioning;
 $('create-bucket').onclick = createTableBucket;
 $('create-namespace').onclick = createSelectedNamespace;
+$('build-skill').onclick = buildSkill;
+$('publish-skill').onclick = publishSkill;
+$('skill-instruction').oninput = () => clearSkillDraft(false);
+$('skill-content').oninput = updateSkillControls;
 $('emulated-user').onchange = async () => {
+  clearSkillDraft(true);
   state.emulatedUserId = $('emulated-user').value || null;
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;
   await loadBuckets();
 };
-$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); state.namespace = null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadNamespaces(); };
+$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); clearSkillDraft(true); state.namespace = null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadNamespaces(); };
 $('namespace').onchange = async () => { clearPreflight(); state.namespace = $('namespace').value || null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadTables(); };
 $('create').onchange = () => { clearPreflight(); state.mode = $('create').checked ? 'create' : 'append'; if (state.mode === 'create') { state.table = null; state.tableManaged = true; } $('new-table-wrap').hidden = state.mode !== 'create'; selectTable(); valid(); loadHistory(); };
 $('new-table').oninput = () => { clearPreflight(); valid(); };
