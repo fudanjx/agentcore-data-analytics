@@ -7,10 +7,12 @@ import csv
 import hashlib
 import hmac
 import json
+import logging
 import os
 import random
 import shutil
 import tempfile
+import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -26,8 +28,8 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
@@ -43,6 +45,8 @@ from .ingest_contract import (
 from .pilot import NAMESPACE, QC_PREFIX, REGION, ROLE_NAME, SOURCE_BUCKET, SOURCE_PREFIX, TABLE_BUCKET_ARN
 from .sanitization import encryption_key, sanitise_table, sanitised_schema
 from . import skill_builder
+from .observability import configure_logging, request_id_var, safe_error, user_id_var
+from .table_lock import S3TableLockManager
 
 WEB_JOB_NAME = "ah-soc-delta-pilot-web-ingest"
 WEB_SCRIPT_KEY = f"{SOURCE_PREFIX}/_pilot_assets/generic_glue_job.py"
@@ -53,17 +57,66 @@ UPLOAD_HISTORY_TABLE = "uploader_upload_history"
 SNAPSHOT_RETENTION = {"minSnapshotsToKeep": 12, "maxSnapshotAgeHours": 365 * 24}
 UPLOAD_ARCHIVE_RETENTION_DAYS = 30
 UPLOAD_ARCHIVE_LIFECYCLE_RULE_ID = "agentcore-s3tables-upload-archive-30-days"
+TABLE_LOCK_PREFIX = f"{SOURCE_PREFIX}/web_ingest/table_locks"
+PILOT_GLUE_MAX_CONCURRENT_RUNS = int(os.environ.get("PILOT_GLUE_MAX_CONCURRENT_RUNS", "5"))
+PILOT_LOCAL_PROCESSING_CONCURRENCY = int(os.environ.get("PILOT_LOCAL_PROCESSING_CONCURRENCY", "2"))
 ROOT = Path(__file__).parent
 s3 = boto3.client("s3", region_name=REGION)
 s3tables = boto3.client("s3tables", region_name=REGION)
 glue = boto3.client("glue", region_name=REGION)
 iam = boto3.client("iam")
 app = FastAPI(title="AH S3 Tables Pilot", docs_url=None, redoc_url=None)
+logger = configure_logging()
+table_locks = S3TableLockManager(s3, SOURCE_BUCKET, TABLE_LOCK_PREFIX)
 SUPPORTED_UPLOAD_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 MIN_APPEND_SCHEMA_MATCH_PERCENT = 50.0
 SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "DATE", "TIMESTAMP", "BOOLEAN")
 IDENTITY_EMULATION_HEADER = "X-Pilot-User-Id"
 LOCAL_TEST_USER_IDS = ("local-admin", "local-editor", "local-unassigned")
+
+
+@app.middleware("http")
+async def request_logging(request: Request, call_next):
+    """Emit one safe, correlated record per request without inspecting bodies."""
+    request_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex
+    user_id = request.headers.get(IDENTITY_EMULATION_HEADER)
+    request_token = request_id_var.set(request_id)
+    user_token = user_id_var.set(user_id)
+    started = time.perf_counter()
+    try:
+        response = await call_next(request)
+        response.headers["X-Request-ID"] = request_id
+        logger.info(
+            "http_request",
+            extra={
+                "method": request.method,
+                "route": request.scope.get("route").path if request.scope.get("route") else request.url.path,
+                "status_code": response.status_code,
+                "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                "response_size": response.headers.get("content-length"),
+            },
+        )
+        return response
+    finally:
+        request_id_var.reset(request_token)
+        user_id_var.reset(user_token)
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request: Request, error: Exception):
+    """Keep tracebacks in local/container logs, not browser responses."""
+    error_id = safe_error(logger, "unhandled_exception", method=request.method, route=request.url.path)
+    request_id = request.headers.get("X-Request-ID") or request_id_var.get()
+    return JSONResponse(
+        status_code=500,
+        content={
+            "detail": "The uploader encountered an unexpected server error.",
+            "code": "INTERNAL_ERROR",
+            "request_id": request_id,
+            "error_id": error_id,
+        },
+        headers={"X-Request-ID": request_id or ""},
+    )
 
 
 @dataclass(frozen=True)
@@ -1073,8 +1126,8 @@ def _ensure_web_job() -> None:
     ])
     definition = {
         "Role": role_arn, "Command": {"Name": "glueetl", "ScriptLocation": f"s3://{SOURCE_BUCKET}/{WEB_SCRIPT_KEY}", "PythonVersion": "3"},
-        "GlueVersion": "5.0", "WorkerType": "G.1X", "NumberOfWorkers": 2, "Timeout": 30, "MaxRetries": 0,
-        "ExecutionProperty": {"MaxConcurrentRuns": 1},
+        "GlueVersion": "5.0", "WorkerType": "G.1X", "NumberOfWorkers": 4, "Timeout": 60, "MaxRetries": 0,
+        "ExecutionProperty": {"MaxConcurrentRuns": PILOT_GLUE_MAX_CONCURRENT_RUNS},
         "DefaultArguments": {"--job-language": "python", "--datalake-formats": "iceberg", "--enable-metrics": "true", "--enable-continuous-cloudwatch-log": "true", "--conf": conf},
         "Description": "Local web UI generic append-only S3 Tables pilot ingestion",
     }
@@ -1492,6 +1545,7 @@ async def start_ingestion(
     history_prefix = _history_prefix(payload.table_bucket_arn, payload.namespace, payload.table)
     response = glue.start_job_run(
         JobName=WEB_JOB_NAME,
+        JobRunQueuingEnabled=True,
         Arguments={
             "--MODE": payload.mode, "--MANIFEST_URI": f"s3://{SOURCE_BUCKET}/{manifest_key}",
             "--TABLE_BUCKET_ARN": payload.table_bucket_arn, "--NAMESPACE": payload.namespace,
@@ -1580,6 +1634,7 @@ def start_rollback(payload: RollbackRequest, user: PilotUser = Depends(_current_
     run_id = str(uuid.uuid4())
     response = glue.start_job_run(
         JobName=WEB_JOB_NAME,
+        JobRunQueuingEnabled=True,
         Arguments={
             # The rollback job does not read a manifest, but Glue requires each
             # supplied command argument to have a non-empty value.
