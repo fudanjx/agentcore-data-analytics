@@ -161,6 +161,10 @@ def test_document_input_reaches_agent_unchanged(monkeypatch):
 
     assert asyncio.run(invoke()) == []
     assert document_input in captured["options"].system_prompt
+    assert captured["options"].system_prompt == (
+        agent.DOCUMENT_GUIDANCE + "\n\n---\n\n" + document_input
+    )
+    assert not hasattr(agent, "BASE_SYSTEM_PROMPT")
     assert captured["prompt"] == "Analyze the uploaded file."
     assert captured["runtime_session_id"] is None
     assert captured["options"].mcp_servers["code_interpreter"] == {
