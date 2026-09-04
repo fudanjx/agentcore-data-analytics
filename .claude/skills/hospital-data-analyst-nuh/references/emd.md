@@ -5,17 +5,30 @@ description: Column reference and SQL guidance for NUH emd. Use when analyzing e
 
 # NUH Analytics — emd
 
-**One row is one ED visit. Primary date: `EMD_VISIT_DATE`. Coverage: January 2023–June 2026.**
+**Count ED attendance from source rows. Primary date: `EMD_VISIT_DATE`. Coverage: January 2023–June 2026.**
 
-## Mandatory base filter
+## Row counting and date filter
+
+Use `COUNT(*)` for attendance and count qualifying source rows for ED admissions.
+Do not use the `DUPLICATE` field to identify or exclude duplicate records,
+regardless of its value (including `Y`, `Duplicate Record`, `First Record`, or
+NULL). Do not substitute a distinct ID count or apply ID-based deduplication.
+
+Examples use quoted RDS column names. For S3, use the exact quoted lowercase
+physical names, including `"emd_visit_date"`, with the same counting logic.
 
 ```sql
+SELECT
+  COUNT(*) AS attendance,
+  COUNT(CASE WHEN "CASE_END_TYPE_DESC" LIKE 'Admit%' THEN 1 END) AS admissions
 FROM emd
 WHERE "EMD_VISIT_DATE" IS NOT NULL
-  AND "DUPLICATE" <> 'Y'
+  AND "EMD_VISIT_DATE" >= DATE '2025-01-01'
+  AND "EMD_VISIT_DATE" < DATE '2026-01-01';
 ```
 
-Never omit the duplicate filter. Use `EMD_VISIT_DATE` for date filtering and grouping.
+Use `EMD_VISIT_DATE` for date filtering and grouping. Apply this row-counting
+basis consistently to all attendance breakdowns and ED admissions.
 
 ## Required segment mapping
 
@@ -44,8 +57,10 @@ Exclude null PACS only from a PACS breakdown, not from total or segment attendan
 AND "PACS_STATUS_CONSULT" IS NOT NULL
 ```
 
-The default and initial-triage PACS fields differ for 129 of 85,970 H1-2026
-records (0.15%), mainly at the P2/P3 boundary. Segment totals must remain equal.
+In the NUH RDS and S3 row-based checks on 2026-08-31, the default and initial-triage PACS
+fields differ for 129 of 85,972 H1-2026 records (0.15%), mainly at the P2/P3
+boundary. This uses a NULL-safe comparison (`IS DISTINCT FROM`); neither field
+was NULL in that check. Segment totals must remain equal.
 
 ## ED admissions and arrival mode
 
@@ -73,24 +88,32 @@ SELECT
 FROM emd
 WHERE "EMD_VISIT_DATE" >= DATE '2025-01-01'
   AND "EMD_VISIT_DATE" < DATE '2026-01-01'
-  AND "DUPLICATE" <> 'Y'
   AND "PACS_STATUS_CONSULT" IS NOT NULL
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 ```
 
-## Locked benchmarks
+## Locked benchmarks — NUH RDS and S3 verified
+
+Verified independently against NUH RDS and S3 `emd` on 2026-08-31 using the row-counting rule above,
+without a duplicate-status filter or ID-based deduplication. Monthly roll-ups
+and segment sums reconcile to independent period totals (12 months per calendar
+year and 6 months for H1 2026). These replace the previous ED benchmarks.
+
+NUH RDS and S3 results match for all periods and segments below, the CY2025
+admission figures and rates, and the H1-2026 PACS comparison above.
 
 | Period | Adult | Children CE | Children UCC | Total |
 |---|---:|---:|---:|---:|
-| CY2023 | 107,235 | 40,613 | unavailable | 147,848 |
-| CY2024 | 100,600 | 36,149 | unavailable | 136,749 |
-| CY2025 | 111,108 | 38,468 | 19,899 | 169,475 |
-| H1 2026 | 55,813 | 19,789 | 10,368 | 85,970 |
+| CY2023 | 107,285 | 40,624 | unavailable | 147,909 |
+| CY2024 | 109,647 | 39,392 | unavailable | 149,039 |
+| CY2025 | 111,113 | 38,472 | 19,899 | 169,484 |
+| H1 2026 | 55,814 | 19,790 | 10,368 | 85,972 |
 
-CY2025 total ED admissions are 45,512. Segment admission rates use their own
-segment attendance denominator; the cited adult and children references are about
-35.7% and 15.7% respectively.
+CY2025 total ED admissions are 45,520 in both sources. Admission rates use the attendance
+denominator for the same requested segment: Adult 39,337 / 111,113 = 35.40%;
+Children CE alone 6,183 / 38,472 = 16.07%; combined Children CE + UCC
+6,183 / 58,371 = 10.59%. Do not use the CE-only rate for combined Children.
 
 ## QC
 

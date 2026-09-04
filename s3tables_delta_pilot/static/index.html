@@ -1,0 +1,119 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>S3 Tables pilot</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main>
+    <header>
+      <p class="eyebrow">LOCAL PILOT</p>
+      <h1>S3 Tables ingestion</h1>
+      <p id="scope">Loading pilot namespace…</p>
+      <p id="activity" aria-live="polite"></p>
+    </header>
+
+    <details id="identity-panel" class="identity-panel">
+      <summary><strong>Local identity and authorization test panel</strong> <span class="hint">(trusted-development placeholder)</span></summary>
+      <p class="hint">Choose a forged local user to see the exact identity header sent to the API. Roles and namespace grants are resolved by the backend; they are never sent by the browser.</p>
+      <label>Emulate user <select id="emulated-user"></select></label>
+      <div class="identity-grid">
+        <section><h2>Effective backend identity</h2><pre id="effective-identity">Loading…</pre></section>
+        <section><h2>Outgoing API identity context</h2><pre id="outgoing-identity">Loading…</pre></section>
+      </div>
+    </details>
+
+    <section>
+      <div class="section-title"><h2>1. Choose destination</h2><button id="refresh" class="secondary">Refresh tables</button></div>
+      <div class="destination-selectors">
+        <label>S3 Tables bucket <select id="bucket"></select></label>
+        <label>Namespace <select id="namespace" disabled></select></label>
+      </div>
+      <details id="admin-provisioning" class="admin-provisioning" hidden>
+        <summary><strong>Create bucket or namespace</strong> <span class="hint">(administrators only)</span></summary>
+        <p class="hint">Create an empty S3 Tables bucket, then create a namespace in the selected bucket before uploading a table.</p>
+        <div class="provisioning-grid">
+          <div>
+            <label>New bucket name <input id="new-bucket" maxlength="63" placeholder="e.g. hospital-analytics"></label>
+            <button id="create-bucket" type="button" disabled>Create S3 Tables bucket</button>
+            <p id="create-bucket-status" class="operation-status" aria-live="polite"></p>
+          </div>
+          <div>
+            <label>New namespace <input id="new-namespace" maxlength="255" placeholder="e.g. reporting"></label>
+            <button id="create-namespace" type="button" disabled>Create namespace in selected bucket</button>
+            <p id="create-namespace-status" class="operation-status" aria-live="polite"></p>
+          </div>
+        </div>
+        <p class="hint">Bucket names use 3–63 lowercase letters, numbers, and hyphens. Namespace names start with a lowercase letter and use lowercase letters, numbers, or underscores.</p>
+      </details>
+      <div id="tables" class="tables"></div>
+      <label class="create"><input id="create" type="checkbox"> Create a new table from this upload</label>
+      <label id="new-table-wrap" hidden>New table name <input id="new-table" pattern="[a-z][a-z0-9_\-]*" placeholder="e.g. outpatient_jul"></label>
+      <p class="hint">New table names: start with a lowercase letter; valid characters are a-z, 0-9, and underscores (_). Hyphens are converted to underscores.</p>
+      <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
+      <details id="skill-builder" class="skill-builder" hidden>
+        <summary><strong>Build a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
+        <p class="hint">Describe the skill to build. The generated SKILL.md will be downloaded from Dify and its frontmatter name will be locked to the selected bucket name.</p>
+        <label for="skill-instruction">Skill-building instructions</label>
+        <textarea id="skill-instruction" maxlength="20000" rows="6" placeholder="Describe the analyses, tables, business definitions, and operating rules this skill should contain."></textarea>
+        <div class="skill-actions">
+          <button id="build-skill" type="button" disabled>Build skill</button>
+          <p id="skill-build-status" class="operation-status" aria-live="polite"></p>
+        </div>
+        <div id="skill-review" hidden>
+          <dl class="skill-locations">
+            <div><dt>Generated source</dt><dd><code id="skill-source-uri"></code></dd></div>
+            <div><dt>Publish destination</dt><dd><code id="skill-destination-uri"></code></dd></div>
+          </dl>
+          <label for="skill-content">Review and edit SKILL.md</label>
+          <textarea id="skill-content" class="skill-content" rows="24" spellcheck="false"></textarea>
+          <p class="hint">The server will enforce <code>name: &lt;s3-table-bucket-name&gt;</code> again when publishing.</p>
+          <div class="skill-actions">
+            <button id="publish-skill" type="button" disabled>Confirm and publish SKILL.md</button>
+            <p id="skill-publish-status" class="operation-status" aria-live="polite"></p>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <section>
+      <h2>2. Select Data files</h2>
+      <label>User tag <input id="reporting-month" type="text" maxlength="256" placeholder="e.g. Jan 2026 legacy refresh" required></label>
+      <input id="files" type="file" accept=".parquet,.parquet.gzip,.gzip,application/gzip,application/x-gzip,.xlsx,.xls,.csv,.tsv" multiple>
+      <p class="hint">Supported formats: Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV. The first upload defines a new table’s schema. Later uploads must match at least 50% of that schema after column-name normalisation; unmatched columns are ignored and missing target columns become NULL.</p>
+      <p class="placeholder">Healthcare sanitization is enforced before temporary S3 staging: names, DOB, phones, and home addresses are removed; identifiers are encrypted; age is banded; postal codes retain only two digits.</p>
+    </section>
+
+    <section class="actions">
+      <button id="preflight" disabled>Review upload</button>
+      <p id="review-requirements" class="hint" aria-live="polite">Complete the destination and file fields to enable review.</p>
+      <p id="review-status" class="operation-status" aria-live="polite"></p>
+    </section>
+
+    <details id="review" hidden>
+      <summary><strong>3. Preflight result</strong> <span class="hint">(expand details)</span></summary>
+      <div id="review-body"></div>
+    </details>
+
+    <section id="upload-actions" class="actions" hidden>
+      <button id="upload" disabled>Upload and run ETL</button>
+      <p id="upload-status" class="operation-status" aria-live="polite"></p>
+    </section>
+
+    <section id="outcome" hidden>
+      <h2>4. ETL outcome</h2>
+      <p id="status"></p>
+      <pre id="status-body"></pre>
+    </section>
+
+    <section id="history" hidden>
+      <div class="section-title"><h2>5. Upload history and recovery</h2><button id="refresh-history" class="secondary" type="button">Refresh history</button></div>
+      <p class="hint">Administrators can restore only the latest successful uploader-managed update. Rolling back restores the master table to its state immediately before that upload.</p>
+      <div id="history-body" class="history"></div>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+</body>
+</html>

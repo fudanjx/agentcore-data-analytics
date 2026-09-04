@@ -7,21 +7,9 @@ description: Column reference and SQL guidance for the ah-analytics admission ta
 
 **One row per episode. Primary date: `Adm_Date`.**
 
-## Mandatory WHERE filters
+## Query baseline
 
-```sql
-WHERE "prelim_flag" = 'N'
-  AND "Adm_Status" != 'P'
-  AND "Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
-  AND (
-    CASE
-      WHEN LEFT("Adm_Nrs_OU", 2) = 'LW'
-           AND "Adm_Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU')
-        THEN "Adm_Nrs_OU"
-      ELSE "Current_Ward"
-    END
-  ) NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')
-```
+Use the `admission` filters and canonical date in `references/data-ontology.yaml`.
 
 ## Adm_Ward — derived field used for ward reporting
 
@@ -39,7 +27,7 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')`
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join key to `discharge`, `inflight`, `procedure`. Blank for new encounters from Feb 2026 onward. |
+| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
 | `Adm_Date` | TIMESTAMP | Admission date — primary date filter |
 | `Adm_Time` | TIME | Admission time |
 | `Adm_Type` | TEXT | Admission route — see mapping below |
@@ -59,7 +47,7 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')`
 | `Attn_Phy_Name` | TEXT | Attending physician name |
 | `Age` | TEXT | Patient age — cast to INT for ranges |
 | `Sex` | TEXT | `M` / `F` |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter ID — join to `urgentcarecenter`. Null before 2023-01-01. |
+| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter identifier; see the ontology for candidate joins and completeness cautions. |
 | `cnt` | INTEGER | Always 1 |
 
 ## Adm_Type codes
@@ -121,15 +109,4 @@ GROUP BY 1, 2 ORDER BY 1;
 
 ## Joins
 
-```sql
--- To discharge (1:1)
-FROM admission a JOIN discharge d ON a."Case_No" = d."Case_No"
-
--- To inflight (1:many — patient-days)
-FROM admission a JOIN inflight i ON a."Case_No" = i."Case_No"
-
--- From urgentcarecenter (ED → admission pathway)
-FROM urgentcarecenter u JOIN admission a ON u."PAT_ENC_CSN_ID" = a."PAT_ENC_CSN_ID"
-```
-
-⚠️ For pre-2023 data use `Case_No`/`SAP_IP_CASE_NO`; for post-Feb-2026 data use `PAT_ENC_CSN_ID`. See SKILL.md for the full era rule.
+Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.

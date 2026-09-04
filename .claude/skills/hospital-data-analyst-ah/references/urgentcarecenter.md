@@ -7,13 +7,9 @@ description: Column reference and SQL guidance for the ah-analytics urgentcarece
 
 **One row per attendance. Primary date: `Visit_Date`.**
 
-## Mandatory WHERE filters
+## Query baseline
 
-```sql
-WHERE "prelim_flag" = 'N'
-  AND "Case_End_Type" != 'Cancelled'
-  AND "Att_Phy_Name" != 'CANCELLATION'
-```
+Use the `urgentcarecenter` filters and canonical date in `references/data-ontology.yaml`.
 
 ## Key columns
 
@@ -29,8 +25,8 @@ WHERE "prelim_flag" = 'N'
 | `Att_Phy_Name` | TEXT | Attending physician name |
 | `Att_Phy_MCR_No` | TEXT | Attending physician MCR |
 | `Pri_Diag_Code` | TEXT | Primary diagnosis ICD code |
-| `PAT_ENC_CSN_ID` | TEXT | Join key to `admission`. Null before 2023-01-01 — use `SAP_IP_CASE_NO` for pre-2023 data. |
-| `SAP_IP_CASE_NO` | TEXT | Alternate join to `admission."Case_No"` — pre-2023 (SAP-era) join key |
+| `PAT_ENC_CSN_ID` | TEXT | Encounter identifier; see the ontology for the validated candidate admission join. |
+| `SAP_IP_CASE_NO` | TEXT | Legacy identifier; do not join it to live `admission.case_no` (the live validation found no matches). |
 | `Gender` | TEXT | `Male` / `Female` |
 | `PAT_AGE` | TEXT | Age at visit |
 | `EVENT_ARRIVAL_TIME` | TIMESTAMP | Actual arrival timestamp |
@@ -95,9 +91,4 @@ GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC;
 
 ## Join to admission
 
-```sql
-FROM urgentcarecenter u
-LEFT JOIN admission a ON u."PAT_ENC_CSN_ID" = a."PAT_ENC_CSN_ID"
-```
-
-⚠️ For pre-2023 data, `PAT_ENC_CSN_ID` is null on both sides — join on `u."SAP_IP_CASE_NO" = a."Case_No"` instead. See SKILL.md for the full era rule.
+Use the `pat_enc_csn_id` candidate join and validate its row count for the requested period. The complete join rules are in `references/data-ontology.yaml`.

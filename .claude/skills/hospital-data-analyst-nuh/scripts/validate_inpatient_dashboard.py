@@ -20,8 +20,8 @@ CY2025 = {
     "admissions": 74461,
     "discharges": 75037,
     "patient_days": 389331,
-    "paying_discharges": 18197,
-    "subsidised_discharges": 56839,
+    "paying_discharges": 18548,
+    "subsidised_discharges": 56489,
 }
 
 
@@ -133,8 +133,10 @@ def main() -> int:
     output_rows = []
     for (month, ou), row_values in sorted(values.items()):
         if (row_values["paying_discharges"] + row_values["subsidised_discharges"]
-                + row_values["unclassified_discharges"] != row_values["discharges"]):
-            errors.append(f"{month}/{ou}: discharge classes do not equal discharges")
+                != row_values["discharges"]):
+            errors.append(f"{month}/{ou}: paying plus subsidised does not equal discharges")
+        if row_values["unclassified_discharges"] != 0:
+            errors.append(f"{month}/{ou}: unclassified discharges must be zero")
         record = mapping.get(ou)
         mapped = record is not None
         department = record.get("department_grouping") if mapped else "Unmapped"

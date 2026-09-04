@@ -52,6 +52,10 @@ For Surgery, never use `Performing_OU`, `TREATMENT_OU`, `Treatment_OU`,
 `performing_ou`, `treatment_ou_1`, or `treatment_ou_2` for clinical-department,
 cluster, subspecialty, or MOH-specialty mapping.
 
+For inpatient reporting, never use `DEPT_OU_DESC`, `dept_ou_desc`, or another
+department-description field as a substitute for mapping `Dept_OU`/`dept_ou`
+to `department_grouping`.
+
 ## Apply the lookup safely
 
 1. Query the source workload rows or OU-level aggregates first. Never create or manually type source result rows.
@@ -74,43 +78,14 @@ cluster, subspecialty, or MOH-specialty mapping.
 
 The lookup is a mapping reference, not proof that an OU has source records. Do not assume every mapping OU is present in a period.
 
-## Row-limited SQL tools
+## Complete export for large results
 
-Use this low-freedom fallback only when the SQL tool cannot return or persist a
-complete month-by-OU export. Do not weaken QC or substitute a native department
-field.
-
-1. Stage `subspec-mapping-cte.sql` and use its two generated CTEs unchanged.
-   The file is deterministically generated from all 277 JSON records; it is the
-   only permitted database-side mapping representation.
-2. Verify the CTE's `mapping_count` and `mapping_sha256` against the bundled JSON.
-   Never edit its values by hand. Regenerate it only with
-   `scripts/generate_mapping_cte.py` when the JSON changes.
-3. Aggregate the source table by requested month and approved `source_ou`, then
-   left join `nuh_subspec_mapping` on `organizational_unit`.
-4. Preserve unmatched OUs as `Unmapped`. Apply any explicitly approved
-   source-side exclusion only after computing the unfiltered source total.
-5. Aggregate mapped workload to the requested department/cluster/MOH dimension
-   inside SQL. Return one row per month, with the plotted groups packed into a
-   JSON object and these audit columns:
-
-```text
-month_date,department_payload,source_total,mapped_total,unmapped_total,
-excluded_total,plotted_total,mapping_count,mapping_sha256
-```
-
-6. For S3/Trino, create `department_payload` with
-   `json_format(CAST(map_agg(group_name, workload) AS JSON))`. For RDS/PostgreSQL,
-   use `jsonb_object_agg(group_name, workload)::text`. Aggregate to one unique
-   row per `group_name` before calling either object aggregate.
-7. Run `scripts/validate_compact_mapped_dashboard.py` on the complete compact
-   result. Build charts, tables, and KPIs only from its flattened CSV.
-
-Require `mapped_total + unmapped_total = source_total`,
-`plotted_total + excluded_total = source_total`, and the JSON payload sum to
-equal `plotted_total` for every month and for the full requested period. If the
-compact result itself is truncated, batch by calendar month; each batch must
-still use the unchanged complete mapping CTE.
+If a direct SQL result is too large, use the supported SQL-export operation to
+retrieve the complete month-by-`source_ou` result as a file. Load that file and
+the bundled JSON programmatically, apply the same many-to-one mapping, and run
+the table-specific validator. If complete export is unavailable, retrieve the
+result by pagination or smaller date batches; never use a preview, partial
+lookup, native department-description field, or manually reconstructed rows.
 
 ## SOC native-field precedence
 

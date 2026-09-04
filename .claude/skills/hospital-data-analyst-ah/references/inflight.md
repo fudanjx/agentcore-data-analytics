@@ -36,18 +36,15 @@ WHERE a."Adm_Date" = d."Disch_Date"
   AND d."Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 ```
 
-## Mandatory WHERE filters
+## Query baseline
 
-```sql
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
-```
+Use the `inflight` filters and canonical date in `references/data-ontology.yaml`.
 
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join to `admission`/`discharge`. Blank for new encounters from Feb 2026 onward. |
+| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
 | `Inflight_Date` | TIMESTAMP | Census snapshot date — primary date filter |
 | `Admit_Date` | TIMESTAMP | Original admission date |
 | `Ward` | TEXT | Ward code on this census date (apply exclusion here) |
@@ -61,7 +58,7 @@ WHERE "prelim_flag" = 'N'
 | `Attend_Phy` | TEXT | Attending physician on this date |
 | `Adm_Type` | TEXT | Original admission route |
 | `LOS` | TEXT | Days in hospital as of census date |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter ID. Null before 2023-01-01. |
+| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter identifier; see the ontology for completeness cautions. |
 | `cnt` | INTEGER | Always 1 — represents one patient-day |
 
 ## Critical: Accom_Category = 'OTHER' and the ICU/HD/ISO override chain
@@ -124,8 +121,4 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 
 ## Join to admission
 
-```sql
-FROM inflight i JOIN admission a ON i."Case_No" = a."Case_No"
-```
-
-⚠️ For pre-2023 data use `Case_No`; for post-Feb-2026 data use `PAT_ENC_CSN_ID`. See SKILL.md for the full era rule.
+Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.

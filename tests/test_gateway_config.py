@@ -9,6 +9,17 @@ from app.gateway_config import (
 )
 
 
+@pytest.mark.parametrize("raw", [None, "", "   ", "{}"])
+def test_gateway_configuration_can_be_empty(monkeypatch, raw):
+    if raw is None:
+        monkeypatch.delenv(ENV_NAME, raising=False)
+        configs = load_gateway_configs()
+    else:
+        configs = load_gateway_configs(raw)
+
+    assert configs == {}
+
+
 def test_loads_custom_gateway_names_urls_arns_and_labels():
     raw = json.dumps(
         {
@@ -62,7 +73,9 @@ def test_loads_gateway_mapping_from_environment(monkeypatch):
     "value",
     [
         "not JSON",
-        "{}",
+        "[]",
+        '"gateway"',
+        "null",
         '{"Bad Slug":{"label":"Bad","url":"https://example.com","arn":"bad"}}',
         json.dumps(
             {

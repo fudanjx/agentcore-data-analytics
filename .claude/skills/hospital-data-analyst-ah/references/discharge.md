@@ -8,19 +8,15 @@ description: Column reference and SQL guidance for the ah-analytics discharge ta
 **One row per episode. Primary date: `Disch_Date`.**
 Use this table (not `admission`) for outcome questions: LOS, death, discharge destination.
 
-## Mandatory WHERE filters
+## Query baseline
 
-```sql
-WHERE "prelim_flag" = 'N'
-  AND "Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
-  AND "Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
-```
+Use the `discharge` filters and canonical date in `references/data-ontology.yaml`.
 
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier — join to `admission`, `inflight`, `procedure`. Blank for new encounters from Feb 2026 onward. |
+| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
 | `Adm_Date` | TIMESTAMP | Admission date |
 | `Disch_Date` | TIMESTAMP | Discharge date — primary date filter |
 | `Disch_Time` | TIME | Discharge time |
@@ -37,7 +33,7 @@ WHERE "prelim_flag" = 'N'
 | `DRG_Code` | TEXT | DRG code |
 | `Attending_Physician_Name` | TEXT | Attending physician name |
 | `Age` | TEXT | Age at discharge |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter ID. Null before 2023-01-01. |
+| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter identifier; see the ontology for completeness cautions. |
 | `cnt` | INTEGER | Always 1 |
 
 ## Discharge_Type_Text values
@@ -106,9 +102,4 @@ GROUP BY 1 ORDER BY avg_los DESC;
 
 ## Joins
 
-```sql
-FROM discharge d JOIN admission a ON d."Case_No" = a."Case_No"
-FROM discharge d JOIN inflight i  ON d."Case_No" = i."Case_No"
-```
-
-⚠️ For pre-2023 data use `Case_No`; for post-Feb-2026 data use `PAT_ENC_CSN_ID`. See SKILL.md for the full era rule.
+Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.

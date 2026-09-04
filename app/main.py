@@ -5,8 +5,8 @@ GET /ping is the AgentCore health check endpoint.
 
 Phase 2:
 - /invocations always returns text/event-stream with OpenAI-compatible SSE chunks.
-- On startup: sync skills from S3 into /app/.claude/skills/, then launch the local SigV4
-  proxy for AgentCore Gateway MCP calls on 127.0.0.1:9000.
+- On startup: sync configured skills from S3 and, when Gateways are configured,
+  launch the local SigV4 proxy on 127.0.0.1:9000.
 """
 
 import asyncio
@@ -27,13 +27,14 @@ logging.basicConfig(level=logging.INFO)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info("Startup: syncing skills from S3...")
+    if skills_sync.skills_enabled():
+        logger.info("Startup: syncing skills from S3...")
     skills_sync.sync_skills()
-    logger.info("Startup: launching Gateway SigV4 proxy on localhost...")
-    gateway_proxy.start_background()
-    # Give uvicorn a moment to bind the port before /invocations arrives
-    import asyncio
-    await asyncio.sleep(1.0)
+    if gateway_proxy.gateways_enabled():
+        logger.info("Startup: launching Gateway SigV4 proxy on localhost...")
+        gateway_proxy.start_background()
+        # Give the background uvicorn server a moment to bind its port.
+        await asyncio.sleep(1.0)
     yield
 
 
