@@ -29,8 +29,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.gateway_config import load_gateway_configs, serialize_gateway_configs
 
 REGION = os.environ.get("AWS_DEFAULT_REGION", "ap-southeast-1")
-RUNTIME_NAME = "agentcore_dev"
-ENDPOINT_NAME = "agentcore_dev_endpoint"
+RUNTIME_NAME = "skill_builder"
+ENDPOINT_NAME = "skill_builder_endpoint"
 RUNTIME_ROLE_NAME = "agentcore-poc-runtime-role"
 
 # VPC config — private subnets in bot-nuhs-vpc, same VPC as RDS

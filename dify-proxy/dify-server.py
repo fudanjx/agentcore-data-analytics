@@ -102,7 +102,7 @@ DIFY_OFFICE_ARTIFACTS_PREFIX = (
 DIFY_OFFICE_SOURCE_PROFILE = {
     "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
     "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
-    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf"},
+    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf","md"},
 }
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
