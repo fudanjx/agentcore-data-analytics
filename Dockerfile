@@ -31,8 +31,9 @@ COPY app/ ./app/
 # COPY .claude/skills/ /app/.claude/skills/
 
 # Skills directory (populated at container startup from S3)
-RUN useradd --create-home --uid 1000 appuser
-RUN chown -R 1000:1000 /app/.claude
+RUN useradd --create-home --uid 1000 appuser \
+    && mkdir -p /app/.claude/skills \
+    && chown -R 1000:1000 /app/.claude
 USER appuser
 
 EXPOSE 8080
