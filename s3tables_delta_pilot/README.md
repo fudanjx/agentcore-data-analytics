@@ -20,6 +20,53 @@ Start it from the repository root:
 
 Open `http://127.0.0.1:8090`.
 
+## Temporary team-test login
+
+Before exposing the pilot to a team, create a private environment file from
+the included sample, then replace all `REPLACE_...` values:
+
+```bash
+cp s3tables_delta_pilot/.env.example s3tables_delta_pilot/.env
+# Edit s3tables_delta_pilot/.env, then load it before starting the service:
+set -a && source s3tables_delta_pilot/.env && set +a
+.venv/bin/uvicorn s3tables_delta_pilot.webapp:app --host 127.0.0.1 --port 8090
+```
+
+`PILOT_LOGIN_PASSWORD` is the shared password entered by testers;
+`PILOT_LOGIN_SECRET` is a separate server-only, 32-character-or-longer secret
+used to sign the login cookie. Also set a strong server-only
+`PILOT_KEY_ANALYSIS_SECRET` for type/key-analysis acknowledgements.
+
+Set `PILOT_LOGIN_COOKIE_SECURE=true` when the service is behind HTTPS in ECS,
+EKS, or another TLS proxy. Use `false` only for local HTTP development.
+
+### EC2 container deployment
+
+Build the hardened runtime from the pilot directory. The Docker build excludes
+the real `.env`, so credentials and shared secrets cannot become image layers:
+
+```bash
+cd s3tables_delta_pilot
+docker build -f Dockerfile.distroless -t s3tables-delta-pilot:distroless .
+docker run -d --name s3tables-delta-pilot --restart unless-stopped \
+  --env-file .env -p 8090:8090 \
+  s3tables-delta-pilot:distroless
+```
+
+For EC2, attach an IAM instance profile with the uploader's required S3, S3
+Tables, Glue, IAM-read, Secrets Manager, and CloudWatch permissions. Do not put
+long-lived `AWS_ACCESS_KEY_ID` or `AWS_SECRET_ACCESS_KEY` values in `.env`; the
+AWS SDK obtains short-lived credentials from the instance profile. The image
+defaults `PILOT_LOGIN_COOKIE_SECURE=true`; put it behind HTTPS/TLS before
+exposing port `8090` to the team.
+
+All UI, static, and API routes redirect to or return `401 LOGIN_REQUIRED`
+until the password is accepted. Login creates an HttpOnly, signed, 12-hour
+cookie and the UI provides logout. This is only a temporary shared-password
+gate: it has no user-specific audit identity, MFA, rate limiting, or password
+rotation. Replace it with the organisation's verified SSO/OIDC integration
+before production use.
+
 ## Uploader v2 operation
 
 The pilot UI uses only the session API: it copies the selected source files

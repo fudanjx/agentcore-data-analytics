@@ -28,6 +28,9 @@ from s3tables_delta_pilot.webapp import (
     create_namespace,
     create_table_bucket,
     _history_prefix,
+    _login_route_allowed,
+    _sign_login_session,
+    _valid_login_session,
     key_impact_analysis,
     list_buckets,
     list_namespaces,
@@ -55,6 +58,33 @@ GLUE_JOB = Path(__file__).parents[1] / "generic_glue_job.py"
 
 
 class UiAssetTests(unittest.TestCase):
+    def test_temporary_login_session_is_signed_expiring_and_requires_a_secret(self):
+        with patch.dict("os.environ", {"PILOT_LOGIN_SECRET": "x" * 32}, clear=False), patch(
+            "s3tables_delta_pilot.webapp.time.time", return_value=1_000
+        ):
+            token = _sign_login_session(1_001)
+            self.assertIsNotNone(token)
+            self.assertTrue(_valid_login_session(token))
+            self.assertFalse(_valid_login_session(f"{token}tampered"))
+            self.assertFalse(_valid_login_session("not-a-cookie"))
+            self.assertFalse(_valid_login_session(_sign_login_session(999)))
+
+        with patch.dict("os.environ", {"PILOT_LOGIN_SECRET": "too-short"}, clear=False):
+            self.assertIsNone(_sign_login_session(1_001))
+            self.assertFalse(_valid_login_session(token))
+
+    def test_only_login_is_reachable_without_a_login_cookie(self):
+        self.assertTrue(_login_route_allowed("/login"))
+        self.assertFalse(_login_route_allowed("/"))
+        self.assertFalse(_login_route_allowed("/static/app.js"))
+        self.assertFalse(_login_route_allowed("/api/identity"))
+
+    def test_ui_includes_logout_and_readme_documents_login_setup(self):
+        self.assertIn('action="/logout"', (STATIC / "index.html").read_text())
+        readme = (Path(__file__).parents[1] / "README.md").read_text()
+        self.assertIn("PILOT_LOGIN_PASSWORD", readme)
+        self.assertIn("PILOT_LOGIN_SECRET", readme)
+
     def test_retired_multipart_routes_are_lightweight_410_tombstones(self):
         for handler, replacement in (
             (retired_preflight, "POST /api/v2/upload-sessions"),

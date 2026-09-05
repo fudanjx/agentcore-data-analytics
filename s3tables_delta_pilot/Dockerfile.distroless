@@ -3,9 +3,12 @@
 # Build from this directory:
 #   docker build -f Dockerfile.distroless -t local/s3tables-delta-pilot:distroless .
 #
-# Run with the host AWS credential chain mounted/readable as appropriate for
-# the operator's environment. This image is deliberately distroless: it has
-# no shell, package manager, pip, or debugging utilities at runtime.
+# Run with runtime configuration, never by copying a real .env into the image:
+#   docker run --env-file .env -p 8090:8090 local/s3tables-delta-pilot:distroless
+#
+# The host's EC2 instance profile supplies AWS credentials through IMDS. This
+# image is deliberately distroless: it has no shell, package manager, pip, or
+# debugging utilities at runtime.
 
 FROM python:3.12-slim AS builder
 
@@ -31,7 +34,20 @@ COPY --from=builder /app/s3tables_delta_pilot /app/s3tables_delta_pilot
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    PYTHONPATH=/app/dependencies:/app
+    PYTHONPATH=/app/dependencies:/app \
+    AWS_REGION=ap-southeast-1 \
+    AWS_DEFAULT_REGION=ap-southeast-1 \
+    PILOT_LOGIN_COOKIE_SECURE=true \
+    PILOT_LOG_LEVEL=INFO \
+    PILOT_LOCAL_PROCESSING_CONCURRENCY=2 \
+    PILOT_GLUE_MAX_CONCURRENT_RUNS=5 \
+    PILOT_UPLOAD_SESSION_ROOT=/tmp/agentcore-s3tables-upload-sessions
+
+# Do not set defaults for PILOT_LOGIN_PASSWORD, PILOT_LOGIN_SECRET, or
+# PILOT_KEY_ANALYSIS_SECRET. Supply all three at runtime through Docker's
+# --env-file option, AWS Secrets Manager injection, or your orchestrator's
+# secret mechanism. Never pass AWS access keys if the EC2 instance profile can
+# supply short-lived credentials instead.
 
 EXPOSE 8090
 

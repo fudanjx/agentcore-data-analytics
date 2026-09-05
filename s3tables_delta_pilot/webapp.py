@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import asyncio
 import csv
 import hashlib
@@ -31,7 +32,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
@@ -86,6 +87,8 @@ MIN_APPEND_SCHEMA_MATCH_PERCENT = 50.0
 SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "DATE", "TIMESTAMP", "BOOLEAN")
 IDENTITY_EMULATION_HEADER = "X-Pilot-User-Id"
 LOCAL_TEST_USER_IDS = ("local-admin", "local-editor", "local-unassigned")
+LOGIN_COOKIE_NAME = "pilot_uploader_session"
+LOGIN_SESSION_HOURS = 12
 
 
 @app.on_event("startup")
@@ -155,6 +158,16 @@ async def request_logging(request: Request, call_next):
     user_token = user_id_var.set(user_id)
     started = time.perf_counter()
     try:
+        if not _login_route_allowed(request.url.path) and not _valid_login_session(request.cookies.get(LOGIN_COOKIE_NAME)):
+            if request.url.path.startswith("/api/"):
+                response = JSONResponse(
+                    status_code=401,
+                    content={"code": "LOGIN_REQUIRED", "detail": "Log in before using the uploader API."},
+                )
+            else:
+                response = RedirectResponse(url="/login", status_code=303)
+            response.headers["X-Request-ID"] = request_id
+            return response
         response = await call_next(request)
         response.headers["X-Request-ID"] = request_id
         logger.info(
@@ -171,6 +184,52 @@ async def request_logging(request: Request, call_next):
     finally:
         request_id_var.reset(request_token)
         user_id_var.reset(user_token)
+
+
+def _login_route_allowed(path: str) -> bool:
+    return path == "/login"
+
+
+def _login_secret() -> bytes | None:
+    """Return the configured signing secret without ever logging its value."""
+    value = os.environ.get("PILOT_LOGIN_SECRET", "").strip()
+    return value.encode("utf-8") if len(value) >= 32 else None
+
+
+def _sign_login_session(expires_at: int) -> str | None:
+    secret = _login_secret()
+    if secret is None:
+        return None
+    payload = str(expires_at).encode("ascii")
+    signature = hmac.new(secret, payload, hashlib.sha256).digest()
+    return ".".join(
+        base64.urlsafe_b64encode(value).decode("ascii").rstrip("=")
+        for value in (payload, signature)
+    )
+
+
+def _valid_login_session(value: str | None) -> bool:
+    secret = _login_secret()
+    if not value or secret is None:
+        return False
+    try:
+        encoded_payload, encoded_signature = value.split(".", 1)
+        payload = base64.urlsafe_b64decode(encoded_payload + "=" * (-len(encoded_payload) % 4))
+        signature = base64.urlsafe_b64decode(encoded_signature + "=" * (-len(encoded_signature) % 4))
+        expires_at = int(payload.decode("ascii"))
+    except (ValueError, UnicodeDecodeError, binascii.Error):
+        return False
+    expected = hmac.new(secret, payload, hashlib.sha256).digest()
+    return hmac.compare_digest(signature, expected) and expires_at > int(time.time())
+
+
+def _login_page(error: str | None = None) -> HTMLResponse:
+    message = "<p class=\"error\">Incorrect password.</p>" if error == "invalid password" else ""
+    return HTMLResponse(
+        """<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>S3 Tables pilot login</title><style>body{margin:0;background:#f4f7fb;color:#14213d;font:16px system-ui,sans-serif}.card{max-width:420px;margin:12vh auto;padding:34px;border-radius:14px;background:#fff;box-shadow:0 10px 28px #14213d22}h1{margin-top:0}label,input,button{display:block;width:100%;box-sizing:border-box}input{margin:8px 0 18px;padding:11px;border:1px solid #b9c9dc;border-radius:7px;font:inherit}button{padding:11px;border:0;border-radius:7px;background:#07679a;color:#fff;font-weight:700;font:inherit}.hint{color:#5b6d87}.error{color:#b4232f;font-weight:700}</style></head><body><main class=\"card\"><p class=\"hint\">TEMPORARY TEAM TEST ACCESS</p><h1>S3 Tables uploader</h1><p>Enter the shared testing password to continue.</p>"""
+        + message
+        + """<form method=\"post\" action=\"/login\"><label for=\"password\">Password</label><input id=\"password\" name=\"password\" type=\"password\" autocomplete=\"current-password\" required autofocus><button type=\"submit\">Log in</button></form><p class=\"hint\">This temporary password gate is not production authentication.</p></main></body></html>"""
+    )
 
 
 @app.exception_handler(Exception)
@@ -1409,6 +1468,41 @@ def _table_summary(table_bucket_arn: str, namespace: str, item: dict) -> dict:
         "row_count": _iceberg_row_count(details.get("metadataLocation")),
         "uploader_managed": _is_uploader_managed_table(table_bucket_arn, namespace, item["name"]),
     }
+
+
+@app.get("/login")
+def login_form():
+    if not os.environ.get("PILOT_LOGIN_PASSWORD", "").strip() or _login_secret() is None:
+        return HTMLResponse(
+            "<h1>Uploader login is not configured</h1><p>Set PILOT_LOGIN_PASSWORD and a 32-character-or-longer PILOT_LOGIN_SECRET before starting the service.</p>",
+            status_code=503,
+        )
+    return _login_page()
+
+
+@app.post("/login")
+def login(password: str = Form()):
+    configured_password = os.environ.get("PILOT_LOGIN_PASSWORD", "")
+    if not configured_password.strip() or _login_secret() is None:
+        return _login_page("not configured")
+    if not hmac.compare_digest(password, configured_password):
+        return _login_page("invalid password")
+    expires_at = int(time.time()) + LOGIN_SESSION_HOURS * 60 * 60
+    token = _sign_login_session(expires_at)
+    response = RedirectResponse(url="/", status_code=303)
+    response.set_cookie(
+        LOGIN_COOKIE_NAME, token or "", max_age=LOGIN_SESSION_HOURS * 60 * 60,
+        httponly=True, secure=os.environ.get("PILOT_LOGIN_COOKIE_SECURE", "false").lower() == "true",
+        samesite="lax", path="/",
+    )
+    return response
+
+
+@app.post("/logout")
+def logout():
+    response = RedirectResponse(url="/login", status_code=303)
+    response.delete_cookie(LOGIN_COOKIE_NAME, path="/")
+    return response
 
 
 @app.get("/")

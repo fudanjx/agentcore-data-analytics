@@ -12,6 +12,7 @@ test_DOC/
 
 # Environment — contains secrets
 .env
+s3tables_delta_pilot/.env
 openwebui-local/.env
 
 # Docker build artifacts
