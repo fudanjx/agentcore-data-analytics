@@ -1,16 +1,33 @@
 const SESSION_STORAGE_KEY = 's3tables-uploader-v2-session-id';
-const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'FAILED'];
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, deduplicationMode: 'keyed', lastRequestId: null };
+const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED'];
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastRequestId: null };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
-function selectedTable() { return state.mode === 'create' ? $('new-table').value.trim().replaceAll('-', '_') : state.table; }
+// Safari versions used in some managed environments do not expose the newer
+// replaceChildren() and Array.prototype.at() helpers. Keep the UI usable on
+// those browsers without changing the API contract or requiring a polyfill.
+function setChildren(element, ...children) {
+  if (typeof element.replaceChildren === 'function') {
+    element.replaceChildren(...children);
+    return;
+  }
+  while (element.firstChild) element.removeChild(element.firstChild);
+  children.forEach(child => element.appendChild(child));
+}
+function lastPathSegment(path) {
+  const parts = String(path).split('/');
+  return parts.length ? parts[parts.length - 1] : '';
+}
+
+function selectedTable() { return state.mode === 'create' ? $('new-table').value.trim().replace(/-/g, '_') : state.table; }
 function bucketQuery() { return new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace }); }
 function userTag() { return $('reporting-month').value.trim(); }
 function escapeHtml(value) { const node = document.createElement('span'); node.textContent = String(value); return node.innerHTML; }
 function formatTime(value) { return value ? new Date(value).toLocaleString() : 'Unavailable'; }
 function clearSessionPoll() { if (state.sessionPollTimer) { clearTimeout(state.sessionPollTimer); state.sessionPollTimer = null; } }
-function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
+function clearGluePoll() { if (state.gluePollTimer) { clearTimeout(state.gluePollTimer); state.gluePollTimer = null; } state.activeJobRunId = null; }
+function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
 function identityRequestPayload() {
   return {
     headers: { 'X-Pilot-User-Id': state.emulatedUserId },
@@ -21,45 +38,145 @@ function identityRequestPayload() {
 async function apiFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.emulatedUserId) headers.set('X-Pilot-User-Id', state.emulatedUserId);
-  const response = await fetch(url, { ...options, headers });
+  const response = await fetch(url, { credentials: 'same-origin', ...options, headers });
   state.lastRequestId = response.headers.get('X-Request-ID') || state.lastRequestId;
   return response;
 }
 function updateSkillControls() {
   const hasBucket = Boolean(state.bucket);
   const hasFiles = $('skill-bundle-files').files.length > 0;
-  const confirmed = $('skill-confirm-replace').checked;
   $('skill-builder').hidden = !hasBucket;
-  $('upload-skill-bundle').disabled = !hasBucket || !hasFiles || !confirmed;
+  $('upload-skill-bundle').disabled = !hasBucket || !hasFiles;
 }
 function clearSkillBundle() {
   $('skill-bundle-files').value = '';
-  $('skill-confirm-replace').checked = false;
   $('skill-bundle-status').textContent = '';
   $('skill-bundle-status').className = 'operation-status';
+  $('skill-location').textContent = 'Select an S3 Tables bucket to view its skill files.';
+  setChildren($('skill-file-explorer'));
   updateSkillControls();
+}
+function formatFileSize(value) {
+  const size = Number(value || 0);
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 ** 2) return `${(size / 1024).toFixed(1)} KB`;
+  return `${(size / 1024 ** 2).toFixed(1)} MB`;
+}
+function selectedSkillUploadPaths(files) {
+  const paths = files.map(file => file.webkitRelativePath || file.name);
+  const parts = paths.map(path => path.split('/').filter(Boolean));
+  const first = parts[0]?.[0];
+  // A directory picker prefixes every selected file with the local folder
+  // name. That folder is not part of the managed S3 skill path.
+  if (first && parts.every(path => path.length > 1 && path[0] === first)) {
+    return parts.map(path => path.slice(1).join('/'));
+  }
+  return paths;
+}
+function buildSkillTree(files) {
+  const root = { folders: new Map(), files: [] };
+  for (const file of files) {
+    const parts = file.path.split('/'); let node = root;
+    for (const part of parts.slice(0, -1)) {
+      if (!node.folders.has(part)) node.folders.set(part, { folders: new Map(), files: [] });
+      node = node.folders.get(part);
+    }
+    node.files.push({ ...file, name: lastPathSegment(file.path) });
+  }
+  return root;
+}
+function renderSkillTree(node, level = 0) {
+  const holder = document.createElement('div'); holder.className = 'skill-tree-level';
+  for (const [name, child] of [...node.folders.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+    const folder = document.createElement('details'); folder.className = 'skill-folder'; folder.open = level < 2;
+    const summary = document.createElement('summary'); summary.textContent = `${name}/`; folder.append(summary);
+    folder.append(renderSkillTree(child, level + 1)); holder.append(folder);
+  }
+  for (const file of [...node.files].sort((a, b) => a.name.localeCompare(b.name))) {
+    const row = document.createElement('div'); row.className = 'skill-file-row';
+    const details = document.createElement('div'); details.className = 'skill-file-details';
+    const name = document.createElement('strong'); name.textContent = file.name; name.title = file.path;
+    const meta = document.createElement('small'); meta.textContent = `${formatFileSize(file.size)} · ${formatTime(file.last_modified)}`;
+    details.append(name, meta);
+    const actions = document.createElement('div'); actions.className = 'skill-file-actions';
+    const download = document.createElement('button'); download.type = 'button'; download.className = 'secondary'; download.textContent = 'Download'; download.onclick = () => downloadSkillFile(file.path); actions.append(download);
+    const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Delete'; remove.onclick = () => deleteSkillFile(file.path); actions.append(remove);
+    row.append(details, actions); holder.append(row);
+  }
+  return holder;
+}
+async function loadSkillFiles() {
+  updateSkillControls();
+  if (!state.bucket) return;
+  const explorer = $('skill-file-explorer');
+  $('skill-location').textContent = 'Loading files from the selected S3 skill prefix…';
+  setChildren(explorer);
+  try {
+    const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
+    const response = await apiFetch(`/api/skills/files?${query}`); const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Unable to list skill files.');
+    $('skill-location').textContent = result.destination_uri;
+    if (!result.files?.length) {
+      explorer.textContent = 'No skill files are stored for this S3 Tables bucket yet.';
+      explorer.className = 'skill-file-explorer empty';
+      return;
+    }
+    explorer.className = 'skill-file-explorer'; explorer.append(renderSkillTree(buildSkillTree(result.files)));
+  } catch (error) {
+    $('skill-location').textContent = 'Unable to load the selected skill prefix.';
+    explorer.className = 'skill-file-explorer failed'; explorer.textContent = error.message || 'Skill file listing failed.';
+  }
+}
+async function downloadSkillFile(path) {
+  if (!state.bucket) return;
+  const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Downloading ${path}…`;
+  try {
+    const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, path });
+    const response = await apiFetch(`/api/skills/files/download?${query}`);
+    if (!response.ok) { const result = await response.json(); throw new Error(result.detail || 'Skill file download failed.'); }
+    const blob = await response.blob(); const url = URL.createObjectURL(blob);
+    const link = document.createElement('a'); link.href = url; link.download = lastPathSegment(path); link.click();
+    URL.revokeObjectURL(url); status.className = 'operation-status complete'; status.textContent = `Downloaded ${path}.`;
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = error.message || 'Skill file download failed.';
+  }
+}
+async function deleteSkillFile(path) {
+  if (!state.bucket) return;
+  const notice = path === 'SKILL.md' ? '\n\nDeleting SKILL.md will disable this bucket skill until a valid replacement is uploaded.' : '';
+  if (!confirm(`Delete skill file “${path}”?${notice}`)) return;
+  const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Deleting ${path}…`;
+  try {
+    const response = await apiFetch('/api/skills/files', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: state.bucket.table_bucket_arn, path, confirm: true }) });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || 'Skill file deletion failed.');
+    status.className = 'operation-status complete'; status.textContent = `Deleted ${result.deleted_path}.`;
+    await loadSkillFiles();
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = error.message || 'Skill file deletion failed.';
+  }
 }
 async function uploadSkillBundle() {
   if (!state.bucket) return;
   const files = [...$('skill-bundle-files').files];
-  const paths = files.map(file => file.webkitRelativePath || file.name);
+  const paths = selectedSkillUploadPaths(files);
   const button = $('upload-skill-bundle'); const status = $('skill-bundle-status');
-  button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Uploading skill bundle…';
-  status.className = 'operation-status'; status.textContent = 'Validating the complete bundle and replacing the S3 skill files…';
+  button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Uploading skill files…';
+  status.className = 'operation-status'; status.textContent = 'Validating and uploading the selected skill files…';
   try {
     const form = new FormData();
     form.append('table_bucket_arn', state.bucket.table_bucket_arn);
     form.append('paths_json', JSON.stringify(paths));
-    form.append('confirm_replace', 'true');
     files.forEach(file => form.append('files', file, file.name));
-    const response = await apiFetch('/api/skills/upload-bundle', { method: 'POST', body: form });
+    const response = await apiFetch('/api/skills/files', { method: 'POST', body: form });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill bundle upload failed.'; return; }
-    status.className = 'operation-status complete'; status.textContent = `Published ${result.uploaded_paths.length} files to ${result.destination_uri}. ${result.deleted_paths.length} stale files removed. ${result.restart_reminder}`;
+    status.className = 'operation-status complete'; status.textContent = `Uploaded ${result.uploaded_paths.length} file(s): ${result.created_paths.length} new, ${result.overwritten_paths.length} overwritten. ${result.restart_reminder}`;
+    await loadSkillFiles();
   } catch (error) {
     status.className = 'operation-status failed'; status.textContent = `Skill bundle upload failed: ${error.message || 'network request failed'}`;
   } finally {
-    button.classList.remove('is-busy'); button.textContent = 'Upload replacement skill bundle'; updateSkillControls();
+    button.classList.remove('is-busy'); button.textContent = 'Upload skill files'; updateSkillControls();
   }
 }
 function renderOutgoingIdentity() { $('outgoing-identity').textContent = JSON.stringify(identityRequestPayload(), null, 2); }
@@ -73,7 +190,7 @@ function renderAdminProvisioning() {
 function clearDestination() {
   state.bucket = null; state.namespace = null; state.table = null; state.tableManaged = false; state.isAdmin = false; state.userId = null;
   state.canViewHistory = false; state.canRollbackUploads = false;
-  $('bucket').replaceChildren(); $('namespace').replaceChildren(); $('namespace').disabled = true; $('tables').replaceChildren(); $('history').hidden = true;
+  setChildren($('bucket')); setChildren($('namespace')); $('namespace').disabled = true; setChildren($('tables')); $('history').hidden = true;
   $('admin-provisioning').hidden = true;
   clearPreflight(); clearSkillBundle(); valid();
 }
@@ -88,10 +205,10 @@ async function loadEffectiveIdentity() {
   return data;
 }
 async function loadIdentityProfiles() {
-  const response = await fetch('/api/dev/identity-profiles'); const data = await response.json();
+  const response = await fetch('/api/dev/identity-profiles', { credentials: 'same-origin' }); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load local identity profiles');
   state.identityProfiles = data.profiles || [];
-  $('emulated-user').replaceChildren(...state.identityProfiles.map(profile => {
+  setChildren($('emulated-user'), ...state.identityProfiles.map(profile => {
     const option = document.createElement('option'); option.value = profile.user_id;
     option.textContent = `${profile.user_id} — ${profile.is_admin ? 'administrator' : profile.expected_access ? profile.can_rollback_uploads ? 'scoped editor with recovery' : 'scoped non-admin' : 'unassigned (denied)'}`;
     return option;
@@ -116,7 +233,7 @@ async function loadBuckets(preferredBucket = null, { preserveSession = false, pr
   if (preferredBucket && typeof preferredBucket === 'object' && !buckets.some(bucket => bucket.table_bucket_arn === preferredBucketArn)) {
     buckets.push(preferredBucket);
   }
-  $('bucket').replaceChildren(...buckets.map(bucket => {
+  setChildren($('bucket'), ...buckets.map(bucket => {
     const option = document.createElement('option'); option.value = JSON.stringify(bucket);
     option.textContent = bucket.label; return option;
   }));
@@ -127,19 +244,20 @@ async function loadBuckets(preferredBucket = null, { preserveSession = false, pr
   if (previousBucketArn !== state.bucket?.table_bucket_arn) clearSkillBundle();
   else updateSkillControls();
   renderAdminProvisioning();
+  await loadSkillFiles();
   await loadNamespaces(preferredNamespace, { preserveSession });
 }
 
 async function loadNamespaces(preferredNamespace = null, { preserveSession = false } = {}) {
   state.namespace = null; state.table = null; state.tableManaged = false;
-  $('namespace').replaceChildren(); $('tables').replaceChildren(); clearPreflight({ forgetSession: !preserveSession });
+  setChildren($('namespace')); setChildren($('tables')); clearPreflight({ forgetSession: !preserveSession });
   if (!state.bucket) { $('namespace').disabled = true; $('scope').textContent = state.isAdmin ? 'Create an S3 Tables bucket to begin.' : 'No assigned S3 Tables bucket.'; renderAdminProvisioning(); valid(); return; }
   const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
   const response = await apiFetch(`/api/namespaces?${query}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load namespaces');
   const namespaces = [...data.namespaces];
   if (preferredNamespace && !namespaces.includes(preferredNamespace)) namespaces.push(preferredNamespace);
-  $('namespace').replaceChildren(...namespaces.map(namespace => {
+  setChildren($('namespace'), ...namespaces.map(namespace => {
     const option = document.createElement('option'); option.value = namespace; option.textContent = namespace; return option;
   }));
   state.namespace = namespaces.includes(preferredNamespace) ? preferredNamespace : namespaces[0] || null;
@@ -192,7 +310,7 @@ async function loadTables() {
   const response = await apiFetch(`/api/tables?${bucketQuery()}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load tables');
   $('scope').textContent = `Target: ${state.bucket.label} / ${data.namespace}`;
-  $('tables').replaceChildren(...data.tables.map(table => {
+  setChildren($('tables'), ...data.tables.map(table => {
     const card = document.createElement('article'); card.className = 'table'; card.dataset.table = table.name;
     const select = document.createElement('button'); select.className = 'table-select'; select.type = 'button';
     select.innerHTML = `<strong>${table.name}</strong><small>Created: ${table.created_at || 'Unavailable'}</small><small>Modified: ${table.modified_at || 'Unavailable'}</small><small>Rows: ${table.row_count?.toLocaleString() ?? 'Unavailable'}</small>${table.uploader_managed ? '' : '<small class="browse-only">Browse only: no uploader schema/recovery contract.</small>'}`;
@@ -288,6 +406,7 @@ function renderSessionProgress(session) {
 function applySessionState(session) {
   state.sessionId = session.session_id;
   sessionStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+  if (session.phase === 'FAILED' && session.error) sessionFailure(session);
   // Key analysis completion redraws preflight. Preserve the choices covered
   // by the analysis so the redraw does not leave the acknowledgement visible
   // while silently clearing the selected composite key.
@@ -312,10 +431,24 @@ function applySessionState(session) {
   }
   if (session.ingestion?.job_run_id) {
     $('outcome').hidden = false;
-    $('status').textContent = session.progress_message;
-    $('status').className = 'running';
     $('status-body').textContent = JSON.stringify(session.ingestion, null, 2);
-    poll(session.ingestion.job_run_id, session.ingestion.qc_uri, 'ingestion');
+    const knownState = session.ingestion.state || (session.phase === 'SUCCEEDED' ? 'SUCCEEDED' : null);
+    if (terminalStates.includes(knownState)) {
+      state.activeJobRunId = null;
+      const succeeded = knownState === 'SUCCEEDED';
+      const message = succeeded ? 'ETL completed successfully.' : `ETL ended with state ${knownState}.`;
+      $('activity').textContent = session.progress_message || message;
+      $('status').textContent = session.progress_message || message;
+      $('status').className = succeeded ? 'succeeded' : 'failed';
+      $('upload-status').textContent = message;
+      $('upload-status').className = succeeded ? 'operation-status complete' : 'operation-status failed';
+      $('upload').textContent = 'Upload and run ETL';
+    } else {
+      $('status').textContent = session.progress_message;
+      $('status').className = 'running';
+      state.activeJobRunId = session.ingestion.job_run_id;
+      poll(session.ingestion.job_run_id, session.ingestion.qc_uri, 'ingestion');
+    }
   }
   updateCreateUploadEligibility();
 }
@@ -367,7 +500,7 @@ async function resumeUploadSession() {
     const response = await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(sessionId)}`);
     const session = await response.json();
     if (!response.ok) throw new Error(responseDetail(session, 'The upload session is no longer available.'));
-    const bucket = { table_bucket_arn: session.table_bucket_arn, label: session.table_bucket_arn.split('/').at(-1) || session.table_bucket_arn };
+    const bucket = { table_bucket_arn: session.table_bucket_arn, label: lastPathSegment(session.table_bucket_arn) || session.table_bucket_arn };
     await loadBuckets(bucket, { preserveSession: true, preferredNamespace: session.namespace });
     state.mode = session.mode;
     state.table = session.mode === 'append' ? session.table : null;
@@ -483,7 +616,7 @@ function updateCreateUploadEligibility() {
 
 function invalidateKeyAnalysis() {
   state.keyAnalysis = null; state.keyAnalysisAcknowledged = false;
-  const holder = $('key-analysis-result'); if (holder) holder.replaceChildren();
+  const holder = $('key-analysis-result'); if (holder) setChildren(holder);
   updateCreateUploadEligibility();
 }
 
@@ -540,7 +673,7 @@ async function analyseSelectedKey() {
 }
 
 function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTypeOverrides = {} } = {}) {
-  const holder = $('review-body'); holder.replaceChildren();
+  const holder = $('review-body'); setChildren(holder);
   const decision = document.createElement('p');
   decision.className = result.accepted ? 'preflight-pass' : 'preflight-reject';
   decision.textContent = result.accepted
@@ -664,7 +797,7 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
 }
 
 function displayHistory(items, latestRollbackUploadId) {
-  const holder = $('history-body'); holder.replaceChildren();
+  const holder = $('history-body'); setChildren(holder);
   if (!items.length) { holder.textContent = 'No uploader-managed history is available for this table yet.'; return; }
   for (const item of items) {
     const row = document.createElement('article'); row.className = `history-row ${String(item.status || '').toLowerCase()}`;
@@ -714,15 +847,15 @@ $('new-namespace').oninput = renderAdminProvisioning;
 $('create-bucket').onclick = createTableBucket;
 $('create-namespace').onclick = createSelectedNamespace;
 $('upload-skill-bundle').onclick = uploadSkillBundle;
+$('refresh-skill-files').onclick = loadSkillFiles;
 $('skill-bundle-files').onchange = updateSkillControls;
-$('skill-confirm-replace').onchange = updateSkillControls;
 $('emulated-user').onchange = async () => {
   clearSkillBundle();
   state.emulatedUserId = $('emulated-user').value || null;
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;
   await loadBuckets();
 };
-$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); clearSkillBundle(); state.namespace = null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadNamespaces(); };
+$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); clearSkillBundle(); state.namespace = null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadSkillFiles(); await loadNamespaces(); };
 $('namespace').onchange = async () => { clearPreflight(); state.namespace = $('namespace').value || null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadTables(); };
 $('create').onchange = () => { clearPreflight(); state.mode = $('create').checked ? 'create' : 'append'; if (state.mode === 'create') { state.table = null; state.tableManaged = true; } $('new-table-wrap').hidden = state.mode !== 'create'; selectTable(); valid(); loadHistory(); };
 $('new-table').oninput = () => { clearPreflight(); valid(); };
@@ -794,17 +927,60 @@ $('upload').onclick = async () => {
     if (!started) { button.textContent = 'Upload and run ETL'; updateCreateUploadEligibility(); }
   }
 };
-async function poll(id, qcUri, operation) {
-  const response = await apiFetch(`/api/ingestions/${id}?operation=${operation}`); const result = await response.json();
-  $('activity').textContent = result.message; $('status').textContent = result.message; $('status').className = result.state === 'SUCCEEDED' ? 'succeeded' : ['FAILED','ERROR','TIMEOUT','STOPPED'].includes(result.state) ? 'failed' : 'running';
-  if (operation === 'ingestion') {
-    const uploadStatus = $('upload-status');
-    uploadStatus.className = result.state === 'SUCCEEDED' ? 'operation-status complete' : ['FAILED','ERROR','TIMEOUT','STOPPED'].includes(result.state) ? 'operation-status failed' : 'operation-status';
-    uploadStatus.textContent = result.message;
+async function poll(id, qcUri, operation, retryCount = 0) {
+  if (state.activeJobRunId && state.activeJobRunId !== id) return;
+  state.activeJobRunId = id;
+  try {
+    const response = await apiFetch(`/api/ingestions/${id}?operation=${operation}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(responseDetail(result, 'AWS Glue status is temporarily unavailable.'));
+    const terminal = terminalStates.includes(result.state);
+    $('activity').textContent = result.message;
+    $('status').textContent = result.message;
+    $('status').className = result.state === 'SUCCEEDED' ? 'succeeded' : ['FAILED','ERROR','TIMEOUT','STOPPED'].includes(result.state) ? 'failed' : 'running';
+    if (operation === 'ingestion') {
+      const uploadStatus = $('upload-status');
+      uploadStatus.className = result.state === 'SUCCEEDED' ? 'operation-status complete' : ['FAILED','ERROR','TIMEOUT','STOPPED'].includes(result.state) ? 'operation-status failed' : 'operation-status';
+      uploadStatus.textContent = result.message;
+      if (terminal) $('upload').textContent = 'Upload and run ETL';
+    }
+    $('status-body').textContent = JSON.stringify(result, null, 2);
+    if (!terminal) {
+      state.gluePollTimer = setTimeout(() => poll(id, qcUri, operation), 5000);
+      return;
+    }
+    state.gluePollTimer = null;
+    state.activeJobRunId = null;
+    // Persist the terminal state in the session store so a later refresh can
+    // recover the completed result instead of showing GLUE_RUNNING forever.
+    if (operation === 'ingestion' && state.sessionId) {
+      try { await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(state.sessionId)}`); } catch (_) { /* status already comes from Glue */ }
+    }
+    try {
+      const qc = await apiFetch(`/api/qc?uri=${encodeURIComponent(qcUri)}`).then(r => r.ok ? r.json() : null);
+      if (qc) $('status-body').textContent = JSON.stringify({ job: result, qc }, null, 2);
+    } catch (_) { /* QC is supplementary; never replace a terminal Glue state */ }
+    if (result.state === 'SUCCEEDED') {
+      try { await loadTables(); await loadHistory(); } catch (_) { /* table refresh can be retried independently */ }
+    }
+  } catch (error) {
+    if (state.activeJobRunId !== id) return;
+    const delay = Math.min(30000, 5000 * Math.max(1, retryCount + 1));
+    const message = `Unable to refresh AWS Glue status; retrying in ${Math.ceil(delay / 1000)}s.`;
+    $('activity').textContent = `${message} ${error.message || ''}`;
+    $('status').textContent = message;
+    $('status').className = 'running';
+    if (operation === 'ingestion') {
+      $('upload-status').textContent = message;
+      $('upload-status').className = 'operation-status';
+    }
+    state.gluePollTimer = setTimeout(() => poll(id, qcUri, operation, retryCount + 1), delay);
   }
-  $('status-body').textContent = JSON.stringify(result, null, 2);
-  if (!terminalStates.includes(result.state)) setTimeout(() => poll(id, qcUri, operation), 5000);
-  else { if (operation === 'ingestion') { $('upload').textContent = 'Upload and run ETL'; } const qc = await apiFetch(`/api/qc?uri=${encodeURIComponent(qcUri)}`).then(r => r.ok ? r.json() : null); if (qc) $('status-body').textContent = JSON.stringify({ job: result, qc }, null, 2); if (result.state === 'SUCCEEDED') { await loadTables(); await loadHistory(); } }
 }
 
-loadIdentityProfiles().then(loadBuckets).then(resumeUploadSession).catch(error => { $('scope').textContent = `Unable to load assigned S3 Tables buckets: ${error}`; });
+loadIdentityProfiles().then(loadBuckets).then(resumeUploadSession).catch(error => {
+  const detail = error?.message || String(error);
+  $('scope').textContent = `Unable to load assigned S3 Tables buckets: ${detail}`;
+  $('effective-identity').textContent = JSON.stringify({ error: 'Identity profile could not be loaded', detail }, null, 2);
+  $('outgoing-identity').textContent = JSON.stringify(identityRequestPayload(), null, 2);
+});

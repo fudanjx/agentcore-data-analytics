@@ -16,7 +16,10 @@ from s3tables_delta_pilot.pilot import NAMESPACE, TABLE_BUCKET_ARN
 from s3tables_delta_pilot.webapp import (
     CreateNamespaceRequest,
     CreateTableBucketRequest,
+    BucketScope,
+    DeleteSkillFileRequest,
     IngestionRequest,
+    PilotUser,
     RollbackRequest,
     UPLOAD_HISTORY_TABLE,
     _apply_create_type_overrides,
@@ -32,6 +35,9 @@ from s3tables_delta_pilot.webapp import (
     _sign_login_session,
     _valid_login_session,
     key_impact_analysis,
+    list_skill_files,
+    delete_skill_file,
+    upload_skill_files,
     list_buckets,
     list_namespaces,
     local_identity_profiles,
@@ -178,17 +184,47 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("buckets.push(preferredBucket)", javascript)
         self.assertIn("namespaces.push(preferredNamespace)", javascript)
 
-    def test_bucket_skill_bundle_ui_requires_folder_and_replacement_confirmation(self):
+    def test_bucket_skill_bundle_ui_has_an_incremental_file_explorer(self):
         html = (STATIC / "index.html").read_text()
         javascript = (STATIC / "app.js").read_text()
         self.assertIn('id="skill-bundle-files"', html)
-        self.assertIn('id="skill-confirm-replace"', html)
+        self.assertIn('id="skill-file-explorer"', html)
+        self.assertIn('id="refresh-skill-files"', html)
         self.assertIn('id="upload-skill-bundle"', html)
-        self.assertIn("'/api/skills/upload-bundle'", javascript)
+        self.assertIn("'/api/skills/files'", javascript)
+        self.assertIn("/api/skills/files/download?${query}", javascript)
+        self.assertIn("async function loadSkillFiles", javascript)
+        self.assertIn("async function deleteSkillFile", javascript)
         self.assertIn("clearSkillBundle()", javascript)
+        self.assertNotIn("skill-confirm-replace", html + javascript)
+        self.assertNotIn("'/api/skills/upload-bundle'", javascript)
         self.assertNotIn("/api/skills/build", html + javascript)
         self.assertNotIn("/api/skills/publish", html + javascript)
         self.assertNotIn("Dify", html + javascript)
+
+    def test_assigned_editor_can_list_and_delete_only_its_bucket_skill_files(self):
+        editor = PilotUser(
+            user_id="local-editor", is_admin=False, can_view_upload_history=True,
+            can_rollback_uploads=True,
+            buckets=(BucketScope(TABLE_BUCKET_ARN, NAMESPACE, "AH SOC delta pilot"),),
+        )
+        with patch("s3tables_delta_pilot.webapp.skill_bundle.list_skill_files", return_value={"files": []}) as listing:
+            self.assertEqual({"files": []}, list_skill_files(TABLE_BUCKET_ARN, editor))
+        listing.assert_called_once_with(TABLE_BUCKET_ARN)
+
+        request = DeleteSkillFileRequest(table_bucket_arn=TABLE_BUCKET_ARN, path="scripts/map.py", confirm=True)
+        with patch("s3tables_delta_pilot.webapp.skill_bundle.s3.head_object"), patch(
+            "s3tables_delta_pilot.webapp.skill_bundle.s3.delete_object"
+        ) as deletion:
+            result = delete_skill_file(request, editor)
+        self.assertEqual("scripts/map.py", result["deleted_path"])
+        deletion.assert_called_once_with(Bucket="agentcore-harness-dev", Key="skills/ah-soc-delta-pilot/scripts/map.py")
+
+        upload = UploadFile(filename="data.md", file=BytesIO(b"facts"))
+        with patch("s3tables_delta_pilot.webapp.skill_bundle.publish_files", return_value={"uploaded_paths": ["references/data.md"]}) as publishing:
+            result = asyncio.run(upload_skill_files(TABLE_BUCKET_ARN, '["references/data.md"]', [upload], editor))
+        self.assertEqual(["references/data.md"], result["uploaded_paths"])
+        publishing.assert_called_once_with(TABLE_BUCKET_ARN, "local-editor", [("references/data.md", b"facts")])
 
     def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
         with patch.dict("os.environ", {}, clear=True):

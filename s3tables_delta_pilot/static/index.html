@@ -56,11 +56,16 @@
       <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
       <details id="skill-builder" class="skill-builder" hidden>
         <summary><strong>Upload a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
-        <p class="hint">Choose a complete skill folder. It must contain a root <code>SKILL.md</code>; optional <code>references/</code>, <code>scripts/</code>, and <code>assets/</code> folders are retained. The server validates every path, forces the skill name to the selected table-bucket name, uploads resources first and <code>SKILL.md</code> last, then removes stale files from the previous bundle.</p>
+        <p class="hint">Browse the files currently stored for the selected S3 Tables bucket. Uploading an existing relative path overwrites only that file; a new path is added without changing other files. A root <code>SKILL.md</code>, when uploaded, is checked and its <code>name</code> is aligned to this table-bucket name.</p>
+        <div class="skill-explorer-toolbar">
+          <strong>Skill files</strong>
+          <button id="refresh-skill-files" class="secondary" type="button">Refresh files</button>
+        </div>
+        <p id="skill-location" class="hint">Select an S3 Tables bucket to view its skill files.</p>
+        <div id="skill-file-explorer" class="skill-file-explorer" aria-live="polite"></div>
         <label for="skill-bundle-files">Skill bundle folder <input id="skill-bundle-files" type="file" webkitdirectory directory multiple></label>
-        <label class="skill-confirm"><input id="skill-confirm-replace" type="checkbox"> I understand this replaces the existing bundle for this S3 Tables bucket.</label>
         <div class="skill-actions">
-          <button id="upload-skill-bundle" type="button" disabled>Upload replacement skill bundle</button>
+          <button id="upload-skill-bundle" type="button" disabled>Upload skill files</button>
           <p id="skill-bundle-status" class="operation-status" aria-live="polite"></p>
         </div>
       </details>
@@ -108,6 +113,6 @@
       <div id="history-body" class="history"></div>
     </section>
   </main>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260905-safari-compat"></script>
 </body>
 </html>

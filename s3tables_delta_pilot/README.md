@@ -82,6 +82,9 @@ Local heavy work is limited by `PILOT_LOCAL_PROCESSING_CONCURRENCY` (default
 `2`); excess sessions remain safely queued. The generated Glue job uses four
 `G.1X` workers, a 60-minute timeout, no automatic retries, and configurable
 queued concurrency through `PILOT_GLUE_MAX_CONCURRENT_RUNS` (default `5`).
+After Glue starts, the server independently reconciles each run every
+`PILOT_GLUE_STATUS_POLL_SECONDS` seconds (default `15`), so browser polling is
+not required to persist the terminal upload status.
 
 Every table mutation acquires an S3 conditional lease under
 `temp_s3_update/web_ingest/table_locks/`. Mutations to different tables can
@@ -94,12 +97,16 @@ service starts. The service role therefore needs scoped `s3:ListBucket`,
 ## Skill-bundle upload
 
 After selecting an authorized S3 Tables bucket, an administrator or assigned
-editor may upload a complete skill folder containing one root `SKILL.md` plus
-optional `references/`, `scripts/`, and `assets/` files. This pilot does not
-call Dify or generate skill content. It validates every relative path and
-UTF-8 frontmatter, forces the frontmatter `name` to the selected bucket name,
-uploads resources first and `SKILL.md` last, then removes stale files from the
-previous bundle.
+editor can browse the bucket's managed skill prefix as a folder tree. Each file
+shows its name, size, and S3 last-modified time and can be downloaded or
+deleted. This pilot does not call Dify or generate skill content.
+
+Users may upload a complete folder or a changed subset of files. Every relative
+path is validated; a root `SKILL.md`, when uploaded, must have valid UTF-8
+frontmatter and its `name` is forced to the selected table-bucket name.
+Resources upload before `SKILL.md`. An existing relative path is overwritten;
+a new relative path is added. Files omitted from an upload are retained and can
+only be removed through the confirmed per-file delete action.
 
 Configure the S3 destination (defaults shown):
 
@@ -122,11 +129,13 @@ description: ...
 ---
 ```
 
-The backend rechecks bucket authorization before publication. A bundle is
-limited to 500 files, 50 MB per file, and 250 MB total. Give the pilot service
-scoped `s3:ListBucket`, `s3:PutObject`, and `s3:DeleteObject` permissions for
-the configured destination prefix. Current agent runtimes synchronize skills
-at startup, so restart or resynchronize them after replacing a bundle.
+The backend rechecks bucket authorization before every list, transfer, and
+delete action. Uploads are limited to 500 files, 50 MB per file, and 250 MB
+total. Give the pilot service
+scoped `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject`
+permissions for the configured destination prefix. Current agent runtimes
+synchronize skills at startup, so restart or resynchronize them after changing
+skill files.
 
 The UI lists the S3 Tables buckets and namespaces assigned to the current user,
 then lists tables only in the selected scope. It supports creating a new table

@@ -242,7 +242,7 @@ Remove:
 - Editable generated draft workflow.
 - Dify environment variables and the pilot’s `httpx` dependency if unused elsewhere.
 
-Add a folder picker/drag-and-drop area that accepts a complete skill bundle:
+Add a bucket-scoped skill file explorer and a folder picker/drag-and-drop area:
 
 ```text
 SKILL.md
@@ -251,17 +251,17 @@ scripts/
 assets/
 ```
 
-Add `POST /api/skills/upload-bundle` with:
+Add these bucket-authorized APIs:
 
-- Selected table-bucket ARN.
-- File list and safe relative paths.
-- Explicit `confirm_replace=true`.
+- `GET /api/skills/files` lists safe relative paths with size and last-modified metadata.
+- `POST /api/skills/files` uploads a full folder or selected subset of files.
+- `GET /api/skills/files/download` streams one safe relative path for download.
+- `DELETE /api/skills/files` removes one explicitly confirmed safe relative path.
 
 Validation:
 
-- Require exactly one root `SKILL.md`.
-- Require valid UTF-8 YAML frontmatter with a non-empty description.
-- Force its `name` to the selected S3 Tables bucket name.
+- Require valid UTF-8 YAML frontmatter with a non-empty description whenever a root `SKILL.md` is uploaded.
+- Force that file's `name` to the selected S3 Tables bucket name.
 - Reject absolute paths, traversal, empty components, backslashes, NULs, and unsafe names.
 - Default limits: 500 files, 50 MB per file, and 250 MB total.
 - Recheck bucket authorization server-side.
@@ -270,15 +270,21 @@ Publish beneath:
 
 `s3://<configured-bucket>/<configured-prefix>/<table-bucket-name>/`
 
-Replace the bundle exactly:
+Apply incremental file management:
 
 1. Validate every file locally.
 2. Upload resources first.
 3. Upload `SKILL.md` last.
-4. Delete stale destination objects absent from the new bundle.
-5. Return uploaded/deleted paths, destination URI, and a reminder that the consuming runtime must restart or resynchronize.
+4. Overwrite only files with matching relative paths; retain omitted files.
+5. Use the explicit delete endpoint to remove a file after confirmation.
+6. Return created/overwritten paths, destination URI, and a reminder that the consuming runtime must restart or resynchronize.
 
-Required IAM becomes scoped `s3:ListBucket`, `s3:PutObject`, and `s3:DeleteObject` for the configured skill prefix.
+The explorer renders an expandable hierarchy with file name, last-modified time,
+size, download, and delete actions. Administrators and assigned editors may
+use these actions only for their authorized table bucket's skill prefix.
+
+Required IAM becomes scoped `s3:ListBucket`, `s3:GetObject`, `s3:PutObject`,
+and `s3:DeleteObject` for the configured skill prefix.
 
 ## UI Behavior
 
@@ -308,7 +314,7 @@ Automated tests:
 - NRIC sampling is deterministic; 3/5 triggers encryption, 2/5 does not, detected samples are masked, and every non-empty value is encrypted.
 - Manual encryption is first-upload-only, immutable, and idempotent for existing ciphertext.
 - Single aggregate cast validation replaces per-column Spark actions.
-- Skill bundle authorization, path traversal, limits, frontmatter enforcement, exact replacement, and stale-file deletion.
+- Skill-file authorization, path traversal, limits, frontmatter enforcement, hierarchy metadata, incremental overwrite, download, and confirmed per-file deletion.
 - Two uploads to different tables can run concurrently, the sixth Glue run waits rather than fails, and local processing above its limit reports `QUEUED`.
 - Two mutations to the same table allow exactly one lock owner; the later request receives `TABLE_LOCKED`, can retry from the same session, and starts after release.
 - Lock idempotency, conditional acquisition, ETag-protected renewal/release, stale takeover races, FastAPI restart reconciliation, and fail-closed S3 errors.

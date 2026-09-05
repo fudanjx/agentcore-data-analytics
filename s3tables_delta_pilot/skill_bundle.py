@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import re
 from dataclasses import dataclass
@@ -109,6 +110,24 @@ def parse_paths_json(value: str) -> list[str]:
 
 
 def validate_bundle(table_bucket_arn: str, files: list[tuple[str, bytes]]) -> tuple[str, list[SkillBundleFile]]:
+    """Validate a complete bundle for the legacy replacement endpoint.
+
+    New file-explorer uploads use :func:`validate_upload_files`, which permits
+    an individual resource file to be uploaded without requiring ``SKILL.md``.
+    """
+    bucket_name, normalised = validate_upload_files(table_bucket_arn, files)
+    if not any(item.path == "SKILL.md" for item in normalised):
+        raise SkillBundleError("A skill bundle must contain exactly one root SKILL.md")
+    return bucket_name, normalised
+
+
+def validate_upload_files(table_bucket_arn: str, files: list[tuple[str, bytes]]) -> tuple[str, list[SkillBundleFile]]:
+    """Validate files for incremental upload below one bucket's skill prefix.
+
+    Root ``SKILL.md`` is normalised when included.  Other files can be added or
+    replaced independently, so users can maintain ``references/``, ``scripts/``
+    and ``assets/`` without replacing unrelated objects.
+    """
     bucket_name = table_bucket_name(table_bucket_arn)
     if not files or len(files) > MAX_FILES:
         raise SkillBundleError(f"A skill bundle must contain between 1 and {MAX_FILES} files")
@@ -126,8 +145,6 @@ def validate_bundle(table_bucket_arn: str, files: list[tuple[str, bytes]]) -> tu
             raise SkillBundleError(f"Skill bundle exceeds {MAX_TOTAL_BYTES // (1024 * 1024)} MB total")
         seen.add(path)
         bundle.append(SkillBundleFile(path=path, content=content))
-    if "SKILL.md" not in seen:
-        raise SkillBundleError("A skill bundle must contain exactly one root SKILL.md")
     normalised: list[SkillBundleFile] = []
     for item in bundle:
         content = _normalise_skill_frontmatter(item.content, bucket_name) if item.path == "SKILL.md" else item.content
@@ -135,35 +152,94 @@ def validate_bundle(table_bucket_arn: str, files: list[tuple[str, bytes]]) -> tu
     return bucket_name, normalised
 
 
-def publish_bundle(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
-    bucket_name, bundle = validate_bundle(table_bucket_arn, files)
+def _existing_object_keys(destination_bucket: str, destination_prefix: str) -> set[str]:
+    existing: set[str] = set()
+    paginator = s3.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
+        existing.update(item["Key"] for item in page.get("Contents", []))
+    return existing
+
+
+def list_skill_files(table_bucket_arn: str) -> dict:
+    """Return safe, relative object metadata for one table bucket's skill area."""
+    bucket_name = table_bucket_name(table_bucket_arn)
     destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
-    desired = {f"{destination_prefix}/{item.path}" for item in bundle}
     try:
-        existing: set[str] = set()
+        files: list[dict] = []
         paginator = s3.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
-            existing.update(item["Key"] for item in page.get("Contents", []))
-        ordered = sorted(bundle, key=lambda item: (item.path == "SKILL.md", item.path))
-        uploaded: list[str] = []
-        for item in ordered:
-            key = f"{destination_prefix}/{item.path}"
-            s3.put_object(
-                Bucket=destination_bucket, Key=key, Body=item.content,
-                ContentType="text/markdown; charset=utf-8" if item.path.endswith(".md") else "application/octet-stream",
-                ServerSideEncryption="AES256",
-                Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256]},
-            )
-            uploaded.append(item.path)
-        stale = sorted(existing - desired)
-        for key in stale:
-            s3.delete_object(Bucket=destination_bucket, Key=key)
+            for item in page.get("Contents", []):
+                key = item.get("Key", "")
+                path = key.removeprefix(f"{destination_prefix}/")
+                try:
+                    path = _safe_relative_path(path)
+                except SkillBundleError:
+                    # Ignore S3 folder-marker objects or any pre-existing
+                    # malformed object; the API never exposes it as a path.
+                    continue
+                modified = item.get("LastModified")
+                files.append(
+                    {
+                        "path": path,
+                        "size": int(item.get("Size", 0)),
+                        "last_modified": modified.isoformat() if modified else None,
+                    }
+                )
     except (BotoCoreError, ClientError) as error:
-        raise SkillBundleError("Unable to publish the complete skill bundle to S3", 502) from error
+        raise SkillBundleError("Unable to list skill files from S3", 502) from error
     return {
         "skill_name": bucket_name,
         "destination_uri": destination_uri,
-        "uploaded_paths": uploaded,
-        "deleted_paths": [key.removeprefix(f"{destination_prefix}/") for key in stale],
-        "restart_reminder": "Restart or resynchronize the consuming runtime before it uses the replacement skill bundle.",
+        "files": sorted(files, key=lambda item: item["path"].casefold()),
     }
+
+
+def skill_file_location(table_bucket_arn: str, path: str) -> tuple[str, str, str]:
+    """Return the configured S3 bucket/key after validating a relative path."""
+    bucket_name = table_bucket_name(table_bucket_arn)
+    safe_path = _safe_relative_path(path)
+    destination_bucket, destination_prefix, _ = _destination(bucket_name)
+    return destination_bucket, f"{destination_prefix}/{safe_path}", safe_path
+
+
+def publish_files(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+    """Add or overwrite only the supplied skill files; retain all other files."""
+    bucket_name, bundle = validate_upload_files(table_bucket_arn, files)
+    destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
+    try:
+        existing = _existing_object_keys(destination_bucket, destination_prefix)
+        ordered = sorted(bundle, key=lambda item: (item.path == "SKILL.md", item.path))
+        created: list[str] = []
+        overwritten: list[str] = []
+        for item in ordered:
+            key = f"{destination_prefix}/{item.path}"
+            if key in existing:
+                overwritten.append(item.path)
+            else:
+                created.append(item.path)
+            content_type = mimetypes.guess_type(item.path)[0] or "application/octet-stream"
+            if item.path.endswith(".md"):
+                content_type = "text/markdown; charset=utf-8"
+            s3.put_object(
+                Bucket=destination_bucket, Key=key, Body=item.content,
+                ContentType=content_type,
+                ServerSideEncryption="AES256",
+                Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256]},
+            )
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to upload skill files to S3", 502) from error
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": destination_uri,
+        "uploaded_paths": [item.path for item in ordered],
+        "created_paths": created,
+        "overwritten_paths": overwritten,
+        "restart_reminder": "Restart or resynchronize the consuming runtime before it uses changed skill files.",
+    }
+
+
+def publish_bundle(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+    """Compatibility wrapper; no longer deletes files absent from an upload."""
+    validate_bundle(table_bucket_arn, files)
+    result = publish_files(table_bucket_arn, user_id, files)
+    return {**result, "deleted_paths": []}

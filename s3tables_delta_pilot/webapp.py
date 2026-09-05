@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Literal
+from urllib.parse import quote
 
 import boto3
 import pandas as pd
@@ -32,7 +33,7 @@ import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
 from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse, StreamingResponse
 from pydantic import BaseModel, Field, field_validator
 
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
@@ -64,6 +65,7 @@ UPLOAD_ARCHIVE_LIFECYCLE_RULE_ID = "agentcore-s3tables-upload-archive-30-days"
 TABLE_LOCK_PREFIX = f"{SOURCE_PREFIX}/web_ingest/table_locks"
 PILOT_GLUE_MAX_CONCURRENT_RUNS = int(os.environ.get("PILOT_GLUE_MAX_CONCURRENT_RUNS", "5"))
 PILOT_LOCAL_PROCESSING_CONCURRENCY = int(os.environ.get("PILOT_LOCAL_PROCESSING_CONCURRENCY", "2"))
+GLUE_SESSION_STATUS_POLL_SECONDS = max(5, int(os.environ.get("PILOT_GLUE_STATUS_POLL_SECONDS", "15")))
 ROOT = Path(__file__).parent
 s3 = boto3.client("s3", region_name=REGION)
 s3tables = boto3.client("s3tables", region_name=REGION)
@@ -82,6 +84,7 @@ pending_table_leases: dict[str, TableLease] = {}
 ingestion_progress_hooks: dict[str, Callable[[str], None]] = {}
 local_processing_slots = threading.BoundedSemaphore(PILOT_LOCAL_PROCESSING_CONCURRENCY)
 maintenance_task: asyncio.Task | None = None
+glue_session_monitor_tasks: dict[str, asyncio.Task] = {}
 SUPPORTED_UPLOAD_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 MIN_APPEND_SCHEMA_MATCH_PERCENT = 50.0
 SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "DATE", "TIMESTAMP", "BOOLEAN")
@@ -105,6 +108,9 @@ async def cleanup_abandoned_upload_sessions() -> None:
 async def stop_maintenance_loop() -> None:
     if maintenance_task:
         maintenance_task.cancel()
+    for task in list(glue_session_monitor_tasks.values()):
+        task.cancel()
+    glue_session_monitor_tasks.clear()
 
 
 async def _maintenance_loop() -> None:
@@ -468,6 +474,12 @@ class CreateTableBucketRequest(BaseModel):
 class CreateNamespaceRequest(BaseModel):
     table_bucket_arn: str = Field(min_length=1)
     namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+
+
+class DeleteSkillFileRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    path: str = Field(min_length=1, max_length=1024)
+    confirm: bool = False
 
 
 def _admin_only(user: PilotUser) -> None:
@@ -1507,14 +1519,17 @@ def logout():
 
 @app.get("/")
 def index():
-    return FileResponse(ROOT / "static" / "index.html")
+    # The local pilot is frequently upgraded while a Safari tab remains open.
+    # Avoid serving an old JavaScript bundle that can leave the identity panel
+    # stuck on its initial “Loading…” placeholders.
+    return FileResponse(ROOT / "static" / "index.html", headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.get("/static/{asset}")
 def static(asset: str):
     if asset not in {"app.js", "style.css"}:
         raise HTTPException(404)
-    return FileResponse(ROOT / "static" / asset)
+    return FileResponse(ROOT / "static" / asset, headers={"Cache-Control": "no-store, max-age=0"})
 
 
 @app.get("/api/buckets")
@@ -1569,6 +1584,95 @@ def create_namespace(payload: CreateNamespaceRequest, user: PilotUser = Depends(
     }
 
 
+@app.get("/api/skills/files")
+def list_skill_files(table_bucket_arn: str, user: PilotUser = Depends(_current_user)):
+    """List one authorized table bucket's skill objects for the browser explorer."""
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        return skill_bundle.list_skill_files(table_bucket_arn)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post("/api/skills/files")
+async def upload_skill_files(
+    table_bucket_arn: str = Form(),
+    paths_json: str = Form(),
+    files: list[UploadFile] = File(),
+    user: PilotUser = Depends(_current_user),
+):
+    """Add or overwrite only supplied files below an authorized skill prefix.
+
+    The browser supplies the folder-relative paths separately because standard
+    multipart filenames omit ``webkitRelativePath`` in some browsers.
+    """
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        paths = skill_bundle.parse_paths_json(paths_json)
+        if len(paths) != len(files):
+            raise skill_bundle.SkillBundleError("Each uploaded skill file must have one matching relative path")
+        payload: list[tuple[str, bytes]] = []
+        for path, upload in zip(paths, files, strict=True):
+            payload.append((path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1)))
+        return skill_bundle.publish_files(table_bucket_arn, user.user_id, payload)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+def _stream_s3_object(body) -> Iterator[bytes]:
+    """Yield an S3 body without buffering a skill file into application memory."""
+    try:
+        while chunk := body.read(1024 * 1024):
+            yield chunk
+    finally:
+        body.close()
+
+
+@app.get("/api/skills/files/download")
+def download_skill_file(table_bucket_arn: str, path: str, user: PilotUser = Depends(_current_user)):
+    """Download one safe relative path from an authorized skill prefix."""
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        destination_bucket, key, safe_path = skill_bundle.skill_file_location(table_bucket_arn, path)
+        result = skill_bundle.s3.get_object(Bucket=destination_bucket, Key=key)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            raise HTTPException(404, "The requested skill file no longer exists") from error
+        raise HTTPException(502, "Unable to download the requested skill file from S3") from error
+    filename = safe_path.rsplit("/", 1)[-1]
+    headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
+    if result.get("ContentLength") is not None:
+        headers["Content-Length"] = str(result["ContentLength"])
+    return StreamingResponse(
+        _stream_s3_object(result["Body"]),
+        media_type=result.get("ContentType") or "application/octet-stream",
+        headers=headers,
+    )
+
+
+@app.delete("/api/skills/files")
+def delete_skill_file(payload: DeleteSkillFileRequest, user: PilotUser = Depends(_current_user)):
+    """Delete one confirmed skill object from an authorized bucket prefix."""
+    _require_bucket_access(user, payload.table_bucket_arn)
+    if not payload.confirm:
+        raise HTTPException(422, "Confirm deletion before removing a skill file")
+    try:
+        destination_bucket, key, safe_path = skill_bundle.skill_file_location(payload.table_bucket_arn, payload.path)
+        skill_bundle.s3.head_object(Bucket=destination_bucket, Key=key)
+        skill_bundle.s3.delete_object(Bucket=destination_bucket, Key=key)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in {"404", "NoSuchKey", "NotFound"}:
+            raise HTTPException(404, "The requested skill file no longer exists") from error
+        raise HTTPException(502, "Unable to delete the requested skill file from S3") from error
+    return {"deleted_path": safe_path}
+
+
 @app.post("/api/skills/upload-bundle")
 async def upload_skill_bundle(
     table_bucket_arn: str = Form(),
@@ -1577,21 +1681,15 @@ async def upload_skill_bundle(
     files: list[UploadFile] = File(),
     user: PilotUser = Depends(_current_user),
 ):
-    """Replace an authorized bucket's skill bundle after local validation.
-
-    The browser supplies the folder-relative paths separately because standard
-    multipart filenames omit ``webkitRelativePath`` in some browsers.
-    """
+    """Compatibility endpoint; no longer deletes files omitted from the upload."""
     _require_bucket_access(user, table_bucket_arn)
     if not confirm_replace:
-        raise HTTPException(422, "Confirm replacement before publishing the skill bundle")
+        raise HTTPException(422, "Confirm upload before publishing the skill bundle")
     try:
         paths = skill_bundle.parse_paths_json(paths_json)
         if len(paths) != len(files):
             raise skill_bundle.SkillBundleError("Each uploaded skill file must have one matching relative path")
-        payload: list[tuple[str, bytes]] = []
-        for path, upload in zip(paths, files, strict=True):
-            payload.append((path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1)))
+        payload = [(path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1)) for path, upload in zip(paths, files, strict=True)]
         return skill_bundle.publish_bundle(table_bucket_arn, user.user_id, payload)
     except skill_bundle.SkillBundleError as error:
         raise HTTPException(error.status_code, str(error)) from error
@@ -1689,6 +1787,91 @@ def _session_error(session_id: str, user_id: str, phase: str, message: str, erro
         session_id, user_id, phase="FAILED", progress_message=message,
         error={"code": "SESSION_PROCESSING_FAILED", "message": message, "error_id": error_id},
     )
+
+
+GLUE_TERMINAL_STATES = {"SUCCEEDED", "FAILED", "TIMEOUT", "STOPPED", "ERROR"}
+
+
+def _reconcile_upload_session_glue(session):
+    """Persist the authoritative Glue terminal state when a client reconnects.
+
+    The browser is only a viewer; Glue remains the source of truth.  This
+    reconciliation closes the gap where Glue commits the table successfully
+    but the original browser poller is interrupted, restarted, or times out.
+    """
+    ingestion = session.ingestion or {}
+    job_run_id = ingestion.get("job_run_id")
+    if session.phase != "GLUE_RUNNING" or not job_run_id:
+        return session
+    if ingestion.get("state") in GLUE_TERMINAL_STATES:
+        return session
+    try:
+        run = glue.get_job_run(JobName=WEB_JOB_NAME, RunId=job_run_id, PredecessorsIncluded=False)["JobRun"]
+    except Exception as error:
+        # A transient AWS/API failure must not overwrite a running session.
+        safe_error(logger, "upload_session_glue_reconciliation_failed", session_id=session.session_id, phase="GLUE_RUNNING", job_run_id=job_run_id)
+        return session
+    state = run.get("JobRunState")
+    if state not in GLUE_TERMINAL_STATES:
+        return session
+    final_ingestion = {
+        **ingestion,
+        "job_run_id": job_run_id,
+        "state": state,
+        "error": run.get("ErrorMessage"),
+        "started": str(run.get("StartedOn")),
+        "completed": str(run.get("CompletedOn")),
+    }
+    _release_table_mutation_lock(job_run_id)
+    if state == "SUCCEEDED":
+        arguments = run.get("Arguments", {})
+        if arguments.get("--MODE") == "create":
+            try:
+                _configure_snapshot_retention(arguments["--TABLE_BUCKET_ARN"], arguments["--NAMESPACE"], arguments["--TABLE"])
+                final_ingestion["retention_configured"] = True
+            except Exception as error:
+                final_ingestion["retention_configured"] = False
+                final_ingestion["retention_warning"] = str(error)
+        return upload_sessions.update(
+            session.session_id, session.owner_user_id, phase="SUCCEEDED",
+            progress_message="AWS Glue completed successfully and the table update was committed.",
+            error=None, ingestion=final_ingestion,
+        )
+    message = f"AWS Glue ended with state {state}."
+    if final_ingestion.get("error"):
+        message = f"AWS Glue ended with state {state}: {final_ingestion['error']}"
+    return upload_sessions.update(
+        session.session_id, session.owner_user_id, phase="FAILED",
+        progress_message=message,
+        error={"code": "GLUE_JOB_FAILED", "message": message}, ingestion=final_ingestion,
+    )
+
+
+async def _monitor_upload_session_glue(session_id: str, user_id: str, job_run_id: str) -> None:
+    """Reconcile Glue completion without depending on a browser poller."""
+    try:
+        while True:
+            try:
+                session = upload_sessions.get(session_id, user_id)
+            except KeyError:
+                return
+            if session.phase != "GLUE_RUNNING" or (session.ingestion or {}).get("job_run_id") != job_run_id:
+                return
+            reconciled = _reconcile_upload_session_glue(session)
+            if reconciled.phase in {"SUCCEEDED", "FAILED"}:
+                logger.info(
+                    "upload_session_glue_reconciled",
+                    extra={"session_id": session_id, "job_run_id": job_run_id, "phase": reconciled.phase},
+                )
+                return
+            await asyncio.sleep(GLUE_SESSION_STATUS_POLL_SECONDS)
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # The browser/session GET path remains able to reconcile later.
+        safe_error(logger, "upload_session_glue_monitor_failed", session_id=session_id, job_run_id=job_run_id)
+    finally:
+        glue_session_monitor_tasks.pop(session_id, None)
 
 
 @contextmanager
@@ -1805,7 +1988,9 @@ async def create_upload_session(
 @app.get("/api/v2/upload-sessions/{session_id}")
 def get_upload_session(session_id: str, user: PilotUser = Depends(_current_user)):
     try:
-        return upload_sessions.get(session_id, user.user_id).safe_dict()
+        session = upload_sessions.get(session_id, user.user_id)
+        session = _reconcile_upload_session_glue(session)
+        return session.safe_dict()
     except KeyError as error:
         raise HTTPException(404, "The upload session does not exist, belongs to another user, or has expired") from error
 
@@ -1881,6 +2066,12 @@ async def _start_session_ingestion(session_id: str, user: PilotUser, payload: Se
         upload_sessions.update(
             session_id, user.user_id, phase="GLUE_RUNNING",
             progress_message="AWS Glue is queued or running the Iceberg mutation.", ingestion=result,
+        )
+        previous_monitor = glue_session_monitor_tasks.pop(session_id, None)
+        if previous_monitor:
+            previous_monitor.cancel()
+        glue_session_monitor_tasks[session_id] = asyncio.create_task(
+            _monitor_upload_session_glue(session_id, user.user_id, result["job_run_id"])
         )
         logger.info("upload_session_glue_started", extra={"session_id": session_id, "phase": "GLUE_RUNNING", "job_run_id": result["job_run_id"]})
     except HTTPException as error:
@@ -2358,7 +2549,19 @@ def start_rollback(payload: RollbackRequest, user: PilotUser = Depends(_current_
 
 @app.get("/api/ingestions/{job_run_id}")
 def ingestion_status(job_run_id: str, operation: Literal["ingestion", "rollback"] = "ingestion"):
-    run = glue.get_job_run(JobName=WEB_JOB_NAME, RunId=job_run_id, PredecessorsIncluded=False)["JobRun"]
+    try:
+        run = glue.get_job_run(JobName=WEB_JOB_NAME, RunId=job_run_id, PredecessorsIncluded=False)["JobRun"]
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in {"EntityNotFoundException", "ResourceNotFoundException"}:
+            raise HTTPException(
+                404,
+                detail={"code": "GLUE_RUN_NOT_FOUND", "message": "The Glue run is not visible yet; status checking will retry."},
+            ) from error
+        raise HTTPException(
+            502,
+            detail={"code": "GLUE_STATUS_UNAVAILABLE", "message": "AWS Glue status is temporarily unavailable; status checking will retry."},
+        ) from error
     state = run["JobRunState"]
     message = {
         "STARTING": "Rollback is starting in AWS Glue…" if operation == "rollback" else "ETL is starting in AWS Glue…",
@@ -2385,7 +2588,7 @@ def ingestion_status(job_run_id: str, operation: Literal["ingestion", "rollback"
     if state in {"SUCCEEDED", "FAILED", "TIMEOUT", "STOPPED", "ERROR"}:
         _release_table_mutation_lock(job_run_id)
     return {
-        "state": state, "message": message, "error": run.get("ErrorMessage"),
+        "job_run_id": job_run_id, "state": state, "message": message, "error": run.get("ErrorMessage"),
         "started": str(run.get("StartedOn")), "completed": str(run.get("CompletedOn")),
         "retention_configured": retention_configured, "retention_warning": retention_warning,
     }

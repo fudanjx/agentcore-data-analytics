@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import shutil
 import tempfile
@@ -96,11 +97,24 @@ class UploadSessionStore:
         )
         with self._lock:
             self._sessions[session_id] = session
+            self._write_metadata_locked(session)
         return session
 
     def get(self, session_id: str, owner_user_id: str) -> UploadSession:
         with self._lock:
             session = self._sessions.get(session_id)
+            if session is None:
+                # Recover metadata after a service restart. Upload bytes remain
+                # in the private session directory and are never put in this
+                # JSON file.
+                metadata = self.root / session_id / "session.json"
+                try:
+                    value = json.loads(metadata.read_text(encoding="utf-8"))
+                    session = self._from_dict(value)
+                except (FileNotFoundError, OSError, ValueError, TypeError, KeyError):
+                    session = None
+                if session is not None:
+                    self._sessions[session_id] = session
             if not session or session.owner_user_id != owner_user_id:
                 raise KeyError(session_id)
             if datetime.fromisoformat(session.expires_at) <= datetime.now(timezone.utc):
@@ -121,6 +135,7 @@ class UploadSessionStore:
             for key, value in values.items():
                 setattr(session, key, value)
             session.updated_at = now
+            self._write_metadata_locked(session)
             return session
 
     def delete(self, session_id: str, owner_user_id: str) -> None:
@@ -130,7 +145,18 @@ class UploadSessionStore:
 
     def cleanup_expired(self) -> int:
         with self._lock:
-            expired = [session_id for session_id, session in self._sessions.items()
+            known = dict(self._sessions)
+            # Include sessions created by a previous process so a restart does
+            # not leave their private upload bytes behind indefinitely.
+            for metadata in self.root.glob("*/session.json"):
+                session_id = metadata.parent.name
+                if session_id in known:
+                    continue
+                try:
+                    known[session_id] = self._from_dict(json.loads(metadata.read_text(encoding="utf-8")))
+                except (FileNotFoundError, OSError, ValueError, TypeError, KeyError):
+                    continue
+            expired = [session_id for session_id, session in known.items()
                        if datetime.fromisoformat(session.expires_at) <= datetime.now(timezone.utc)]
             for session_id in expired:
                 self._remove_locked(session_id)
@@ -138,5 +164,18 @@ class UploadSessionStore:
 
     def _remove_locked(self, session_id: str) -> None:
         session = self._sessions.pop(session_id, None)
-        if session and session.files:
-            shutil.rmtree(Path(session.files[0].path).parent, ignore_errors=True)
+        directory = Path(session.files[0].path).parent if session and session.files else self.root / session_id
+        shutil.rmtree(directory, ignore_errors=True)
+
+    @staticmethod
+    def _from_dict(value: dict[str, Any]) -> UploadSession:
+        files = [SessionFile(**item) for item in value.pop("files", [])]
+        return UploadSession(files=files, **value)
+
+    def _write_metadata_locked(self, session: UploadSession) -> None:
+        path = self.root / session.session_id / "session.json"
+        temporary = path.with_suffix(".json.tmp")
+        value = asdict(session)
+        temporary.write_text(json.dumps(value, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+        temporary.chmod(0o600)
+        temporary.replace(path)
