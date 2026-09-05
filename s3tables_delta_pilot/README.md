@@ -20,28 +20,49 @@ Start it from the repository root:
 
 Open `http://127.0.0.1:8090`.
 
-## Bucket skill builder
+## Uploader v2 operation
+
+The pilot UI uses only the session API: it copies the selected source files
+once into a private node-local directory (mode `0700`, files `0600`), profiles
+them asynchronously, and reconnects after a browser refresh through
+`sessionStorage`. The former multipart endpoints `/api/preflight`,
+`/api/key-impact-analysis`, and `/api/ingestions` now return a structured HTTP
+`410` migration response and never parse or stage request files.
+
+The service reports `PROFILING`, `KEY_ANALYSING`, `QUEUED`, local staging, and
+Glue phases in the browser with elapsed phase time and the last request ID.
+Local heavy work is limited by `PILOT_LOCAL_PROCESSING_CONCURRENCY` (default
+`2`); excess sessions remain safely queued. The generated Glue job uses four
+`G.1X` workers, a 60-minute timeout, no automatic retries, and configurable
+queued concurrency through `PILOT_GLUE_MAX_CONCURRENT_RUNS` (default `5`).
+
+Every table mutation acquires an S3 conditional lease under
+`temp_s3_update/web_ingest/table_locks/`. Mutations to different tables can
+prepare and queue independently; a second mutation to the same table receives
+HTTP `409 TABLE_LOCKED` without losing its reviewed session. Active leases are
+renewed every five minutes, and the bounded lock prefix is reconciled when the
+service starts. The service role therefore needs scoped `s3:ListBucket`,
+`s3:GetObject`, `s3:PutObject`, and `s3:DeleteObject` access to that prefix.
+
+## Skill-bundle upload
 
 After selecting an authorized S3 Tables bucket, an administrator or assigned
-editor can send instructions to the configured Dify skill-building agent. The
-pilot uses Dify's blocking chat-message mode, extracts the returned
-`s3://.../SKILL.md` URI, downloads the generated Markdown, and replaces its
-YAML frontmatter `name` with the selected S3 Tables bucket name. The user can
-review and edit the complete file before confirming publication.
+editor may upload a complete skill folder containing one root `SKILL.md` plus
+optional `references/`, `scripts/`, and `assets/` files. This pilot does not
+call Dify or generate skill content. It validates every relative path and
+UTF-8 frontmatter, forces the frontmatter `name` to the selected bucket name,
+uploads resources first and `SKILL.md` last, then removes stale files from the
+previous bundle.
 
-Configure the integration through environment variables:
+Configure the S3 destination (defaults shown):
 
 ```dotenv
-SKILL_BUILD_DIFY_URL=https://dify-eks.bot-alex.com/v1/chat-messages
-SKILL_BUILD_DIFY_API_KEY=<secret>
-SKILL_BUILD_DESTINATION_BUCKET=agentcore-harness-dev
-SKILL_BUILD_DESTINATION_PREFIX=skills/
-SKILL_BUILD_MAX_BYTES=200000
-SKILL_BUILD_TIMEOUT_SECONDS=300
+PILOT_SKILL_BUNDLE_BUCKET=agentcore-harness-dev
+PILOT_SKILL_BUNDLE_PREFIX=skills
 ```
 
-The final object uses the Agent Skills directory contract. For a table bucket
-named `ah-soc-delta-pilot`, the destination and normalized frontmatter are:
+For a table bucket named `ah-soc-delta-pilot`, the destination and normalized
+frontmatter are:
 
 ```text
 s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/SKILL.md
@@ -54,13 +75,11 @@ description: ...
 ---
 ```
 
-The backend enforces the name again when the edited document is published.
-The browser never receives the Dify API key, and all bucket authorization is
-rechecked on both build and publish requests. Give the pilot service narrowly
-scoped `s3:GetObject` access to Dify's generated `SKILL.md` objects and
-`s3:PutObject` access to the configured destination prefix. Current agent
-runtimes synchronize skills at startup, so restart or resynchronize them after
-publishing a new skill.
+The backend rechecks bucket authorization before publication. A bundle is
+limited to 500 files, 50 MB per file, and 250 MB total. Give the pilot service
+scoped `s3:ListBucket`, `s3:PutObject`, and `s3:DeleteObject` permissions for
+the configured destination prefix. Current agent runtimes synchronize skills
+at startup, so restart or resynchronize them after replacing a bundle.
 
 The UI lists the S3 Tables buckets and namespaces assigned to the current user,
 then lists tables only in the selected scope. It supports creating a new table
@@ -108,7 +127,9 @@ always `STRING` and are not user-selectable.
 
 For a new table, the preflight also presents every stored column as a possible
 de-duplication component. It shows up to five ephemeral sample values for
-non-sensitive fields, with non-null and distinct-value counts. Samples for
+non-sensitive fields, with non-null counts. Exact key cardinality is computed
+only if key-impact analysis is requested, avoiding an expensive distinct scan
+for every column during initial review. Samples for
 healthcare-sanitized fields remain masked. These review-only values are never
 written to S3 staging, Glue arguments, QC reports, or upload history. After an
 operator selects a composite key, the local service analyses the complete
@@ -222,13 +243,15 @@ written under a separate backup prefix. Raw pre-sanitization upload bytes are
 never retained. A prefix-only lifecycle rule retains this archive for 30 days
 before expiry.
 
-For tables created after the key-policy enhancement, the first upload defines
-both the immutable schema and one or more de-duplication columns. Later uploads
-are reduced by that key before any write. A new key is appended; an existing
-key with an identical full row is skipped as a duplicate; and an existing key
-with different non-key values is skipped as a conflict. QC reports counts and
-differing column names only—never row values. Existing tables without a saved
-key contract retain the original null-safe full-row de-duplication behavior.
+Each upload explicitly chooses either **My data is clean** (append without any
+within-upload grouping, row fingerprinting, or target-table de-duplication
+scan) or **De-duplicate using a composite key**. A keyed first upload requires
+the composite-key impact review and acknowledgement. If an older table has no
+key, a later keyed upload can establish one prospectively; it does not rewrite
+older rows. Keyed appends remove exact repeated incoming rows, skip all
+same-key/different-row conflicts, then read only target key columns for the
+left-anti join. QC/audit records counts and safe metadata only—never row
+values.
 Encrypted case and patient identifiers (for example CSN, case number, HRN, and
 MRN) remain masked in the browser but may be selected as de-duplication keys:
 the uploader's normalisation and legacy-compatible encryption representation is

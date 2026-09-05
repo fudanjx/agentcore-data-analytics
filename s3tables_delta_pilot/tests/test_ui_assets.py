@@ -18,11 +18,9 @@ from s3tables_delta_pilot.webapp import (
     CreateTableBucketRequest,
     IngestionRequest,
     RollbackRequest,
-    SkillBuildRequest,
-    SkillPublishRequest,
     UPLOAD_HISTORY_TABLE,
     _apply_create_type_overrides,
-    build_bucket_skill,
+    _activate_late_deduplication_contract,
     _create_deduplication_candidates,
     _create_type_selection_samples,
     _composite_key_metrics,
@@ -41,9 +39,13 @@ from s3tables_delta_pilot.webapp import (
     _sign_key_analysis,
     _unsafe_cast_issues,
     _preflight,
-    publish_bucket_skill,
     _raw_key_impact_metrics,
+    _report_ingestion_progress,
+    retired_ingestions,
+    retired_key_impact_analysis,
+    retired_preflight,
     _validate_create_deduplication_columns,
+    ingestion_progress_hooks,
 )
 from starlette.datastructures import UploadFile
 
@@ -53,6 +55,18 @@ GLUE_JOB = Path(__file__).parents[1] / "generic_glue_job.py"
 
 
 class UiAssetTests(unittest.TestCase):
+    def test_retired_multipart_routes_are_lightweight_410_tombstones(self):
+        for handler, replacement in (
+            (retired_preflight, "POST /api/v2/upload-sessions"),
+            (retired_key_impact_analysis, "POST /api/v2/upload-sessions/{session_id}/key-impact"),
+            (retired_ingestions, "POST /api/v2/upload-sessions/{session_id}/ingestions"),
+        ):
+            response = asyncio.run(handler())
+            self.assertEqual(410, response.status_code)
+            payload = json.loads(response.body)
+            self.assertEqual("MULTIPART_API_RETIRED", payload["code"])
+            self.assertEqual(replacement, payload["replacement"])
+
     def test_unselected_table_card_has_a_dark_text_colour(self):
         css = (STATIC / "style.css").read_text()
         self.assertIn(".table {", css)
@@ -77,6 +91,18 @@ class UiAssetTests(unittest.TestCase):
                 table_bucket_arn=TABLE_BUCKET_ARN, namespace=NAMESPACE, reporting_month="",
             )
 
+    def test_v2_deduplication_mode_is_explicit_and_supports_clean_append(self):
+        clean = IngestionRequest(
+            mode="append", table="soc", request_id="test", table_bucket_arn=TABLE_BUCKET_ARN,
+            namespace=NAMESPACE, reporting_month="clean reload", deduplication_mode="none",
+        )
+        self.assertEqual("none", clean.deduplication_mode)
+        keyed = IngestionRequest(
+            mode="create", table="soc_new", request_id="test", table_bucket_arn=TABLE_BUCKET_ARN,
+            namespace=NAMESPACE, reporting_month="initial", deduplication_mode="keyed", deduplication_columns=["case_no"],
+        )
+        self.assertEqual(["case_no"], keyed.deduplication_columns)
+
     def test_rollback_request_requires_explicit_confirmation_field(self):
         request = RollbackRequest(
             table="soc", table_bucket_arn=TABLE_BUCKET_ARN, namespace=NAMESPACE,
@@ -99,6 +125,14 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn('Enter a user tag', javascript)
         self.assertIn('To enable Review upload:', javascript)
         self.assertIn("if (data.tables.length === 0)", javascript)
+        self.assertIn('id="deduplication-mode"', html)
+        self.assertIn('My data is clean', html)
+        self.assertIn('De-duplicate using a composite key', html)
+        self.assertIn('/api/v2/upload-sessions', javascript)
+        self.assertIn('sessionStorage', javascript)
+        self.assertNotIn("apiFetch('/api/preflight'", javascript)
+        self.assertNotIn("apiFetch('/api/key-impact-analysis'", javascript)
+        self.assertNotIn("apiFetch('/api/ingestions'", javascript)
 
     def test_admin_ui_can_create_table_buckets_and_namespaces(self):
         html = (STATIC / "index.html").read_text()
@@ -114,67 +148,17 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("buckets.push(preferredBucket)", javascript)
         self.assertIn("namespaces.push(preferredNamespace)", javascript)
 
-    def test_bucket_skill_builder_ui_supports_edit_and_confirm(self):
+    def test_bucket_skill_bundle_ui_requires_folder_and_replacement_confirmation(self):
         html = (STATIC / "index.html").read_text()
         javascript = (STATIC / "app.js").read_text()
-        self.assertIn('id="skill-instruction"', html)
-        self.assertIn('id="skill-content"', html)
-        self.assertIn('id="publish-skill"', html)
-        self.assertIn("'/api/skills/build'", javascript)
-        self.assertIn("/api/skills/publish?", javascript)
-        self.assertIn("clearSkillDraft(true)", javascript)
-        self.assertIn("Confirm and publish SKILL.md", javascript)
-        self.assertNotIn("SKILL_BUILD_DIFY_API_KEY", html + javascript)
-
-    def test_editor_can_build_and_publish_only_for_an_assigned_bucket(self):
-        with patch.dict("os.environ", {}, clear=True):
-            editor = _current_user("local-editor")
-        draft = {
-            "source_uri": "s3://ah-dify/run/SKILL.md",
-            "destination_uri": "s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/SKILL.md",
-            "skill_name": "ah-soc-delta-pilot",
-            "content": "---\nname: ah-soc-delta-pilot\ndescription: Test\n---\n",
-        }
-        with patch(
-            "s3tables_delta_pilot.webapp.skill_builder.build_skill_draft",
-            return_value=draft,
-        ) as build:
-            result = build_bucket_skill(
-                SkillBuildRequest(
-                    table_bucket_arn=TABLE_BUCKET_ARN,
-                    instruction="Build an admissions skill",
-                ),
-                editor,
-            )
-        self.assertEqual(draft, result)
-        build.assert_called_once_with(
-            "Build an admissions skill", "local-editor", TABLE_BUCKET_ARN
-        )
-
-        published = {**draft, "etag": "etag", "version_id": None}
-        with patch(
-            "s3tables_delta_pilot.webapp.skill_builder.publish_skill",
-            return_value=published,
-        ) as publish:
-            result = publish_bucket_skill(
-                SkillPublishRequest(content=draft["content"]),
-                TABLE_BUCKET_ARN,
-                editor,
-            )
-        self.assertEqual(published, result)
-        publish.assert_called_once_with(
-            draft["content"], "local-editor", TABLE_BUCKET_ARN
-        )
-
-        with self.assertRaises(Exception) as denied:
-            build_bucket_skill(
-                SkillBuildRequest(
-                    table_bucket_arn="arn:aws:s3tables:ap-southeast-1:123456789012:bucket/other-bucket",
-                    instruction="Build an unauthorized skill",
-                ),
-                editor,
-            )
-        self.assertEqual(403, denied.exception.status_code)
+        self.assertIn('id="skill-bundle-files"', html)
+        self.assertIn('id="skill-confirm-replace"', html)
+        self.assertIn('id="upload-skill-bundle"', html)
+        self.assertIn("'/api/skills/upload-bundle'", javascript)
+        self.assertIn("clearSkillBundle()", javascript)
+        self.assertNotIn("/api/skills/build", html + javascript)
+        self.assertNotIn("/api/skills/publish", html + javascript)
+        self.assertNotIn("Dify", html + javascript)
 
     def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
         with patch.dict("os.environ", {}, clear=True):
@@ -228,18 +212,17 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("rollback_to_snapshot", script)
         self.assertIn('status="ROLLED_BACK"', script)
 
-    def test_glue_job_deduplicates_full_rows_before_append(self):
+    def test_glue_job_supports_fast_clean_append_and_narrow_keyed_deduplication(self):
         script = GLUE_JOB.read_text()
         self.assertIn("def _deduplicate_incoming_by_keys", script)
-        self.assertIn("def _exclude_existing_rows", script)
         self.assertIn("def _keyed_rows_to_append", script)
-        self.assertIn("existing_key_conflicts", script)
+        self.assertIn('deduplication_mode == "none"', script)
+        self.assertIn("existing_key_overlap_rows", script)
         self.assertIn("within_upload_key_conflicts", script)
         self.assertIn("def _with_composite_key", script)
         self.assertIn("__uploader_composite_key", script)
-        self.assertIn("eqNullSafe", script)
         self.assertIn("duplicate_rows_within_upload", script)
-        self.assertIn("duplicate_rows_already_in_table", script)
+        self.assertIn("spark.table(TARGET).select(*key_columns)", script)
 
     def test_staging_converts_time_of_day_to_spark_compatible_string(self):
         with TemporaryDirectory() as directory:
@@ -266,6 +249,46 @@ class UiAssetTests(unittest.TestCase):
             finally:
                 if staged != source:
                     staged.unlink(missing_ok=True)
+
+    def test_explicit_timestamp_choice_nulls_only_incompatible_values(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "mixed-timestamp.parquet"
+            pq.write_table(pa.table({"Event": ["0.0", "2008-01-31 12:34:00"]}), source)
+
+            with self.assertRaisesRegex(ValueError, "TIMESTAMP conversion would discard 1"):
+                _make_glue_compatible_parquet(
+                    source, source.name, target_schema=[{"name": "event", "type": "TIMESTAMP"}]
+                )
+            staged, transformed, audit = _make_glue_compatible_parquet(
+                source, source.name, target_schema=[{"name": "event", "type": "TIMESTAMP"}],
+                lossy_temporal_columns={"event"},
+            )
+            try:
+                self.assertTrue(transformed)
+                self.assertEqual([None, datetime(2008, 1, 31, 12, 34)], pq.read_table(staged)["event"].to_pylist())
+                self.assertEqual({"event": 1}, audit["lossy_temporal_nulls"])
+            finally:
+                if staged != source:
+                    staged.unlink(missing_ok=True)
+
+    def test_type_review_reports_values_lost_by_explicit_temporal_choice(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "mixed-timestamp.parquet"
+            pq.write_table(pa.table({"Event": ["0.0", "2008-01-31 12:34:00"]}), source)
+            with source.open("rb") as stream:
+                choices = _create_type_selection_samples(
+                    UploadFile(filename=source.name, file=stream),
+                    [{"column": "event", "source_type": "STRING", "suggested_target_type": "TIMESTAMP"}],
+                )
+            self.assertEqual(1, choices[0]["lossy_target_types"]["TIMESTAMP"]["invalid_value_count"])
+            self.assertEqual("invalid_values_become_null", choices[0]["lossy_target_types"]["TIMESTAMP"]["behaviour"])
+
+    def test_session_ingestion_progress_callback_is_safe_and_request_scoped(self):
+        messages: list[str] = []
+        with patch.dict(ingestion_progress_hooks, {"request-1": messages.append}, clear=True):
+            _report_ingestion_progress("request-1", "Staging sanitized file 1 of 1 in S3.")
+            _report_ingestion_progress("unregistered-request", "This must be ignored.")
+        self.assertEqual(["Staging sanitized file 1 of 1 in S3."], messages)
 
     def test_staging_preserves_a_valid_year_9999_date(self):
         with TemporaryDirectory() as directory:
@@ -354,7 +377,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("Random non-empty examples", javascript)
         self.assertIn("samples_masked", javascript)
         self.assertIn("Choose de-duplication columns", javascript)
-        self.assertIn("deduplication_columns: selectedDeduplicationColumns()", javascript)
+        self.assertIn("deduplication_columns: selectedDeduplicationMode() === 'keyed' ? selectedDeduplicationColumns() : []", javascript)
         self.assertIn('id="select-all-deduplication"', javascript)
         self.assertIn("function toggleAllDeduplicationColumns()", javascript)
         self.assertIn("control => !control.disabled", javascript)
@@ -385,7 +408,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertEqual(["case_number", "pat_enc_csn_id"], [item["column"] for item in result])
         self.assertTrue(result[0]["sample_values"])
         self.assertEqual(2, result[0]["non_null_count"])
-        self.assertEqual(2, result[0]["distinct_non_null_count"])
+        self.assertIsNone(result[0]["distinct_non_null_count"])
         self.assertTrue(result[1]["samples_masked"])
         self.assertTrue(result[1]["deduplication_eligible"])
 
@@ -454,13 +477,15 @@ class UiAssetTests(unittest.TestCase):
 
     def test_ui_requires_a_current_acknowledged_key_analysis_before_create_upload(self):
         javascript = (STATIC / "app.js").read_text()
-        self.assertIn("/api/key-impact-analysis", javascript)
+        self.assertIn("/key-impact", javascript)
         self.assertIn("acknowledge-key-analysis", javascript)
         self.assertIn("key_analysis_token", javascript)
         self.assertIn("Analyse selected key impact", javascript)
         self.assertIn("Current composite key:", javascript)
         self.assertIn("key-analysis-status", javascript)
         self.assertIn("Analysing selected key…", javascript)
+        self.assertIn("restoredDeduplicationColumns = session.key_impact?.deduplication_columns", javascript)
+        self.assertIn("restoredTypeOverrides = session.key_impact?.type_overrides", javascript)
 
     def test_ui_shows_in_progress_and_failure_status_for_upload_review(self):
         html = (STATIC / "index.html").read_text()
@@ -519,6 +544,25 @@ class UiAssetTests(unittest.TestCase):
             result = _preflight("append", TABLE_BUCKET_ARN, NAMESPACE, "soc", [upload])
         self.assertTrue(result["accepted"])
         self.assertEqual(50.0, result["files"][0]["matching_percentage"])
+        self.assertEqual(10, len(result["deduplication_candidates"]))
+
+    def test_late_key_activation_preserves_schema_and_sets_immutable_key(self):
+        contract = {
+            "contract_version": 1,
+            "schema": [{"name": "case_no", "type": "STRING"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+        }
+        with patch("s3tables_delta_pilot.webapp.s3.head_object", return_value={"ETag": '"contract-etag"'}), patch("s3tables_delta_pilot.webapp.s3.put_object") as put_object:
+            _activate_late_deduplication_contract(
+                TABLE_BUCKET_ARN, NAMESPACE, "legacy_table", contract, ["case_no"], "local-admin",
+            )
+        saved = json.loads(put_object.call_args.kwargs["Body"])
+        self.assertEqual(contract["schema"], saved["schema"])
+        self.assertEqual(["case_no"], saved["deduplication_columns"])
+        self.assertEqual("keyed", saved["deduplication_mode"])
+        self.assertEqual("contract-etag", put_object.call_args.kwargs["IfMatch"])
+        self.assertEqual("local-admin", saved["deduplication_activated_by"])
 
     def test_append_preflight_rejects_values_that_would_become_null_after_cast(self):
         sink = pa.BufferOutputStream()

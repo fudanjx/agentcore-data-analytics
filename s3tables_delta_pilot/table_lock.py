@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 
 class TableLockError(RuntimeError):
@@ -93,9 +93,11 @@ class S3TableLockManager:
         except ClientError as error:
             if not is_precondition_failure(error):
                 raise TableLockError("Unable to acquire the table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to acquire the table mutation lock") from error
         try:
             existing, etag = self._read(key)
-        except ClientError as error:
+        except (ClientError, BotoCoreError) as error:
             raise TableLockError("Unable to read the current table mutation lock") from error
         if existing.get("request_id") == request_id and existing.get("owner_token") == owner_token:
             return TableLease(key, etag, owner_token, existing)
@@ -112,6 +114,8 @@ class S3TableLockManager:
             if is_precondition_failure(error):
                 raise TableLockedError(existing) from error
             raise TableLockError("Unable to take over the expired table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to take over the expired table mutation lock") from error
 
     def renew(self, lease: TableLease, phase: str, glue_job_run_id: str | None = None) -> TableLease:
         payload = {**lease.payload, "phase": phase, "lease_expires_at": self._expires_at()}
@@ -124,6 +128,8 @@ class S3TableLockManager:
             )
         except ClientError as error:
             raise TableLockError("Unable to renew the table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to renew the table mutation lock") from error
         return TableLease(lease.key, response.get("ETag", "").strip('"'), lease.owner_token, payload)
 
     def release(self, lease: TableLease) -> None:
@@ -133,3 +139,20 @@ class S3TableLockManager:
             if is_precondition_failure(error):
                 raise TableLockError("The table mutation lock changed before release") from error
             raise TableLockError("Unable to release the table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to release the table mutation lock") from error
+
+    def list_leases(self) -> list[TableLease]:
+        """List only the bounded lock prefix for startup reconciliation."""
+        leases: list[TableLease] = []
+        try:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=f"{self.prefix}/"):
+                for item in page.get("Contents", []):
+                    payload, etag = self._read(item["Key"])
+                    owner_token = payload.get("owner_token")
+                    if isinstance(owner_token, str) and owner_token and etag:
+                        leases.append(TableLease(item["Key"], etag, owner_token, payload))
+        except (ClientError, BotoCoreError) as error:
+            raise TableLockError("Unable to list table mutation locks") from error
+        return leases

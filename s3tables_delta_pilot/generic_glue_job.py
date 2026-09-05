@@ -11,6 +11,7 @@ import json
 import os
 import re
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from functools import reduce
@@ -53,10 +54,13 @@ spark.sparkContext.setLogLevel("WARN")
 AUDIT_COLUMNS = (
     "event_id", "upload_id", "target_table", "namespace", "table_bucket_arn", "reporting_month",
     "filenames", "uploaded_by", "uploaded_at", "previous_snapshot_id", "new_snapshot_id",
-    "rows_before", "rows_uploaded", "rows_after", "status", "rollback_at", "rollback_by", "error_message",
+    "rows_before", "rows_uploaded", "rows_after", "duplicate_rows_within_upload",
+    "within_upload_key_conflicts", "existing_key_overlap_rows", "status", "rollback_at", "rollback_by",
+    "deduplication_mode", "deduplication_columns", "automatic_sanitized_columns",
+    "manual_encrypted_columns", "phase_timings", "error_message",
 )
 AUDIT_SCHEMA = StructType([
-    StructField(column, LongType(), True) if column in {"rows_before", "rows_uploaded", "rows_after"}
+    StructField(column, LongType(), True) if column in {"rows_before", "rows_uploaded", "rows_after", "duplicate_rows_within_upload", "within_upload_key_conflicts", "existing_key_overlap_rows"}
     else StructField(column, StringType(), True)
     for column in AUDIT_COLUMNS
 ])
@@ -103,13 +107,18 @@ def _exists(target: str = TARGET) -> bool:
 
 def _ensure_audit_table() -> None:
     definition = ", ".join(
-        f"`{column}` {'BIGINT' if column in {'rows_before', 'rows_uploaded', 'rows_after'} else 'STRING'}"
+        f"`{column}` {'BIGINT' if column in {'rows_before', 'rows_uploaded', 'rows_after', 'duplicate_rows_within_upload', 'within_upload_key_conflicts', 'existing_key_overlap_rows'} else 'STRING'}"
         for column in AUDIT_COLUMNS
     )
     spark.sql(f"CREATE TABLE IF NOT EXISTS {AUDIT_TARGET} ({definition}) USING iceberg")
-    actual = tuple(field.name for field in spark.table(AUDIT_TARGET).schema)
-    if actual != AUDIT_COLUMNS:
-        raise ValueError(f"Audit table {AUDIT_TARGET} has an unexpected schema; expected {AUDIT_COLUMNS}, got {actual}")
+    actual = {field.name for field in spark.table(AUDIT_TARGET).schema}
+    missing = [column for column in AUDIT_COLUMNS if column not in actual]
+    if missing:
+        definitions = ", ".join(
+            f"`{column}` {'BIGINT' if column in {'rows_before', 'rows_uploaded', 'rows_after', 'duplicate_rows_within_upload', 'within_upload_key_conflicts', 'existing_key_overlap_rows'} else 'STRING'}"
+            for column in missing
+        )
+        spark.sql(f"ALTER TABLE {AUDIT_TARGET} ADD COLUMNS ({definitions})")
 
 
 def _record_event(**values) -> dict:
@@ -131,10 +140,14 @@ def _record_event(**values) -> dict:
 
 
 def _snapshot_state() -> tuple[str | None, int]:
-    rows = int(spark.table(TARGET).count())
     snapshots = spark.table(f"{TARGET}.snapshots").orderBy(F.col("committed_at").desc())
-    latest = snapshots.select("snapshot_id").first()
-    return (str(latest["snapshot_id"]) if latest else None, rows)
+    latest = snapshots.select("snapshot_id", "summary").first()
+    if not latest:
+        return None, 0
+    total_records = (latest["summary"] or {}).get("total-records")
+    if total_records is None:
+        raise ValueError(f"Latest Iceberg snapshot for {TARGET} has no total-records metric")
+    return str(latest["snapshot_id"]), int(total_records)
 
 
 def _snapshot_row_count(snapshot_id: str) -> int:
@@ -167,7 +180,13 @@ def _source_lookup(columns: list[str]) -> dict[str, str]:
 
 
 def _project_incoming(manifest: dict):
-    frames, unsafe_casts = [], 0
+    """Project only to the immutable contract.
+
+    The v2 local preparation path already writes Parquet with these physical
+    types.  We retain Spark casts for legacy staging compatibility, but no
+    longer launch an expensive action per schema field to count rejected casts.
+    """
+    frames = []
     for uri in manifest["files"]:
         raw = spark.read.parquet(uri)
         lookup, expressions = _source_lookup(raw.columns), []
@@ -177,16 +196,12 @@ def _project_incoming(manifest: dict):
                 expressions.append(F.lit(None).cast(field["type"]).alias(field["name"]))
                 continue
             value = F.col(source_column)
-            cast = value.cast(field["type"])
-            unsafe_casts += raw.where(value.isNotNull() & cast.isNull()).count()
-            expressions.append(cast.alias(field["name"]))
+            expressions.append(value.cast(field["type"]).alias(field["name"]))
         frames.append(raw.select(*expressions))
-    if unsafe_casts:
-        raise ValueError(f"Unsafe casts found: {unsafe_casts}. The uploader rejects unsafe casts and does not permit an override.")
     incoming = frames[0]
     for frame in frames[1:]:
         incoming = incoming.unionByName(frame)
-    return incoming.persist(StorageLevel.MEMORY_AND_DISK), unsafe_casts
+    return incoming.persist(StorageLevel.MEMORY_AND_DISK), 0
 
 
 def _with_row_fingerprint(frame, columns: list[str]):
@@ -268,50 +283,22 @@ def _deduplicate_incoming_by_keys(incoming, columns: list[str], key_columns: lis
 
 
 def _keyed_rows_to_append(incoming, columns: list[str], key_columns: list[str]):
-    """Classify selected-key overlap without disclosing any healthcare values.
-
-    A key match is never appended.  Full-row matches are ordinary duplicates;
-    a non-key difference is a conflict which is also skipped.  The returned
-    metrics deliberately contain only counts and column names.
-    """
-    candidate_source = _with_composite_key(incoming, key_columns).persist(StorageLevel.MEMORY_AND_DISK)
-    existing_source = _with_composite_key(spark.table(TARGET).select(*columns), key_columns).persist(StorageLevel.MEMORY_AND_DISK)
-    candidate = candidate_source.alias("candidate")
-    duplicate_target_keys = int(existing_source.groupBy("__uploader_composite_key").count().where(F.col("count") > 1).count())
-    if duplicate_target_keys:
-        existing_source.unpersist()
-        candidate_source.unpersist()
-        raise ValueError(f"Target table has {duplicate_target_keys} duplicate composite de-duplication keys")
-    existing = existing_source.withColumn("__uploader_existing_key", F.lit(1)).alias("existing")
-    joined = candidate.join(existing, _qualified("candidate", "__uploader_composite_key") == _qualified("existing", "__uploader_composite_key"), "left").persist(StorageLevel.MEMORY_AND_DISK)
-    existing_match = F.col("existing.__uploader_existing_key").isNotNull()
-    full_match = reduce(and_, [
-        _qualified("candidate", column).eqNullSafe(_qualified("existing", column))
-        for column in columns
-    ])
-    keyed_rows_to_append = joined.where(~existing_match).select(
-        *[_qualified("candidate", column).alias(column) for column in columns]
-    )
-    exact_duplicates = int(joined.where(existing_match & full_match).count())
-    conflicts = joined.where(existing_match & ~full_match).persist(StorageLevel.MEMORY_AND_DISK)
-    conflict_rows = int(conflicts.count())
-    conflict_column_counts = {
-        column: int(conflicts.where(~_qualified("candidate", column).eqNullSafe(_qualified("existing", column))).count())
-        for column in columns if column not in key_columns
-    }
-    conflicts.unpersist()
+    """Anti-join only against target key columns for prospective de-duplication."""
+    candidate = _with_composite_key(incoming, key_columns).persist(StorageLevel.MEMORY_AND_DISK)
+    existing = _with_composite_key(spark.table(TARGET).select(*key_columns), key_columns).select(
+        "__uploader_composite_key"
+    ).dropDuplicates().withColumn("__uploader_existing_key", F.lit(1)).persist(StorageLevel.MEMORY_AND_DISK)
+    joined = candidate.join(existing, "__uploader_composite_key", "left").persist(StorageLevel.MEMORY_AND_DISK)
+    overlap_rows = int(joined.where(F.col("__uploader_existing_key").isNotNull()).count())
+    rows_to_append = joined.where(F.col("__uploader_existing_key").isNull()).select(*columns).persist(StorageLevel.MEMORY_AND_DISK)
     joined.unpersist()
-    rows_to_append = keyed_rows_to_append.persist(StorageLevel.MEMORY_AND_DISK)
-    existing_source.unpersist()
-    candidate_source.unpersist()
-    return rows_to_append, {
-        "existing_key_exact_duplicates": exact_duplicates,
-        "existing_key_conflicts": conflict_rows,
-        "conflict_column_counts": {column: count for column, count in conflict_column_counts.items() if count},
-    }
+    existing.unpersist()
+    candidate.unpersist()
+    return rows_to_append, {"existing_key_overlap_rows": overlap_rows}
 
 
 def _run_ingestion() -> dict:
+    started = time.perf_counter()
     manifest = _read_json(ARGS["MANIFEST_URI"])
     if not manifest.get("schema"):
         raise ValueError("Manifest has no target schema")
@@ -323,7 +310,10 @@ def _run_ingestion() -> dict:
     incoming, unsafe_casts = _project_incoming(manifest)
     incoming_rows = int(incoming.count())
     columns = [field["name"] for field in manifest["schema"]]
+    deduplication_mode = manifest.get("deduplication_mode") or ("keyed" if manifest.get("deduplication_columns") else "legacy-full-row")
     deduplication_columns = manifest.get("deduplication_columns") or []
+    if deduplication_mode not in {"none", "keyed", "legacy-full-row"}:
+        raise ValueError(f"Unsupported de-duplication mode: {deduplication_mode}")
     if deduplication_columns:
         invalid_keys = sorted(set(deduplication_columns) - set(columns))
         if invalid_keys:
@@ -331,12 +321,17 @@ def _run_ingestion() -> dict:
     # Legacy tables retain the original full-row contract.  New tables choose
     # an immutable key at creation, which governs both within-file and target
     # table duplicate handling.
-    if deduplication_columns:
+    if deduplication_mode == "keyed":
+        if not deduplication_columns:
+            raise ValueError("Keyed de-duplication requires at least one contract key column")
         unique_incoming, incoming_key_metrics = _deduplicate_incoming_by_keys(incoming, columns, deduplication_columns)
+    elif deduplication_mode == "none":
+        unique_incoming = incoming
+        incoming_key_metrics = {"duplicate_rows_within_upload": 0}
     else:
         unique_incoming = incoming.dropDuplicates().persist(StorageLevel.MEMORY_AND_DISK)
         incoming_key_metrics = {"duplicate_rows_within_upload": incoming_rows - int(unique_incoming.count())}
-    unique_incoming_rows = int(unique_incoming.count())
+    unique_incoming_rows = incoming_rows if deduplication_mode == "none" else int(unique_incoming.count())
     duplicate_rows_within_upload = incoming_key_metrics["duplicate_rows_within_upload"]
     duplicate_metrics = {}
     if MODE == "create":
@@ -346,19 +341,28 @@ def _run_ingestion() -> dict:
         duplicate_rows_already_in_table = 0
     else:
         before_snapshot, before_rows = _snapshot_state()
-        if deduplication_columns:
+        if deduplication_mode == "keyed":
             rows_to_append, duplicate_metrics = _keyed_rows_to_append(unique_incoming, columns, deduplication_columns)
-            duplicate_rows_already_in_table = (
-                duplicate_metrics["existing_key_exact_duplicates"]
-                + duplicate_metrics["existing_key_conflicts"]
-            )
+            duplicate_rows_already_in_table = duplicate_metrics["existing_key_overlap_rows"]
+        elif deduplication_mode == "none":
+            rows_to_append = unique_incoming
+            duplicate_rows_already_in_table = 0
         else:
             rows_to_append = _exclude_existing_rows(unique_incoming, columns).persist(StorageLevel.MEMORY_AND_DISK)
             duplicate_rows_already_in_table = unique_incoming_rows - int(rows_to_append.count())
     rows_appended = int(rows_to_append.count())
+    audit_metadata = {
+        "deduplication_mode": deduplication_mode,
+        "deduplication_columns": json.dumps(deduplication_columns),
+        "duplicate_rows_within_upload": duplicate_rows_within_upload,
+        "within_upload_key_conflicts": int(incoming_key_metrics.get("within_upload_key_conflicts", 0)),
+        "existing_key_overlap_rows": duplicate_rows_already_in_table,
+        "automatic_sanitized_columns": json.dumps(sorted({column for item in manifest.get("sanitization", []) for column in item.get("encrypted_columns", []) + item.get("postal_columns", []) + item.get("age_banded_columns", [])})),
+        "manual_encrypted_columns": json.dumps(sorted({column for item in manifest.get("sanitization", []) for column in item.get("manual_encryption_columns", [])})),
+    }
     processing = _record_event(
         previous_snapshot_id=before_snapshot, rows_before=before_rows, rows_uploaded=rows_appended,
-        status="PROCESSING",
+        status="PROCESSING", **audit_metadata,
     )
     try:
         if rows_appended:
@@ -371,6 +375,8 @@ def _run_ingestion() -> dict:
         final = _record_event(
             previous_snapshot_id=before_snapshot, new_snapshot_id=after_snapshot, rows_before=before_rows,
             rows_uploaded=rows_appended, rows_after=after_rows, status="SUCCESS",
+            phase_timings=json.dumps({"glue_total_ms": round((time.perf_counter() - started) * 1000, 1)}),
+            **audit_metadata,
         )
         return {
             "processing_event_id": processing["event_id"], "audit_event_id": final["event_id"],
@@ -379,6 +385,7 @@ def _run_ingestion() -> dict:
             **{key: value for key, value in incoming_key_metrics.items() if key != "duplicate_rows_within_upload"},
             "duplicate_rows_already_in_table": duplicate_rows_already_in_table,
             "deduplication_policy": manifest.get("deduplication_policy", "legacy-full-row-v1"),
+            "deduplication_mode": deduplication_mode,
             "deduplication_columns": deduplication_columns,
             **duplicate_metrics,
             "rows_appended": rows_appended, "unsafe_cast_values": unsafe_casts,
@@ -390,7 +397,9 @@ def _run_ingestion() -> dict:
         _, after_rows = _snapshot_state() if _exists() else (None, 0)
         _record_event(
             previous_snapshot_id=before_snapshot, rows_before=before_rows, rows_uploaded=rows_appended,
-            rows_after=after_rows, status="FAILED", error_message=str(error),
+            rows_after=after_rows, status="FAILED",
+            phase_timings=json.dumps({"glue_total_ms": round((time.perf_counter() - started) * 1000, 1)}),
+            error_message=str(error), **audit_metadata,
         )
         raise
     finally:

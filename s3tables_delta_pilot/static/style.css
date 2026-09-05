@@ -20,7 +20,7 @@ section, details { background: white; border: 1px solid #e0e7f0; border-radius: 
 .provisioning-grid button { margin-top: 10px; }
 .skill-builder { padding: 14px; border-color: #8fb6cb; background: #f7fbfe; }
 .skill-builder textarea { box-sizing: border-box; width: 100%; margin-top: 8px; resize: vertical; border: 1px solid #b9c9dc; border-radius: 7px; padding: 10px; color: #14213d; background: #fff; font: inherit; }
-.skill-builder .skill-content { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: .82rem; line-height: 1.45; }
+.skill-confirm { display: block; margin-top: 10px; }
 .skill-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }
 .skill-locations { display: grid; gap: 8px; margin: 18px 0; }
 .skill-locations div { min-width: 0; padding: 10px; background: #edf5fa; border-radius: 7px; }
@@ -34,6 +34,13 @@ section, details { background: white; border: 1px solid #e0e7f0; border-radius: 
 .table .browse-only { color: #8a5a00; font-weight: 700; opacity: 1; }
 label { display: block; margin-top: 12px; font-weight: 600; } input[type=text], input:not([type]), select { margin-left: 8px; }
 input[type=file] { width: 100%; padding: 10px 0; }
+.deduplication-mode { margin: 18px 0 0; padding: 14px; border: 1px solid #b9d4e8; border-radius: 8px; background: #f3f9fd; }
+.deduplication-mode legend { padding: 0 6px; font-weight: 700; }
+.deduplication-mode-choice { display: flex; align-items: flex-start; gap: .6rem; padding: .65rem .75rem; margin: .6rem 0 0; border: 1px solid #d8e6f0; border-radius: 7px; background: #fff; cursor: pointer; }
+.deduplication-mode-choice:has(input:checked) { border-color: #0b5e8e; box-shadow: inset 3px 0 #0b5e8e; }
+.deduplication-mode-choice input { margin-top: .25rem; }
+.deduplication-mode-choice span { display: grid; gap: .18rem; }
+.deduplication-mode-choice small { color: #526176; font-weight: 400; }
 button { border: 0; border-radius: 7px; background: #0b5e8e; color: white; padding: 10px 14px; font-weight: 700; cursor: pointer; }
 button:disabled { opacity: .45; cursor: not-allowed; } button.secondary { background: #e8eef5; color: #17324d; }
 .danger { margin-top: 10px; background: #a71d31; }
@@ -75,7 +82,16 @@ summary { cursor: pointer; } details pre { margin-top: 16px; } pre { white-space
 .type-selection { display: flex; align-items: center; justify-content: space-between; gap: 1rem; border-top: 1px solid #d8e6f0; padding: .7rem 0; margin: 0; }
 .type-selection small { display: block; margin-top: .2rem; color: #526176; font-weight: 400; }
 .type-selection .sample-values { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; overflow-wrap: anywhere; }
+.type-selection .type-impact { color: #855b00; font-weight: 700; }
 .type-selection select { min-width: 9rem; }
+.sanitization-review { border: 1px solid #d9c98c; background: #fffdf4; padding: 1rem; margin: 1rem 0; border-radius: .5rem; }
+.sanitization-review h3 { margin-top: 0; }
+.sanitization-review ul { margin: .5rem 0 1rem; padding-left: 1.25rem; }
+.manual-sanitization-columns { max-height: 22rem; overflow: auto; border-top: 1px solid #eadfae; }
+.manual-sanitization-choice { display: flex; gap: .75rem; align-items: flex-start; padding: .65rem 0; margin: 0; border-bottom: 1px solid #eadfae; cursor: pointer; }
+.manual-sanitization-choice input { margin-top: .25rem; }
+.manual-sanitization-choice span { display: grid; gap: .18rem; }
+.manual-sanitization-choice small { color: #6f6650; font-weight: 400; }
 .deduplication-selection { border: 1px solid #b9d4e8; background: #f3f9fd; padding: 1rem; margin: 1rem 0; border-radius: .5rem; }
 .deduplication-selection h3 { margin-top: 0; }
 .deduplication-notice { color: #1d5f88; font-weight: 700; }

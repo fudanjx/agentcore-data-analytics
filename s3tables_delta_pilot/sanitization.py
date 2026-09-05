@@ -10,6 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import random
 import re
 from dataclasses import dataclass
 from functools import lru_cache
@@ -25,6 +26,7 @@ from Crypto.Util.Padding import pad, unpad
 SECRET_ARN = "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:data-insight-etl-encryption-ARn4mo"
 SECRET_NAME = "data-insight-etl-encryption"
 ENCRYPTED_PREFIX = "enc:v1:"
+NRIC_PATTERN = re.compile(r"^[STFGM][0-9]{7}[A-Z]$", re.IGNORECASE)
 
 AH_NAME_COLUMNS = {"PATIENT_NAME", "PAT_NAME", "FULL_NAME", "NAME"}
 AH_IDENTIFIER_COLUMNS = {"EXT_PAT_ID", "EXT_PAT_NO"}
@@ -118,9 +120,10 @@ def plan_for_columns(columns: Iterable[str]) -> SanitizationPlan:
     return SanitizationPlan(tuple(drop), tuple(identifiers), tuple(postal), tuple(age))
 
 
-def sanitised_schema(schema: pa.Schema) -> tuple[pa.Schema, SanitizationPlan]:
+def sanitised_schema(schema: pa.Schema, additional_encrypted: Iterable[str] = ()) -> tuple[pa.Schema, SanitizationPlan]:
     plan = plan_for_columns(schema.names)
-    identifiers, postal, age = set(plan.identifier_columns), set(plan.postal_columns), set(plan.age_columns)
+    identifiers = set(plan.identifier_columns) | (set(additional_encrypted) - set(plan.drop_columns))
+    postal, age = set(plan.postal_columns), set(plan.age_columns)
     fields = []
     for field in schema:
         if field.name in plan.drop_columns:
@@ -128,6 +131,31 @@ def sanitised_schema(schema: pa.Schema) -> tuple[pa.Schema, SanitizationPlan]:
         data_type = pa.string() if field.name in identifiers | postal | age else field.type
         fields.append(pa.field(field.name, data_type, nullable=True, metadata=field.metadata))
     return pa.schema(fields, metadata=schema.metadata), plan
+
+
+def detect_nric_columns(table: pa.Table, seed: str, sample_size: int = 5, threshold: int = 3) -> tuple[tuple[str, ...], dict[str, dict[str, int | bool]]]:
+    """Find likely Singapore NRIC columns from deterministic safe samples.
+
+    This is deliberately a sampled heuristic, not a checksum validator. It
+    reports only counts/decisions, never the candidate values themselves.
+    """
+    _, plan = sanitised_schema(table.schema)
+    excluded = set(plan.drop_columns) | set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+    detected, details = [], {}
+    for field in table.schema:
+        if field.name in excluded or not (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)):
+            continue
+        values = table[field.name].to_pylist()
+        nonempty = [str(value).strip() for value in values if value is not None and str(value).strip()]
+        if not nonempty:
+            continue
+        sample = random.Random(f"{seed}:{field.name}").sample(nonempty, min(sample_size, len(nonempty)))
+        matches = sum(bool(NRIC_PATTERN.fullmatch(value)) for value in sample)
+        is_detected = matches >= threshold
+        details[field.name] = {"sample_count": len(sample), "nric_match_count": matches, "nric_detected": is_detected}
+        if is_detected:
+            detected.append(field.name)
+    return tuple(detected), details
 
 
 def _java_hashcode(value: str) -> int:
@@ -257,21 +285,35 @@ def postal_prefix(value: Any) -> str | object:
     return digits[:2] + "0000" if len(digits) >= 2 else digits + "00000"
 
 
-def sanitise_table(table: pa.Table, key: EncryptionMaterial | bytes | None = None) -> tuple[pa.Table, dict[str, Any]]:
+def sanitise_table(
+    table: pa.Table, key: EncryptionMaterial | bytes | None = None,
+    manual_encryption_columns: Iterable[str] = (), nric_columns: Iterable[str] = (),
+) -> tuple[pa.Table, dict[str, Any]]:
     """Apply the approved union policy and return a value-free audit summary."""
-    schema, plan = sanitised_schema(table.schema)
+    additional = set(manual_encryption_columns) | set(nric_columns)
+    schema, plan = sanitised_schema(table.schema, additional)
     frame = table.to_pandas()
     frame = frame.drop(columns=list(plan.drop_columns), errors="ignore").copy()
     already_encrypted = 0
     encrypted_values = 0
-    if plan.identifier_columns:
+    encrypted_columns = tuple(name for name in table.schema.names if name in (set(plan.identifier_columns) | additional) and name not in plan.drop_columns)
+    if encrypted_columns:
         active_key = key or encryption_key()
-    for column in plan.identifier_columns:
-        output = frame[column].apply(lambda value: encrypted_identifier(value, active_key))
-        frame[column] = output.apply(lambda result: result[0]).astype("string")
-        already = int(output.apply(lambda result: result[1]).sum())
+    for column in encrypted_columns:
+        normalised = frame[column].map(_normalise_value)
+        unique_values = [value for value in normalised.dropna().unique().tolist()]
+        mapping = {value: encrypted_identifier(value, active_key) for value in unique_values}
+        output = normalised.map(mapping)
+        # ``Series.map(mapping)`` leaves an absent source value as NaN rather
+        # than calling ``encrypted_identifier``.  Only mapped values are the
+        # `(ciphertext, already_encrypted)` tuples; preserve every other
+        # value as a nullable string instead of subscripting a float NaN.
+        frame[column] = output.map(
+            lambda result: result[0] if isinstance(result, tuple) else pd.NA
+        ).astype("string")
+        already = int(sum(result[1] for result in mapping.values()))
         already_encrypted += already
-        encrypted_values += int(frame[column].notna().sum()) - already
+        encrypted_values += len(mapping) - already
     for column in plan.postal_columns:
         frame[column] = frame[column].apply(postal_prefix).astype("string")
     for column in plan.age_columns:
@@ -279,7 +321,9 @@ def sanitise_table(table: pa.Table, key: EncryptionMaterial | bytes | None = Non
     result = pa.Table.from_pandas(frame, preserve_index=False).cast(schema, safe=False)
     return result, {
         "dropped_columns": list(plan.drop_columns),
-        "encrypted_columns": list(plan.identifier_columns),
+        "encrypted_columns": list(encrypted_columns),
+        "manual_encryption_columns": sorted(set(manual_encryption_columns)),
+        "nric_encrypted_columns": sorted(set(nric_columns)),
         "postal_columns": list(plan.postal_columns),
         "age_banded_columns": list(plan.age_columns),
         "newly_encrypted_values": encrypted_values,

@@ -54,26 +54,13 @@
       <p class="hint">New table names: start with a lowercase letter; valid characters are a-z, 0-9, and underscores (_). Hyphens are converted to underscores.</p>
       <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
       <details id="skill-builder" class="skill-builder" hidden>
-        <summary><strong>Build a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
-        <p class="hint">Describe the skill to build. The generated SKILL.md will be downloaded from Dify and its frontmatter name will be locked to the selected bucket name.</p>
-        <label for="skill-instruction">Skill-building instructions</label>
-        <textarea id="skill-instruction" maxlength="20000" rows="6" placeholder="Describe the analyses, tables, business definitions, and operating rules this skill should contain."></textarea>
+        <summary><strong>Upload a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
+        <p class="hint">Choose a complete skill folder. It must contain a root <code>SKILL.md</code>; optional <code>references/</code>, <code>scripts/</code>, and <code>assets/</code> folders are retained. The server validates every path, forces the skill name to the selected table-bucket name, uploads resources first and <code>SKILL.md</code> last, then removes stale files from the previous bundle.</p>
+        <label for="skill-bundle-files">Skill bundle folder <input id="skill-bundle-files" type="file" webkitdirectory directory multiple></label>
+        <label class="skill-confirm"><input id="skill-confirm-replace" type="checkbox"> I understand this replaces the existing bundle for this S3 Tables bucket.</label>
         <div class="skill-actions">
-          <button id="build-skill" type="button" disabled>Build skill</button>
-          <p id="skill-build-status" class="operation-status" aria-live="polite"></p>
-        </div>
-        <div id="skill-review" hidden>
-          <dl class="skill-locations">
-            <div><dt>Generated source</dt><dd><code id="skill-source-uri"></code></dd></div>
-            <div><dt>Publish destination</dt><dd><code id="skill-destination-uri"></code></dd></div>
-          </dl>
-          <label for="skill-content">Review and edit SKILL.md</label>
-          <textarea id="skill-content" class="skill-content" rows="24" spellcheck="false"></textarea>
-          <p class="hint">The server will enforce <code>name: &lt;s3-table-bucket-name&gt;</code> again when publishing.</p>
-          <div class="skill-actions">
-            <button id="publish-skill" type="button" disabled>Confirm and publish SKILL.md</button>
-            <p id="skill-publish-status" class="operation-status" aria-live="polite"></p>
-          </div>
+          <button id="upload-skill-bundle" type="button" disabled>Upload replacement skill bundle</button>
+          <p id="skill-bundle-status" class="operation-status" aria-live="polite"></p>
         </div>
       </details>
     </section>
@@ -84,6 +71,12 @@
       <input id="files" type="file" accept=".parquet,.parquet.gzip,.gzip,application/gzip,application/x-gzip,.xlsx,.xls,.csv,.tsv" multiple>
       <p class="hint">Supported formats: Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV. The first upload defines a new table’s schema. Later uploads must match at least 50% of that schema after column-name normalisation; unmatched columns are ignored and missing target columns become NULL.</p>
       <p class="placeholder">Healthcare sanitization is enforced before temporary S3 staging: names, DOB, phones, and home addresses are removed; identifiers are encrypted; age is banded; postal codes retain only two digits.</p>
+      <fieldset id="deduplication-mode" class="deduplication-mode">
+        <legend>De-duplication</legend>
+        <p class="hint">Choose this for every upload. The clean path avoids de-duplication work entirely; keyed mode lets you define or apply the table’s composite-key contract.</p>
+        <label class="deduplication-mode-choice"><input type="radio" name="deduplication-mode" value="none"> <span><strong>My data is clean</strong><small>Append all validated rows without de-duplication.</small></span></label>
+        <label class="deduplication-mode-choice"><input type="radio" name="deduplication-mode" value="keyed" checked> <span><strong>De-duplicate using a composite key</strong><small>For a new table, select and acknowledge the key-impact review before upload.</small></span></label>
+      </fieldset>
     </section>
 
     <section class="actions">

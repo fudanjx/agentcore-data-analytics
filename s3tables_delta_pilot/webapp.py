@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import csv
 import hashlib
 import hmac
@@ -12,6 +13,7 @@ import os
 import random
 import shutil
 import tempfile
+import threading
 import time
 import uuid
 from collections.abc import Iterator
@@ -19,7 +21,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 import boto3
 import pandas as pd
@@ -28,7 +30,7 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from botocore.exceptions import ClientError
-from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
+from fastapi import BackgroundTasks, Depends, FastAPI, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field, field_validator
 
@@ -43,10 +45,11 @@ from .ingest_contract import (
     schema_from_table,
 )
 from .pilot import NAMESPACE, QC_PREFIX, REGION, ROLE_NAME, SOURCE_BUCKET, SOURCE_PREFIX, TABLE_BUCKET_ARN
-from .sanitization import encryption_key, sanitise_table, sanitised_schema
-from . import skill_builder
+from .sanitization import detect_nric_columns, encryption_key, sanitise_table, sanitised_schema
+from . import skill_bundle
 from .observability import configure_logging, request_id_var, safe_error, user_id_var
-from .table_lock import S3TableLockManager
+from .table_lock import S3TableLockManager, TableLease, TableLockedError, TableLockError
+from .upload_sessions import UploadSessionStore
 
 WEB_JOB_NAME = "ah-soc-delta-pilot-web-ingest"
 WEB_SCRIPT_KEY = f"{SOURCE_PREFIX}/_pilot_assets/generic_glue_job.py"
@@ -68,11 +71,79 @@ iam = boto3.client("iam")
 app = FastAPI(title="AH S3 Tables Pilot", docs_url=None, redoc_url=None)
 logger = configure_logging()
 table_locks = S3TableLockManager(s3, SOURCE_BUCKET, TABLE_LOCK_PREFIX)
+upload_sessions = UploadSessionStore()
+active_table_leases: dict[str, TableLease] = {}
+active_mutations_by_request: dict[str, dict] = {}
+pending_table_leases: dict[str, TableLease] = {}
+# The v2 session bridge registers a short-lived callback for each request while
+# the existing ingestion launcher prepares its artifacts.  This keeps the
+# browser informed without placing mutable progress state in S3 or Glue.
+ingestion_progress_hooks: dict[str, Callable[[str], None]] = {}
+local_processing_slots = threading.BoundedSemaphore(PILOT_LOCAL_PROCESSING_CONCURRENCY)
+maintenance_task: asyncio.Task | None = None
 SUPPORTED_UPLOAD_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 MIN_APPEND_SCHEMA_MATCH_PERCENT = 50.0
 SELECTABLE_ICEBERG_TYPES = ("STRING", "BIGINT", "DOUBLE", "DATE", "TIMESTAMP", "BOOLEAN")
 IDENTITY_EMULATION_HEADER = "X-Pilot-User-Id"
 LOCAL_TEST_USER_IDS = ("local-admin", "local-editor", "local-unassigned")
+
+
+@app.on_event("startup")
+async def cleanup_abandoned_upload_sessions() -> None:
+    """Remove expired node-local uploads before accepting new pilot traffic."""
+    removed = upload_sessions.cleanup_expired()
+    logger.info("upload_session_startup_cleanup", extra={"removed_sessions": removed, "phase": "CLEANUP"})
+    await asyncio.to_thread(_reconcile_table_locks_on_startup)
+    global maintenance_task
+    maintenance_task = asyncio.create_task(_maintenance_loop())
+
+
+@app.on_event("shutdown")
+async def stop_maintenance_loop() -> None:
+    if maintenance_task:
+        maintenance_task.cancel()
+
+
+async def _maintenance_loop() -> None:
+    """Renew active table leases and clean expired private session files."""
+    while True:
+        await asyncio.sleep(5 * 60)
+        removed = upload_sessions.cleanup_expired()
+        if removed:
+            logger.info("upload_session_periodic_cleanup", extra={"removed_sessions": removed, "phase": "CLEANUP"})
+        for job_run_id, lease in list(active_table_leases.items()):
+            try:
+                active_table_leases[job_run_id] = await asyncio.to_thread(
+                    table_locks.renew, lease, "GLUE_RUNNING", job_run_id,
+                )
+                logger.info("table_lock_renewed", extra={"job_run_id": job_run_id, "phase": "GLUE_RUNNING"})
+            except TableLockError:
+                # The current 120-minute lease remains valid; record the safe
+                # failure so an operator can correct S3 access before expiry.
+                safe_error(logger, "table_lock_renewal_failed", job_run_id=job_run_id, phase="GLUE_RUNNING")
+
+
+def _reconcile_table_locks_on_startup() -> None:
+    """Recover the bounded S3 lease set after a local FastAPI restart."""
+    terminal = {"SUCCEEDED", "FAILED", "TIMEOUT", "STOPPED", "ERROR"}
+    try:
+        leases = table_locks.list_leases()
+    except TableLockError:
+        safe_error(logger, "table_lock_startup_reconciliation_failed", phase="STARTUP")
+        return
+    for lease in leases:
+        job_run_id = lease.payload.get("glue_job_run_id")
+        try:
+            if job_run_id:
+                state = glue.get_job_run(JobName=WEB_JOB_NAME, RunId=job_run_id, PredecessorsIncluded=False)["JobRun"]["JobRunState"]
+                if state in terminal:
+                    table_locks.release(lease)
+                else:
+                    active_table_leases[job_run_id] = lease
+            elif S3TableLockManager._expired(lease.payload):
+                table_locks.release(lease)
+        except Exception:
+            safe_error(logger, "table_lock_startup_reconciliation_item_failed", phase="STARTUP", job_run_id=job_run_id)
 
 
 @app.middleware("http")
@@ -281,7 +352,9 @@ class IngestionRequest(BaseModel):
     reporting_month: str = Field(min_length=1, max_length=256)
     type_overrides: dict[str, str] = Field(default_factory=dict)
     deduplication_columns: list[str] = Field(default_factory=list)
+    deduplication_mode: Literal["none", "keyed", "legacy-full-row"] = "legacy-full-row"
     key_analysis_token: str | None = Field(default=None, max_length=8192)
+    manual_encryption_columns: list[str] = Field(default_factory=list)
     @field_validator("table", mode="before")
     @classmethod
     def canonicalise_table(cls, value: str) -> str:
@@ -298,6 +371,21 @@ class KeyAnalysisRequest(BaseModel):
     @classmethod
     def canonicalise_table(cls, value: str) -> str:
         return _canonical_table_name(value)
+
+
+class SessionKeyImpactRequest(BaseModel):
+    type_overrides: dict[str, str] = Field(default_factory=dict)
+    deduplication_columns: list[str] = Field(default_factory=list)
+
+
+class SessionIngestionRequest(BaseModel):
+    request_id: str = Field(min_length=1, max_length=128)
+    reporting_month: str = Field(min_length=1, max_length=256)
+    type_overrides: dict[str, str] = Field(default_factory=dict)
+    deduplication_mode: Literal["none", "keyed"] = "keyed"
+    deduplication_columns: list[str] = Field(default_factory=list)
+    key_analysis_token: str | None = Field(default=None, max_length=8192)
+    manual_encryption_columns: list[str] = Field(default_factory=list)
 
 
 class DeleteTableRequest(BaseModel):
@@ -323,23 +411,6 @@ class CreateNamespaceRequest(BaseModel):
     namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
 
 
-class SkillBuildRequest(BaseModel):
-    table_bucket_arn: str = Field(min_length=1)
-    instruction: str = Field(min_length=1, max_length=20_000)
-
-    @field_validator("instruction")
-    @classmethod
-    def instruction_must_not_be_blank(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Skill-building instructions cannot be blank")
-        return value
-
-
-class SkillPublishRequest(BaseModel):
-    content: str = Field(min_length=1)
-
-
 def _admin_only(user: PilotUser) -> None:
     if not user.is_admin:
         raise HTTPException(403, "Only administrators may create S3 Tables buckets and namespaces")
@@ -359,6 +430,47 @@ def _control_plane_http_error(error: ClientError, resource: str) -> HTTPExceptio
     else:
         status = 502
     return HTTPException(status, message)
+
+
+def _table_lock_http_error(error: TableLockedError) -> HTTPException:
+    details = error.details
+    return HTTPException(
+        409,
+        detail={
+            "code": "TABLE_LOCKED",
+            "message": "The selected table is busy with another uploader operation.",
+            "operation": details.get("operation"), "phase": details.get("phase"),
+            "owner": details.get("user_id"), "acquired_at": details.get("acquired_at"),
+            "lease_expires_at": details.get("lease_expires_at"),
+        },
+        headers={"Retry-After": "300"},
+    )
+
+
+def _acquire_table_mutation_lock(*, table_bucket_arn: str, namespace: str, table: str,
+                                 user: PilotUser, request_id: str, operation: str,
+                                 session_id: str | None = None) -> TableLease:
+    try:
+        return table_locks.acquire(
+            table_bucket_arn=table_bucket_arn, namespace=namespace, table=table,
+            owner_token=uuid.uuid4().hex, user_id=user.user_id, request_id=request_id,
+            session_id=session_id, operation=operation, phase="STARTING",
+        )
+    except TableLockedError as error:
+        raise _table_lock_http_error(error) from error
+    except TableLockError as error:
+        raise HTTPException(503, "The uploader could not obtain its required table mutation lock") from error
+
+
+def _release_table_mutation_lock(job_run_id: str) -> None:
+    lease = active_table_leases.pop(job_run_id, None)
+    if not lease:
+        return
+    try:
+        table_locks.release(lease)
+        logger.info("table_lock_released", extra={"job_run_id": job_run_id, "phase": "TERMINAL"})
+    except TableLockError:
+        safe_error(logger, "table_lock_release_failed", job_run_id=job_run_id, phase="TERMINAL")
 
 
 def _soc_schema() -> list[dict[str, str]]:
@@ -417,9 +529,9 @@ def _configure_snapshot_retention(table_bucket_arn: str, namespace: str, table: 
 
 
 def _load_contract_record(table_bucket_arn: str, namespace: str, table: str) -> dict:
-    """Read a table contract, retaining legacy full-row de-duplication."""
+    """Read a table contract and lazily project legacy fields into v2."""
     if table == "soc":
-        return {"schema": _soc_schema(), "deduplication_columns": [], "deduplication_policy": "legacy-full-row-v1"}
+        return {"contract_version": 1, "schema": _soc_schema(), "deduplication_columns": [], "deduplication_mode": "legacy-full-row", "deduplication_policy": "legacy-full-row-v1"}
     try:
         response = s3.get_object(Bucket=SOURCE_BUCKET, Key=_contract_key(table_bucket_arn, namespace, table))
     except s3.exceptions.NoSuchKey as error:
@@ -434,15 +546,55 @@ def _load_contract_record(table_bucket_arn: str, namespace: str, table: str) -> 
     record = json.loads(response["Body"].read())
     if not record.get("schema"):
         raise HTTPException(400, f"The stored table contract for {table!r} has no schema")
-    # Contracts created before key selection deliberately retain their original
-    # full-row behavior rather than changing existing tables unexpectedly.
+    # Empty legacy keys are deliberately key-unconfigured. They never become
+    # an implicit full-row contract for new v2 requests.
     record.setdefault("deduplication_columns", [])
-    record.setdefault("deduplication_policy", "legacy-full-row-v1")
+    record.setdefault("contract_version", 1)
+    record.setdefault("deduplication_mode", "keyed" if record["deduplication_columns"] else "legacy-full-row")
+    record.setdefault("deduplication_policy", "skip-existing-key-report-conflict-v1" if record["deduplication_columns"] else "legacy-full-row-v1")
+    record.setdefault("manual_encryption_columns", [])
+    record.setdefault("automatic_sanitization_columns", [])
     return record
 
 
 def _load_contract(table_bucket_arn: str, namespace: str, table: str) -> list[dict[str, str]]:
     return _load_contract_record(table_bucket_arn, namespace, table)["schema"]
+
+
+def _activate_late_deduplication_contract(
+    table_bucket_arn: str, namespace: str, table: str, contract: dict,
+    columns: list[str], user_id: str,
+) -> None:
+    """Prospectively assign the first immutable key to an older no-key table."""
+    current = list(contract.get("deduplication_columns") or [])
+    if current:
+        if current != columns:
+            raise HTTPException(409, "This table already has an immutable composite de-duplication key")
+        return
+    updated = {
+        **contract,
+        "contract_version": 2,
+        "deduplication_columns": columns,
+        "deduplication_mode": "keyed",
+        "deduplication_policy": "skip-existing-key-report-conflict-v2",
+        "deduplication_activated_by": user_id,
+        "deduplication_activated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    key = _contract_key(table_bucket_arn, namespace, table)
+    # The uploader lease serializes its own writers; this ETag condition also
+    # prevents a concurrent administrative or future service writer from
+    # silently overwriting the first immutable-key decision.
+    try:
+        etag = s3.head_object(Bucket=SOURCE_BUCKET, Key=key).get("ETag", "").strip('"')
+        s3.put_object(
+            Bucket=SOURCE_BUCKET, Key=key, Body=json.dumps(updated, indent=2).encode(),
+            ContentType="application/json", ServerSideEncryption="AES256", IfMatch=etag,
+        )
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in {"PreconditionFailed", "ConditionalRequestConflict", "412"}:
+            raise HTTPException(409, "The table contract changed while assigning its first composite key; refresh and try again") from error
+        raise HTTPException(503, "Unable to update the immutable table de-duplication contract") from error
 
 
 def _is_uploader_managed_table(table_bucket_arn: str, namespace: str, table: str) -> bool:
@@ -546,6 +698,18 @@ def _sanitization_details(schema: pa.Schema) -> tuple[pa.Schema, dict]:
     }
 
 
+def _nric_sanitization_review(upload: UploadFile) -> dict:
+    """Return value-free automatic NRIC detection for the preflight UI."""
+    with _temporary_upload_path(upload) as path:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(8 * 1024 * 1024):
+                digest.update(chunk)
+        table = _read_upload_table(path, upload.filename or "upload")
+        columns, details = detect_nric_columns(table, digest.hexdigest())
+    return {"nric_detected_columns": list(columns), "nric_detection": details}
+
+
 def _read_schemas(files: list[UploadFile]) -> tuple[list[pa.Schema], list[dict]]:
     schemas, sanitization = [], []
     for upload in files:
@@ -609,7 +773,6 @@ def _create_deduplication_candidates(upload: UploadFile, target: list[dict[str, 
             masked = source_name in sensitive_sources
             values = []
             non_null_count = 0
-            distinct_non_null_count = 0
             if source_name and not masked:
                 column = source[source_name]
                 # Keep preflight bounded even for large healthcare files:
@@ -617,7 +780,6 @@ def _create_deduplication_candidates(upload: UploadFile, target: list[dict[str, 
                 # small random set of scalars rather than materialising an
                 # entire column as a Python list.
                 non_null_count = int(pc.count(column).as_py())
-                distinct_non_null_count = int(pc.count_distinct(column).as_py())
                 indexes = random.SystemRandom().sample(range(len(column)), min(1024, len(column)))
                 for index in indexes:
                     value = column[index].as_py()
@@ -638,7 +800,11 @@ def _create_deduplication_candidates(upload: UploadFile, target: list[dict[str, 
                 # Quality is metadata only. Sensitive fields deliberately
                 # do not expose their value distribution to the browser.
                 "non_null_count": non_null_count if not masked else None,
-                "distinct_non_null_count": distinct_non_null_count if not masked else None,
+                # Distinct cardinality is intentionally deferred until the
+                # user asks for composite-key analysis.  Doing it for every
+                # candidate column makes first-upload review unnecessarily
+                # expensive on multi-million-row files.
+                "distinct_non_null_count": None,
             })
         return candidates
 
@@ -657,6 +823,24 @@ def _create_type_selection_samples(upload: UploadFile, selections: list[dict]) -
         {"name": item["column"], "type": item.get("suggested_target_type", item.get("source_type", "STRING"))}
         for item in selections
     ])}
+    with _temporary_upload_path(upload) as path:
+        source = _read_upload_table(path, upload.filename or "upload")
+        source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
+        for choice in selections:
+            source_name = source_by_canonical.get(choice["column"])
+            impacts: dict[str, dict[str, int | str]] = {}
+            if source_name:
+                series = source[source_name].to_pandas()
+                non_null = series.notna()
+                for target_type, parser in (("DATE", parse_documented_date), ("TIMESTAMP", parse_documented_timestamp)):
+                    converted = series.map(parser)
+                    invalid_count = int((non_null & converted.isna()).sum())
+                    if invalid_count:
+                        impacts[target_type] = {
+                            "invalid_value_count": invalid_count,
+                            "behaviour": "invalid_values_become_null",
+                        }
+            choice["lossy_target_types"] = impacts
     for choice in selections:
         choice.update({key: samples[choice["column"]][key] for key in ("sample_values", "samples_masked")})
     return selections
@@ -677,6 +861,18 @@ def _validate_create_deduplication_columns(preview: dict, columns: list[str]) ->
     if ineligible:
         raise HTTPException(422, f"These columns cannot be used for de-duplication: {', '.join(ineligible)}")
     return columns
+
+
+def _v2_deduplication_columns(preview: dict, contract: dict, mode: str, columns: list[str]) -> list[str]:
+    """Resolve upload-scoped de-duplication without silently changing a key."""
+    if mode in {"none", "legacy-full-row"}:
+        return []
+    configured = list(contract.get("deduplication_columns") or [])
+    if configured:
+        if columns and columns != configured:
+            raise HTTPException(422, "This table already has an immutable composite de-duplication key")
+        return configured
+    return _validate_create_deduplication_columns(preview, columns)
 
 
 def _validate_key_analysis_columns(columns: list[str]) -> list[str]:
@@ -946,6 +1142,7 @@ def _analyse_selected_key(
 
 def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, files: list[UploadFile]) -> dict:
     schemas, sanitization = _read_schemas(files)
+    nric_reviews = [_nric_sanitization_review(upload) for upload in files]
     if not schemas:
         raise HTTPException(400, "Choose at least one Parquet file")
     if mode == "create":
@@ -967,13 +1164,14 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
                 incompatible_sensitive_columns.append({"column": field_name, "target_type": target_type})
     file_results = []
     rejection_reasons = []
-    for upload, comparison, details in zip(files, comparisons, sanitization):
+    for upload, comparison, details, nric_review in zip(files, comparisons, sanitization, nric_reviews):
         file_rejection_reasons = []
         sanitized_columns = sorted(set(
             details["dropped_columns"]
             + details["encrypted_columns"]
             + details["postal_columns"]
             + details["age_banded_columns"]
+            + nric_review["nric_detected_columns"]
         ))
         match_accepted = mode == "create" or comparison["matching_percentage"] >= MIN_APPEND_SCHEMA_MATCH_PERCENT
         if not match_accepted:
@@ -1000,6 +1198,8 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
             "filename": upload.filename,
             **comparison,
             "sanitization": details,
+            "nric_detection": nric_review["nric_detection"],
+            "nric_detected_columns": nric_review["nric_detected_columns"],
             "sanitized_columns": sanitized_columns,
             "sanitized_column_count": len(sanitized_columns),
             "unsafe_casts": unsafe_casts,
@@ -1013,50 +1213,89 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
     type_selections = _create_type_selection_samples(
         files[0], _create_type_selections(comparisons, target, manual_type_columns)
     ) if mode == "create" else []
+    automatic_encrypted = sorted(set(
+        item for details, nric_review in zip(sanitization, nric_reviews)
+        for item in details["encrypted_columns"] + nric_review["nric_detected_columns"]
+    ))
+    candidates = _create_deduplication_candidates(files[0], target) if (
+        mode == "create" or not contract["deduplication_columns"]
+    ) else []
+    if mode == "append" and not contract["deduplication_columns"]:
+        incoming_names = {field["name"] for field in schema_from_arrow(schemas[0])[0]}
+        candidates = [candidate for candidate in candidates if candidate["column"] in incoming_names]
+    automatic_or_transformed = {
+        normalise_names([column])[0]
+        for column in (
+            sanitization[0]["dropped_columns"] + sanitization[0]["encrypted_columns"]
+            + sanitization[0]["postal_columns"] + sanitization[0]["age_banded_columns"]
+            + nric_reviews[0]["nric_detected_columns"]
+        )
+    }
+    manual_candidates = [
+        {"column": item["column"], "sample_values": item["sample_values"], "samples_masked": item["samples_masked"]}
+        for item in candidates if item["column"] not in automatic_or_transformed
+    ]
     return {
         "mode": mode, "table_bucket_arn": table_bucket_arn, "namespace": namespace, "table": table, "target_schema": target, "creation_warnings": creation_warnings,
         "initial_table_column_count": len(target),
         "minimum_append_schema_match_percent": MIN_APPEND_SCHEMA_MATCH_PERCENT,
         "files": file_results,
         "type_selections": type_selections,
-        "deduplication_candidates": _create_deduplication_candidates(files[0], target) if mode == "create" else [],
+        "deduplication_candidates": candidates,
         "deduplication_columns": contract["deduplication_columns"],
         "deduplication_policy": contract["deduplication_policy"],
         "incompatible_sensitive_columns": incompatible_sensitive_columns,
         "accepted": not rejection_reasons,
         "rejection_reasons": rejection_reasons,
         "sensitive_column_scan": "Sanitization is enforced before temporary S3 staging.",
+        "sanitization_review": {
+            "automatic_encrypted_columns": automatic_encrypted,
+            "manual_encryption_candidates": manual_candidates,
+            "nric_detection_policy": {"sample_size": 5, "match_threshold": 3, "kind": "sampled-heuristic-v1"},
+        },
     }
 
 
-def _normalise_temporal_column(column: pa.ChunkedArray, target_type: str) -> pa.Array:
+def _normalise_temporal_column(
+    column: pa.ChunkedArray, target_type: str, *, allow_invalid_values: bool = False,
+) -> tuple[pa.Array, int]:
     """Apply the documented date/time rules before Spark sees the staged file."""
     series = column.to_pandas()
     if target_type == "DATE":
         parsed = series.map(parse_documented_date)
         invalid = series.notna() & parsed.isna()
-        if invalid.any():
+        invalid_count = int(invalid.sum())
+        if invalid_count and not allow_invalid_values:
             raise ValueError(f"DATE conversion would discard {int(invalid.sum())} value(s)")
-        return pa.array(parsed.tolist(), type=pa.date32(), from_pandas=True)
+        return pa.array(parsed.tolist(), type=pa.date32(), from_pandas=True), invalid_count
     if target_type == "TIMESTAMP":
         parsed = series.map(parse_documented_timestamp)
         invalid = series.notna() & parsed.isna()
-        if invalid.any():
+        invalid_count = int(invalid.sum())
+        if invalid_count and not allow_invalid_values:
             raise ValueError(f"TIMESTAMP conversion would discard {int(invalid.sum())} value(s)")
-        return pa.array(parsed.tolist(), type=pa.timestamp("us"), from_pandas=True)
+        return pa.array(parsed.tolist(), type=pa.timestamp("us"), from_pandas=True), invalid_count
     raise ValueError(f"Unsupported temporal target type: {target_type}")
 
 
 def _make_glue_compatible_parquet(
     source: Path, filename: str, key=None, target_schema: list[dict[str, str]] | None = None,
+    manual_encryption_columns: list[str] | None = None, nric_columns: list[str] | None = None,
+    lossy_temporal_columns: set[str] | None = None,
 ) -> tuple[Path, bool, dict]:
     """Stage every supported file as Spark-safe Parquet for the Glue job."""
     table = _read_upload_table(source, filename)
-    schema, plan = sanitised_schema(table.schema)
-    sanitization_required = bool(plan.drop_columns or plan.identifier_columns or plan.postal_columns or plan.age_columns)
-    audit = {"dropped_columns": [], "encrypted_columns": [], "postal_columns": [], "age_banded_columns": [], "newly_encrypted_values": 0, "already_encrypted_values": 0}
+    manual_encryption_columns = manual_encryption_columns or []
+    nric_columns = nric_columns or []
+    lossy_temporal_columns = lossy_temporal_columns or set()
+    schema, plan = sanitised_schema(table.schema, set(manual_encryption_columns) | set(nric_columns))
+    sanitization_required = bool(plan.drop_columns or plan.identifier_columns or plan.postal_columns or plan.age_columns or manual_encryption_columns or nric_columns)
+    audit = {"dropped_columns": [], "encrypted_columns": [], "postal_columns": [], "age_banded_columns": [], "manual_encryption_columns": [], "nric_encrypted_columns": [], "newly_encrypted_values": 0, "already_encrypted_values": 0, "lossy_temporal_nulls": {}}
     if sanitization_required:
-        table, audit = sanitise_table(table, key)
+        table, audit = sanitise_table(table, key, manual_encryption_columns, nric_columns)
+        # Sanitisation owns the main audit object; preserve the staging-only
+        # conversion information added by this function.
+        audit.setdefault("lossy_temporal_nulls", {})
     else:
         schema = table.schema
     names = normalise_names([field.name for field in schema])
@@ -1066,7 +1305,15 @@ def _make_glue_compatible_parquet(
     for name in names:
         column = table[name]
         target_type = target_types.get(name)
-        arrays.append(_normalise_temporal_column(column, target_type) if target_type in {"DATE", "TIMESTAMP"} else column)
+        if target_type in {"DATE", "TIMESTAMP"}:
+            parsed, invalid_count = _normalise_temporal_column(
+                column, target_type, allow_invalid_values=name in lossy_temporal_columns,
+            )
+            if invalid_count:
+                audit["lossy_temporal_nulls"][name] = invalid_count
+            arrays.append(parsed)
+        else:
+            arrays.append(column)
     table = pa.table(arrays, names=names)
     has_nanosecond_timestamps = any(
         pa.types.is_timestamp(field.type) and field.type.unit == "ns" for field in schema
@@ -1228,38 +1475,31 @@ def create_namespace(payload: CreateNamespaceRequest, user: PilotUser = Depends(
     }
 
 
-@app.post("/api/skills/build")
-def build_bucket_skill(
-    payload: SkillBuildRequest,
+@app.post("/api/skills/upload-bundle")
+async def upload_skill_bundle(
+    table_bucket_arn: str = Form(),
+    paths_json: str = Form(),
+    confirm_replace: bool = Form(),
+    files: list[UploadFile] = File(),
     user: PilotUser = Depends(_current_user),
 ):
-    """Build and normalize an editable skill draft for an authorized bucket."""
-    _require_bucket_access(user, payload.table_bucket_arn)
-    try:
-        return skill_builder.build_skill_draft(
-            payload.instruction,
-            user.user_id,
-            payload.table_bucket_arn,
-        )
-    except skill_builder.SkillBuildError as error:
-        raise HTTPException(error.status_code, str(error)) from error
+    """Replace an authorized bucket's skill bundle after local validation.
 
-
-@app.post("/api/skills/publish")
-def publish_bucket_skill(
-    payload: SkillPublishRequest,
-    table_bucket_arn: str,
-    user: PilotUser = Depends(_current_user),
-):
-    """Publish user-confirmed Markdown beneath the authorized bucket's skill name."""
+    The browser supplies the folder-relative paths separately because standard
+    multipart filenames omit ``webkitRelativePath`` in some browsers.
+    """
     _require_bucket_access(user, table_bucket_arn)
+    if not confirm_replace:
+        raise HTTPException(422, "Confirm replacement before publishing the skill bundle")
     try:
-        return skill_builder.publish_skill(
-            payload.content,
-            user.user_id,
-            table_bucket_arn,
-        )
-    except skill_builder.SkillBuildError as error:
+        paths = skill_bundle.parse_paths_json(paths_json)
+        if len(paths) != len(files):
+            raise skill_bundle.SkillBundleError("Each uploaded skill file must have one matching relative path")
+        payload: list[tuple[str, bytes]] = []
+        for path, upload in zip(paths, files, strict=True):
+            payload.append((path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1)))
+        return skill_bundle.publish_bundle(table_bucket_arn, user.user_id, payload)
+    except skill_bundle.SkillBundleError as error:
         raise HTTPException(error.status_code, str(error)) from error
 
 
@@ -1335,7 +1575,277 @@ def list_tables(table_bucket_arn: str, namespace: str, user: PilotUser = Depends
     }
 
 
-@app.post("/api/preflight")
+@contextmanager
+def _session_upload_files(session) -> Iterator[list[UploadFile]]:
+    """Open the private session artifacts as UploadFile-compatible streams."""
+    streams = []
+    try:
+        for file in session.files:
+            stream = Path(file.path).open("rb")
+            streams.append((stream, UploadFile(filename=file.name, file=stream)))
+        yield [upload for _, upload in streams]
+    finally:
+        for stream, _ in streams:
+            stream.close()
+
+
+def _session_error(session_id: str, user_id: str, phase: str, message: str, error: Exception) -> None:
+    error_id = safe_error(logger, "upload_session_failed", session_id=session_id, phase=phase)
+    upload_sessions.update(
+        session_id, user_id, phase="FAILED", progress_message=message,
+        error={"code": "SESSION_PROCESSING_FAILED", "message": message, "error_id": error_id},
+    )
+
+
+@contextmanager
+def _local_processing_slot(session_id: str, user_id: str, activity: str) -> Iterator[None]:
+    """Bound CPU/memory-intensive local work and make any wait visible."""
+    if not local_processing_slots.acquire(blocking=False):
+        upload_sessions.update(
+            session_id, user_id, phase="QUEUED",
+            progress_message=f"Queued for local processing capacity before {activity}.",
+        )
+        local_processing_slots.acquire()
+    try:
+        yield
+    finally:
+        local_processing_slots.release()
+
+
+def _report_ingestion_progress(request_id: str, message: str) -> None:
+    """Publish a safe, human-readable preparation phase to a v2 session."""
+    callback = ingestion_progress_hooks.get(request_id)
+    if callback is None:
+        return
+    try:
+        callback(message)
+    except Exception:
+        # Progress reporting must never break an otherwise valid upload.
+        safe_error(logger, "upload_session_progress_update_failed", request_id=request_id)
+
+
+def _profile_upload_session(session_id: str, user_id: str) -> None:
+    """Profile a previously copied upload once per session, in the background."""
+    try:
+        with _local_processing_slot(session_id, user_id, "file profiling"):
+            session = upload_sessions.update(session_id, user_id, phase="PROFILING", progress_message="Analysing file structure and proposed schema.")
+            with _session_upload_files(session) as files:
+                preview = _preflight(session.mode, session.table_bucket_arn, session.namespace, session.table, files)
+        upload_sessions.update(
+            session_id, user_id, phase="READY_FOR_REVIEW", progress_message="Data structure analysis is complete.",
+            preflight=preview,
+        )
+        logger.info("upload_session_profiled", extra={"session_id": session_id, "file_count": len(session.files), "phase": "READY_FOR_REVIEW"})
+    except Exception as error:
+        _session_error(session_id, user_id, "PROFILING", "Data structure analysis failed.", error)
+
+
+def _analyse_session_key_impact(session_id: str, user_id: str, payload: SessionKeyImpactRequest) -> None:
+    """Run raw local Polars key analysis with no sanitization, S3, or Glue work."""
+    try:
+        with _local_processing_slot(session_id, user_id, "composite-key impact analysis"):
+            session = upload_sessions.update(session_id, user_id, phase="KEY_ANALYSING", progress_message="Analysing the selected composite key locally.")
+            key_columns = _validate_key_analysis_columns(payload.deduplication_columns)
+            paths = [(Path(file.path), file.name) for file in session.files]
+            metrics = _raw_key_impact_metrics(paths, key_columns)
+        expires_at = int(datetime.now(timezone.utc).timestamp()) + 30 * 60
+        acknowledgement = {
+            "v": 2, "expires_at": expires_at, "user_id": user_id,
+            "table_bucket_arn": session.table_bucket_arn, "namespace": session.namespace, "table": session.table,
+            "type_overrides": payload.type_overrides, "deduplication_columns": key_columns,
+            "file_digests": [file.sha256 for file in session.files], "session_id": session_id,
+        }
+        impact = {
+            "metrics": metrics, "deduplication_columns": key_columns,
+            # This lets a session refresh restore the exact choice represented
+            # by the signed acknowledgement, without exposing sample values.
+            "type_overrides": payload.type_overrides,
+            "acknowledgement_token": _sign_key_analysis(acknowledgement),
+            "expires_at": datetime.fromtimestamp(expires_at, timezone.utc).isoformat(),
+            "no_storage_or_glue_side_effects": True, "analysis_basis": "raw-local-pre-sanitization",
+        }
+        upload_sessions.update(
+            session_id, user_id, phase="READY_FOR_ACKNOWLEDGEMENT",
+            progress_message="Composite-key impact analysis is complete; acknowledge it before upload.", key_impact=impact,
+        )
+        logger.info("upload_session_key_analysed", extra={"session_id": session_id, "phase": "READY_FOR_ACKNOWLEDGEMENT", "key_column_count": len(key_columns)})
+    except Exception as error:
+        _session_error(session_id, user_id, "KEY_ANALYSING", "Composite-key impact analysis failed.", error)
+
+
+@app.post("/api/v2/upload-sessions", status_code=201)
+async def create_upload_session(
+    background_tasks: BackgroundTasks,
+    mode: Literal["create", "append"] = Form(),
+    table_bucket_arn: str = Form(),
+    namespace: str = Form(),
+    table: str = Form(),
+    files: list[UploadFile] = File(),
+    user: PilotUser = Depends(_current_user),
+):
+    """Copy uploads once into a private session and profile asynchronously."""
+    table = _canonical_table_name(table)
+    _require_scope(user, table_bucket_arn, namespace)
+    if not files:
+        raise HTTPException(400, "Choose at least one supported file")
+    if table == UPLOAD_HISTORY_TABLE:
+        raise HTTPException(400, "The reserved uploader audit table cannot be selected as an ingestion destination")
+    if mode == "append" and not _is_uploader_managed_table(table_bucket_arn, namespace, table):
+        raise HTTPException(409, "This table is browse-only because it has no uploader schema and recovery contract")
+    invalid = [upload.filename or "<unnamed>" for upload in files if not upload.filename or not upload.filename.lower().endswith(SUPPORTED_UPLOAD_SUFFIXES)]
+    if invalid:
+        raise HTTPException(400, "Supported files are Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV")
+    try:
+        session = upload_sessions.create(
+            owner_user_id=user.user_id, mode=mode, table_bucket_arn=table_bucket_arn,
+            namespace=namespace, table=table, files=[(upload.filename or "upload", upload.file) for upload in files],
+        )
+    except Exception as error:
+        error_id = safe_error(logger, "upload_session_receipt_failed", phase="RECEIVED", file_count=len(files))
+        raise HTTPException(500, detail={"message": "Unable to store the selected files in a private local session.", "error_id": error_id}) from error
+    background_tasks.add_task(_profile_upload_session, session.session_id, user.user_id)
+    logger.info("upload_session_created", extra={"session_id": session.session_id, "file_count": len(session.files), "total_bytes": sum(file.size_bytes for file in session.files), "phase": "RECEIVED"})
+    return session.safe_dict()
+
+
+@app.get("/api/v2/upload-sessions/{session_id}")
+def get_upload_session(session_id: str, user: PilotUser = Depends(_current_user)):
+    try:
+        return upload_sessions.get(session_id, user.user_id).safe_dict()
+    except KeyError as error:
+        raise HTTPException(404, "The upload session does not exist, belongs to another user, or has expired") from error
+
+
+@app.delete("/api/v2/upload-sessions/{session_id}", status_code=204)
+def delete_upload_session(session_id: str, user: PilotUser = Depends(_current_user)):
+    try:
+        upload_sessions.delete(session_id, user.user_id)
+    except KeyError as error:
+        raise HTTPException(404, "The upload session does not exist, belongs to another user, or has expired") from error
+
+
+@app.post("/api/v2/upload-sessions/{session_id}/key-impact", status_code=202)
+def analyse_upload_session_key_impact(
+    session_id: str, payload: SessionKeyImpactRequest, background_tasks: BackgroundTasks,
+    user: PilotUser = Depends(_current_user),
+):
+    try:
+        session = upload_sessions.get(session_id, user.user_id)
+    except KeyError as error:
+        raise HTTPException(404, "The upload session does not exist, belongs to another user, or has expired") from error
+    if session.phase not in {"READY_FOR_REVIEW", "READY_FOR_ACKNOWLEDGEMENT"}:
+        raise HTTPException(409, f"Key-impact analysis is unavailable while session phase is {session.phase}")
+    _validate_key_analysis_columns(payload.deduplication_columns)
+    background_tasks.add_task(_analyse_session_key_impact, session_id, user.user_id, payload)
+    return {"session_id": session_id, "phase": "KEY_ANALYSING", "message": "Composite-key impact analysis has started."}
+
+
+async def _start_session_ingestion(session_id: str, user: PilotUser, payload: SessionIngestionRequest, lease: TableLease) -> None:
+    """Bridge session artifacts into the existing safe staging/Glue launcher.
+
+    The next preparation batch replaces this compatibility bridge with a fully
+    vectorised path. It already guarantees that the browser uploads files only
+    once and gives the UI a single session to reconnect to after refresh.
+    """
+    slot_acquired = False
+    try:
+        if not local_processing_slots.acquire(blocking=False):
+            upload_sessions.update(
+                session_id, user.user_id, phase="QUEUED",
+                progress_message="Queued for local processing capacity before upload preparation.",
+            )
+            await asyncio.to_thread(local_processing_slots.acquire)
+        slot_acquired = True
+        session = upload_sessions.update(
+            session_id, user.user_id, phase="STARTING_GLUE",
+            progress_message="Preparing sanitized Parquet and starting AWS Glue.",
+        )
+        request = IngestionRequest(
+            mode=session.mode, table=session.table, table_bucket_arn=session.table_bucket_arn,
+            namespace=session.namespace, request_id=payload.request_id, reporting_month=payload.reporting_month,
+            type_overrides=payload.type_overrides, deduplication_mode=payload.deduplication_mode,
+            deduplication_columns=payload.deduplication_columns, key_analysis_token=payload.key_analysis_token,
+            manual_encryption_columns=payload.manual_encryption_columns,
+        )
+        def report_progress(message: str) -> None:
+            upload_sessions.update(
+                session_id, user.user_id, phase="STARTING_GLUE", progress_message=message,
+            )
+
+        ingestion_progress_hooks[payload.request_id] = report_progress
+        try:
+            def prepare_and_start() -> dict:
+                with _session_upload_files(session) as files:
+                    return asyncio.run(_start_ingestion(request=request.model_dump_json(), files=files, user=user))
+            result = await asyncio.to_thread(prepare_and_start)
+        finally:
+            ingestion_progress_hooks.pop(payload.request_id, None)
+        lease = table_locks.renew(lease, "GLUE_RUNNING", result["job_run_id"])
+        pending_table_leases.pop(payload.request_id, None)
+        active_table_leases[result["job_run_id"]] = lease
+        active_mutations_by_request[payload.request_id] = result
+        upload_sessions.update(
+            session_id, user.user_id, phase="GLUE_RUNNING",
+            progress_message="AWS Glue is queued or running the Iceberg mutation.", ingestion=result,
+        )
+        logger.info("upload_session_glue_started", extra={"session_id": session_id, "phase": "GLUE_RUNNING", "job_run_id": result["job_run_id"]})
+    except HTTPException as error:
+        safe_detail = error.detail if isinstance(error.detail, str) else "The upload did not pass validation."
+        upload_sessions.update(
+            session_id, user.user_id, phase="FAILED", progress_message="Upload was not started.",
+            error={"code": "INGESTION_REJECTED", "message": safe_detail},
+        )
+        pending_table_leases.pop(payload.request_id, None)
+        try:
+            table_locks.release(lease)
+        except TableLockError:
+            safe_error(logger, "table_lock_release_failed", session_id=session_id, phase="FAILED")
+    except Exception as error:
+        pending_table_leases.pop(payload.request_id, None)
+        try:
+            table_locks.release(lease)
+        except TableLockError:
+            safe_error(logger, "table_lock_release_failed", session_id=session_id, phase="FAILED")
+        _session_error(session_id, user.user_id, "STARTING_GLUE", "Upload preparation or Glue startup failed.", error)
+    finally:
+        if slot_acquired:
+            local_processing_slots.release()
+
+
+@app.post("/api/v2/upload-sessions/{session_id}/ingestions", status_code=202)
+def start_upload_session_ingestion(
+    session_id: str, payload: SessionIngestionRequest, background_tasks: BackgroundTasks,
+    user: PilotUser = Depends(_current_user),
+):
+    try:
+        session = upload_sessions.get(session_id, user.user_id)
+    except KeyError as error:
+        raise HTTPException(404, "The upload session does not exist, belongs to another user, or has expired") from error
+    if session.phase not in {"READY_FOR_REVIEW", "READY_FOR_ACKNOWLEDGEMENT"}:
+        raise HTTPException(409, f"Upload is unavailable while session phase is {session.phase}")
+    if not session.preflight or not session.preflight.get("accepted"):
+        raise HTTPException(422, "The uploaded files did not pass the completed preflight validation")
+    configured_key = (session.preflight or {}).get("deduplication_columns") or []
+    if payload.deduplication_mode == "keyed" and (session.mode == "create" or not configured_key):
+        impact = session.key_impact or {}
+        if impact.get("acknowledgement_token") != payload.key_analysis_token:
+            raise HTTPException(422, "Run and acknowledge the latest composite-key impact analysis before uploading")
+        if impact.get("deduplication_columns") != payload.deduplication_columns:
+            raise HTTPException(422, "The selected composite key changed after analysis; run it again")
+    if payload.request_id in active_mutations_by_request:
+        return {"session_id": session_id, "phase": "GLUE_RUNNING", "message": "This idempotent request is already queued or running in AWS Glue.", "ingestion": active_mutations_by_request[payload.request_id]}
+    if payload.request_id in pending_table_leases:
+        return {"session_id": session_id, "phase": "STARTING_GLUE", "message": "This idempotent request is preparing the upload."}
+    lease = _acquire_table_mutation_lock(
+        table_bucket_arn=session.table_bucket_arn, namespace=session.namespace, table=session.table,
+        user=user, request_id=payload.request_id, operation=session.mode, session_id=session_id,
+    )
+    pending_table_leases[payload.request_id] = lease
+    logger.info("table_lock_acquired", extra={"session_id": session_id, "operation": session.mode, "phase": "STARTING_GLUE"})
+    background_tasks.add_task(_start_session_ingestion, session_id, user, payload, lease)
+    return {"session_id": session_id, "phase": "STARTING_GLUE", "message": "Upload preparation has started."}
+
+
 async def preflight(
     mode: Literal["create", "append"] = Form(),
     table_bucket_arn: str = Form(),
@@ -1350,7 +1860,6 @@ async def preflight(
     return _preflight(mode, table_bucket_arn, namespace, _canonical_table_name(table), files)
 
 
-@app.post("/api/key-impact-analysis")
 async def key_impact_analysis(
     request: str = Form(),
     files: list[UploadFile] = File(),
@@ -1419,8 +1928,7 @@ def _validate_key_analysis_acknowledgement(
         raise HTTPException(422, "The selected files changed after key analysis; run it again")
 
 
-@app.post("/api/ingestions")
-async def start_ingestion(
+async def _start_ingestion(
     request: str = Form(),
     files: list[UploadFile] = File(),
     user: PilotUser = Depends(_current_user),
@@ -1429,6 +1937,7 @@ async def start_ingestion(
         payload = IngestionRequest.model_validate_json(request)
     except Exception as error:
         raise HTTPException(400, f"Invalid ingestion request: {error}") from error
+    _report_ingestion_progress(payload.request_id, "Checking the authorized table destination and upload request.")
     _require_scope(user, payload.table_bucket_arn, payload.namespace)
     if payload.table == UPLOAD_HISTORY_TABLE:
         raise HTTPException(400, "The reserved uploader audit table cannot be selected as an ingestion destination")
@@ -1436,6 +1945,7 @@ async def start_ingestion(
         raise HTTPException(409, "This table is browse-only because it has no uploader schema and recovery contract")
     if not files:
         raise HTTPException(400, "Choose at least one supported file")
+    _report_ingestion_progress(payload.request_id, "Revalidating schema, data types, and sanitization requirements.")
     preview = _preflight(payload.mode, payload.table_bucket_arn, payload.namespace, payload.table, files)
     if not preview["accepted"]:
         raise HTTPException(
@@ -1446,51 +1956,111 @@ async def start_ingestion(
                 "preflight": preview,
             },
         )
+    _report_ingestion_progress(payload.request_id, "Finalizing the table schema and de-duplication settings.")
     target_schema = _apply_create_type_overrides(preview, payload.type_overrides) if payload.mode == "create" else preview["target_schema"]
-    deduplication_columns = (
-        _validate_create_deduplication_columns(preview, payload.deduplication_columns)
-        if payload.mode == "create" else preview["deduplication_columns"]
+    existing_contract = {"deduplication_columns": []} if payload.mode == "create" else _load_contract_record(payload.table_bucket_arn, payload.namespace, payload.table)
+    if payload.mode == "create":
+        _report_ingestion_progress(payload.request_id, "Validating the selected first-upload type conversions.")
+        allowed_manual = {item["column"] for item in preview.get("sanitization_review", {}).get("manual_encryption_candidates", [])}
+        invalid_manual = sorted(set(payload.manual_encryption_columns) - allowed_manual)
+        if invalid_manual:
+            raise HTTPException(422, f"Manual encryption is not available for: {', '.join(invalid_manual)}")
+        manual_encryption_columns = sorted(set(payload.manual_encryption_columns))
+    else:
+        manual_encryption_columns = list(existing_contract.get("manual_encryption_columns") or [])
+    # The retired multipart UI did not send a mode. Preserve its historical
+    # keyed behavior while v2 callers always select an explicit mode.
+    effective_deduplication_mode = payload.deduplication_mode
+    if effective_deduplication_mode == "legacy-full-row":
+        effective_deduplication_mode = "keyed" if payload.mode == "create" or existing_contract.get("deduplication_columns") else "legacy-full-row"
+    deduplication_columns = _v2_deduplication_columns(
+        preview, existing_contract, effective_deduplication_mode, payload.deduplication_columns,
     )
+    late_key_activation = (
+        payload.mode == "append"
+        and effective_deduplication_mode == "keyed"
+        and not existing_contract.get("deduplication_columns")
+    )
+    # Only an explicit first-upload temporal choice may have lossy NULL
+    # conversion. Appends always keep this empty and remain strictly checked.
+    lossy_temporal_columns: set[str] = set()
     if payload.mode == "create":
         override_issues = []
         for upload in files:
             override_issues.extend(_unsafe_cast_issues(upload, target_schema))
-        if override_issues:
+        # A user may deliberately choose DATE or TIMESTAMP for an ambiguous
+        # first-upload field.  That explicit choice has a documented lossy
+        # behaviour: valid temporal values are retained and incompatible
+        # populated values become NULL.  Every other unsafe cast remains a
+        # hard rejection.
+        lossy_temporal_columns = {
+            name for name, target_type in payload.type_overrides.items()
+            if target_type in {"DATE", "TIMESTAMP"}
+        }
+        blocking_override_issues = [
+            issue for issue in override_issues
+            if not (
+                issue["column"] in lossy_temporal_columns
+                and issue["target_type"] in {"DATE", "TIMESTAMP"}
+            )
+        ]
+        if blocking_override_issues:
             raise HTTPException(
                 422,
                 detail={
                     "message": "The chosen first-upload types would discard values; choose compatible types.",
-                    "unsafe_casts": override_issues,
+                    "unsafe_casts": blocking_override_issues,
                 },
             )
-        _validate_key_analysis_acknowledgement(payload, deduplication_columns, files, user)
+        if effective_deduplication_mode == "keyed":
+            _validate_key_analysis_acknowledgement(payload, deduplication_columns, files, user)
     if payload.mode == "append":
+        _report_ingestion_progress(payload.request_id, "Configuring S3 Tables recovery snapshot retention.")
         try:
             _configure_snapshot_retention(payload.table_bucket_arn, payload.namespace, payload.table)
         except Exception as error:
             raise HTTPException(500, "Unable to configure the required S3 Tables snapshot retention") from error
-    sensitive_columns_present = any(
-        item["sanitization"]["encrypted_columns"] for item in preview["files"]
+    if late_key_activation:
+        _report_ingestion_progress(payload.request_id, "Saving the first immutable composite-key contract for this table.")
+        _activate_late_deduplication_contract(
+            payload.table_bucket_arn, payload.namespace, payload.table,
+            existing_contract, deduplication_columns, user.user_id,
+        )
+    sensitive_columns_present = bool(manual_encryption_columns) or any(
+        item["sanitization"]["encrypted_columns"] or item.get("nric_detected_columns") for item in preview["files"]
     )
     try:
+        _report_ingestion_progress(payload.request_id, "Preparing healthcare sanitization and encryption requirements.")
         active_key = encryption_key() if sensitive_columns_present else None
     except Exception as error:
         raise HTTPException(500, "Unable to retrieve the configured encryption key") from error
     try:
+        _report_ingestion_progress(payload.request_id, "Ensuring 30-day retention for sanitized troubleshooting uploads.")
         _ensure_upload_archive_lifecycle()
     except Exception as error:
         raise HTTPException(500, "Unable to configure the 30-day sanitized-upload archive lifecycle") from error
     request_prefix = f"{WEB_UPLOAD_PREFIX}/{payload.request_id}"
     objects, sanitization_audits = [], []
     for number, upload in enumerate(files):
+        _report_ingestion_progress(
+            payload.request_id,
+            f"Sanitizing and converting file {number + 1} of {len(files)} to Glue-compatible Parquet.",
+        )
         path, digest = _copy_upload_with_digest(upload)
         try:
             original_filename = upload.filename or "upload.parquet"
             key = f"{request_prefix}/input/{number:02d}-{Path(original_filename).stem}.parquet"
             staged, transformed, audit = _make_glue_compatible_parquet(
-                path, original_filename, active_key, target_schema
+                path, original_filename, active_key, target_schema,
+                manual_encryption_columns=manual_encryption_columns,
+                nric_columns=preview["files"][number].get("nric_detected_columns", []),
+                lossy_temporal_columns=lossy_temporal_columns,
             )
             try:
+                _report_ingestion_progress(
+                    payload.request_id,
+                    f"Staging sanitized file {number + 1} of {len(files)} in S3.",
+                )
                 with staged.open("rb") as stream:
                     s3.put_object(
                         Bucket=SOURCE_BUCKET,
@@ -1518,31 +2088,42 @@ async def start_ingestion(
         finally:
             path.unlink(missing_ok=True)
     if payload.mode == "create":
+        _report_ingestion_progress(payload.request_id, "Writing the immutable uploader schema and de-duplication contract.")
         s3.put_object(
             Bucket=SOURCE_BUCKET,
             Key=_contract_key(payload.table_bucket_arn, payload.namespace, payload.table),
             Body=json.dumps({
+                "contract_version": 2,
                 "schema": target_schema,
-                "deduplication_columns": deduplication_columns,
-                "deduplication_policy": "skip-existing-key-report-conflict-v1",
+                "deduplication_columns": deduplication_columns if effective_deduplication_mode == "keyed" else [],
+                "deduplication_mode": "keyed" if effective_deduplication_mode == "keyed" else "unconfigured",
+                "deduplication_policy": "skip-existing-key-report-conflict-v2",
+                "manual_encryption_columns": manual_encryption_columns,
+                "automatic_sanitization_columns": preview.get("sanitization_review", {}).get("automatic_encrypted_columns", []),
+                "created_by": user.user_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
             }, indent=2).encode(),
             ContentType="application/json", ServerSideEncryption="AES256",
         )
+    _report_ingestion_progress(payload.request_id, "Writing the staged-upload manifest for AWS Glue.")
     manifest_key = f"{request_prefix}/manifest.json"
     s3.put_object(
         Bucket=SOURCE_BUCKET, Key=manifest_key,
         Body=json.dumps({
             "files": objects, "schema": target_schema, "sanitization": sanitization_audits,
             "deduplication_columns": deduplication_columns,
+            "deduplication_mode": effective_deduplication_mode,
             "deduplication_policy": preview["deduplication_policy"],
         }).encode(),
         ContentType="application/json", ServerSideEncryption="AES256",
     )
+    _report_ingestion_progress(payload.request_id, "Ensuring the AWS Glue ingestion job is ready.")
     _ensure_web_job()
     run_id = str(uuid.uuid4())
     upload_id = _upload_id()
     uploaded_at = datetime.now(timezone.utc).isoformat()
     history_prefix = _history_prefix(payload.table_bucket_arn, payload.namespace, payload.table)
+    _report_ingestion_progress(payload.request_id, "Starting the AWS Glue Iceberg table mutation.")
     response = glue.start_job_run(
         JobName=WEB_JOB_NAME,
         JobRunQueuingEnabled=True,
@@ -1563,6 +2144,33 @@ async def start_ingestion(
         "job_run_id": response["JobRunId"], "qc_uri": f"{QC_PREFIX}/web/{run_id}/report.json",
         "request_id": payload.request_id, "upload_id": upload_id, "operation": "ingestion",
     }
+
+
+def _retired_multipart_endpoint(replacement: str) -> JSONResponse:
+    """One-release no-body tombstone for the retired multipart API."""
+    return JSONResponse(
+        status_code=410,
+        content={
+            "code": "MULTIPART_API_RETIRED",
+            "detail": "This uploader endpoint has been retired; create an upload session first.",
+            "replacement": replacement,
+        },
+    )
+
+
+@app.post("/api/preflight")
+async def retired_preflight() -> JSONResponse:
+    return _retired_multipart_endpoint("POST /api/v2/upload-sessions")
+
+
+@app.post("/api/key-impact-analysis")
+async def retired_key_impact_analysis() -> JSONResponse:
+    return _retired_multipart_endpoint("POST /api/v2/upload-sessions/{session_id}/key-impact")
+
+
+@app.post("/api/ingestions")
+async def retired_ingestions() -> JSONResponse:
+    return _retired_multipart_endpoint("POST /api/v2/upload-sessions/{session_id}/ingestions")
 
 
 @app.delete("/api/tables")
@@ -1660,6 +2268,7 @@ def ingestion_status(job_run_id: str, operation: Literal["ingestion", "rollback"
     state = run["JobRunState"]
     message = {
         "STARTING": "Rollback is starting in AWS Glue…" if operation == "rollback" else "ETL is starting in AWS Glue…",
+        "WAITING": "Queued for ETL capacity in AWS Glue.",
         "RUNNING": "Rollback is in process: restoring and verifying the prior Iceberg snapshot…" if operation == "rollback" else "ETL is in process: validating, snapshotting, and appending the uploaded data…",
         "SUCCEEDED": "Rollback completed and was verified." if operation == "rollback" else "ETL completed successfully.",
         "FAILED": "ETL failed; no successful outcome was reported.",
@@ -1679,6 +2288,8 @@ def ingestion_status(job_run_id: str, operation: Literal["ingestion", "rollback"
             retention_configured = True
         except Exception as error:
             retention_configured, retention_warning = False, str(error)
+    if state in {"SUCCEEDED", "FAILED", "TIMEOUT", "STOPPED", "ERROR"}:
+        _release_table_mutation_lock(job_run_id)
     return {
         "state": state, "message": message, "error": run.get("ErrorMessage"),
         "started": str(run.get("StartedOn")), "completed": str(run.get("CompletedOn")),

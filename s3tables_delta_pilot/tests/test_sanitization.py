@@ -6,7 +6,7 @@ import pyarrow as pa
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad
 
-from s3tables_delta_pilot.sanitization import ENCRYPTED_PREFIX, _build_iv, age_band, sanitise_table, sanitised_schema
+from s3tables_delta_pilot.sanitization import ENCRYPTED_PREFIX, _build_iv, age_band, detect_nric_columns, sanitise_table, sanitised_schema
 
 
 KEY = b"R92oGhcdhyxFbicuopsdataAIO2701211"
@@ -51,6 +51,16 @@ class SanitizationTests(unittest.TestCase):
         self.assertEqual(2, audit["already_encrypted_values"])
         self.assertEqual(0, audit["newly_encrypted_values"])
 
+    def test_missing_numeric_identifier_values_remain_null(self):
+        source = pa.table({"Ext_Pat_ID": [12345.0, None, 67890.0]})
+
+        result, audit = sanitise_table(source, KEY)
+
+        self.assertTrue(result["Ext_Pat_ID"][0].as_py().startswith(ENCRYPTED_PREFIX))
+        self.assertIsNone(result["Ext_Pat_ID"][1].as_py())
+        self.assertTrue(result["Ext_Pat_ID"][2].as_py().startswith(ENCRYPTED_PREFIX))
+        self.assertEqual(2, audit["newly_encrypted_values"])
+
     def test_age_banding_is_idempotent_for_existing_approved_bands(self):
         self.assertEqual("35-39", age_band("35-39"))
         self.assertEqual("90+", age_band("90+"))
@@ -67,6 +77,21 @@ class SanitizationTests(unittest.TestCase):
         self.assertEqual(ENCRYPTED_PREFIX + legacy, result["Ext_Pat_ID"][0].as_py())
         self.assertEqual(1, audit["already_encrypted_values"])
         self.assertEqual(0, audit["newly_encrypted_values"])
+
+    def test_manual_and_nric_columns_are_encrypted_and_nric_metadata_is_value_free(self):
+        source = pa.table({
+            "Unusual Identifier": ["S1234567D", "T7654321Z", "F1234567N", "ordinary", "G7654321P"],
+            "Free Text": ["safe", "text", "only", "values", "here"],
+        })
+        columns, details = detect_nric_columns(source, "stable-seed")
+        self.assertEqual(("Unusual Identifier",), columns)
+        self.assertTrue(details["Unusual Identifier"]["nric_detected"])
+        self.assertNotIn("S1234567D", str(details))
+        result, audit = sanitise_table(source, KEY, manual_encryption_columns=["Free Text"], nric_columns=columns)
+        self.assertTrue(result["Unusual Identifier"][0].as_py().startswith(ENCRYPTED_PREFIX))
+        self.assertTrue(result["Free Text"][0].as_py().startswith(ENCRYPTED_PREFIX))
+        self.assertEqual(["Free Text"], audit["manual_encryption_columns"])
+        self.assertEqual(["Unusual Identifier"], audit["nric_encrypted_columns"])
 
 
 if __name__ == "__main__":
