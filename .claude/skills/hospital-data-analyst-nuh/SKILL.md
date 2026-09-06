@@ -5,7 +5,7 @@ description: Analyze National University Hospital (NUH) operational data in the 
 
 # NUH Analytics
 
-Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
+Please Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
 `inpatient_movement`, `soc`, and `surgery`.
 
 ## Scope gate
@@ -41,6 +41,7 @@ query using the applicable reference rules.
 | Surgery, day surgery, normal delivery, inpatient surgery, or emergency/elective procedures | `surgery` | `SVISITDATE` | references/surgery.md |
 | Department, cluster, MOH specialty, or subspecialty report | Relevant table + subspec mapping | — | references/subspec-mapping.md |
 | Chart, visualization, or dashboard | Relevant table references | — | references/dashboard.md |
+| Geographic or location-based dashboard (patient origin map, district map) | Relevant table references | — | references/dashboard.md + references/folium-map.md |
 
 ## Composite reference requirements
 
@@ -51,13 +52,14 @@ query using the applicable reference rules.
 | SOC First/New vs Repeat visits | `soc.md` |
 | Inpatient discharges by Elective/Emergency | `inpatient-movement.md` |
 | Any chart, visualization, or dashboard | Responsible table references + `dashboard.md` |
+| Geographic or location-based dashboard | Responsible table references + `dashboard.md` + `folium-map.md` |
 
 ## Coverage and source-era limits
 
 | Table | Coverage | Key era note |
 |---|---|---|
 | `emd` | Jan 2023–Jun 2026 | `NCPUCC` starts Jan 2025 — report unavailable, not zero, for 2023–2024 |
-| `soc` | Jan 2023–Jun 2026 | Native new/repeat and private/subsidised groups start 2024; use hybrid CASE for 2023 |
+| `soc` | Jan 2023–Jun 2026 | Apply the universal `VISIT_TYPE` and `PATIENT_CLASS` mappings in `soc.md` for every period |
 | `surgery` | Jan 2023–Jun 2026 | SAP = `UID IS NULL` through Jan 2024; Epic = `UID IS NOT NULL` from Feb 2024 |
 | `inpatient_movement` | Snapshot-based | Use `CASE_NO` before May 2025; use `EPIC_CSN` from May 2025 |
 
