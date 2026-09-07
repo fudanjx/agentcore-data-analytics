@@ -18,7 +18,7 @@ import threading
 import time
 import uuid
 from collections.abc import Iterator
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,8 +43,10 @@ from .ingest_contract import (
     normalise_names,
     parse_documented_date,
     parse_documented_timestamp,
+    profile_table,
     schema_from_arrow,
     schema_from_table,
+    temporal_array,
 )
 from .pilot import NAMESPACE, QC_PREFIX, REGION, ROLE_NAME, SOURCE_BUCKET, SOURCE_PREFIX, TABLE_BUCKET_ARN
 from .sanitization import detect_nric_columns, encryption_key, sanitise_table, sanitised_schema
@@ -632,6 +634,21 @@ def _load_contract(table_bucket_arn: str, namespace: str, table: str) -> list[di
     return _load_contract_record(table_bucket_arn, namespace, table)["schema"]
 
 
+def _contract_fingerprint(contract: dict) -> str:
+    """Identify contract fields that affect validation or preparation."""
+    material = {
+        key: contract.get(key)
+        for key in (
+            "contract_version", "schema", "deduplication_columns",
+            "deduplication_mode", "deduplication_policy",
+            "manual_encryption_columns", "automatic_sanitization_columns",
+        )
+    }
+    return hashlib.sha256(
+        json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
 def _activate_late_deduplication_contract(
     table_bucket_arn: str, namespace: str, table: str, contract: dict,
     columns: list[str], user_id: str,
@@ -691,6 +708,10 @@ def _temporary_upload_path(upload: UploadFile) -> Iterator[Path]:
     a still-open ``NamedTemporaryFile``. Keep creation/writing in the inner
     context, then yield only after that handle has closed.
     """
+    session_path = getattr(upload, "_pilot_session_path", None)
+    if session_path:
+        yield Path(session_path)
+        return
     temp = tempfile.NamedTemporaryFile(
         suffix=_temporary_suffix(upload.filename or "upload"), delete=False
     )
@@ -759,6 +780,14 @@ def _read_upload_table(path: Path, filename: str) -> pa.Table:
     return pa.Table.from_pandas(frame, preserve_index=False)
 
 
+def _digest_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        while chunk := stream.read(8 * 1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
 def _sanitization_details(schema: pa.Schema) -> tuple[pa.Schema, dict]:
     sanitized, plan = sanitised_schema(schema)
     return sanitized, {
@@ -769,15 +798,15 @@ def _sanitization_details(schema: pa.Schema) -> tuple[pa.Schema, dict]:
     }
 
 
-def _nric_sanitization_review(upload: UploadFile) -> dict:
+def _nric_sanitization_review(
+    upload: UploadFile, table: pa.Table | None = None, digest: str | None = None,
+) -> dict:
     """Return value-free automatic NRIC detection for the preflight UI."""
-    with _temporary_upload_path(upload) as path:
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            while chunk := stream.read(8 * 1024 * 1024):
-                digest.update(chunk)
-        table = _read_upload_table(path, upload.filename or "upload")
-        columns, details = detect_nric_columns(table, digest.hexdigest())
+    if table is None or digest is None:
+        with _temporary_upload_path(upload) as path:
+            digest = digest or _digest_path(path)
+            table = table or _read_upload_table(path, upload.filename or "upload")
+    columns, details = detect_nric_columns(table, digest)
     return {"nric_detected_columns": list(columns), "nric_detection": details}
 
 
@@ -796,14 +825,16 @@ def _read_schemas(files: list[UploadFile]) -> tuple[list[pa.Schema], list[dict]]
     return schemas, sanitization
 
 
-def _first_upload_contract(upload: UploadFile) -> tuple[list[dict[str, str]], list[str], set[str]]:
+def _first_upload_contract(
+    upload: UploadFile, table: pa.Table | None = None,
+) -> tuple[list[dict[str, str]], list[str], set[str]]:
     """Profile every populated value of the first upload for table creation."""
-    with _temporary_upload_path(upload) as path:
-        table = _read_upload_table(path, upload.filename or "upload")
-        sanitized_schema, plan = sanitised_schema(table.schema)
-        forced_strings = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-        schema, warnings = schema_from_table(table, sanitized_schema, forced_strings)
-        return schema, warnings, manual_confirmation_columns(table, sanitized_schema, forced_strings)
+    if table is None:
+        with _temporary_upload_path(upload) as path:
+            table = _read_upload_table(path, upload.filename or "upload")
+    sanitized_schema, plan = sanitised_schema(table.schema)
+    forced_strings = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+    return profile_table(table, sanitized_schema, forced_strings)
 
 
 def _create_type_selections(
@@ -831,56 +862,48 @@ def _create_type_selections(
     return selections
 
 
-def _create_deduplication_candidates(upload: UploadFile, target: list[dict[str, str]]) -> list[dict]:
+def _create_deduplication_candidates(
+    upload: UploadFile, target: list[dict[str, str]], table: pa.Table | None = None,
+) -> list[dict]:
     """Return every stored first-upload column with ephemeral safe examples."""
-    with _temporary_upload_path(upload) as path:
-        source = _read_upload_table(path, upload.filename or "upload")
-        _, plan = sanitised_schema(source.schema)
-        sensitive_sources = set(plan.drop_columns) | set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
-        source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
-        candidates = []
-        for field in target:
-            source_name = source_by_canonical.get(field["name"])
-            masked = source_name in sensitive_sources
-            values = []
-            non_null_count = 0
-            if source_name and not masked:
-                column = source[source_name]
-                # Keep preflight bounded even for large healthcare files:
-                # Arrow calculates counts natively, while sampling reads a
-                # small random set of scalars rather than materialising an
-                # entire column as a Python list.
-                non_null_count = int(pc.count(column).as_py())
-                indexes = random.SystemRandom().sample(range(len(column)), min(1024, len(column)))
-                for index in indexes:
-                    value = column[index].as_py()
-                    if value is not None and str(value).strip().lower() not in {"", "nan", "none", "nat"}:
-                        values.append(str(value)[:160])
-                        if len(values) == 5:
-                            break
-            candidates.append({
-                "column": field["name"], "target_type": field["type"],
-                "source_type": str(source.schema.field(source_name).type) if source_name else "MISSING",
-                "sample_values": values, "samples_masked": bool(masked),
-                # The uploader normalises then encrypts identifiers using
-                # the configured stable legacy-compatible representation.
-                # They are therefore valid case-level keys, but values
-                # remain masked in the browser.
-                "deduplication_eligible": True,
-                "deduplication_ineligible_reason": None,
-                # Quality is metadata only. Sensitive fields deliberately
-                # do not expose their value distribution to the browser.
-                "non_null_count": non_null_count if not masked else None,
-                # Distinct cardinality is intentionally deferred until the
-                # user asks for composite-key analysis.  Doing it for every
-                # candidate column makes first-upload review unnecessarily
-                # expensive on multi-million-row files.
-                "distinct_non_null_count": None,
-            })
-        return candidates
+    if table is None:
+        with _temporary_upload_path(upload) as path:
+            table = _read_upload_table(path, upload.filename or "upload")
+    source = table
+    _, plan = sanitised_schema(source.schema)
+    sensitive_sources = set(plan.drop_columns) | set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
+    source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
+    candidates = []
+    for field in target:
+        source_name = source_by_canonical.get(field["name"])
+        masked = source_name in sensitive_sources
+        values = []
+        non_null_count = 0
+        if source_name and not masked:
+            column = source[source_name]
+            non_null_count = int(pc.count(column).as_py())
+            indexes = random.SystemRandom().sample(range(len(column)), min(1024, len(column)))
+            for index in indexes:
+                value = column[index].as_py()
+                if value is not None and str(value).strip().lower() not in {"", "nan", "none", "nat"}:
+                    values.append(str(value)[:160])
+                    if len(values) == 5:
+                        break
+        candidates.append({
+            "column": field["name"], "target_type": field["type"],
+            "source_type": str(source.schema.field(source_name).type) if source_name else "MISSING",
+            "sample_values": values, "samples_masked": bool(masked),
+            "deduplication_eligible": True,
+            "deduplication_ineligible_reason": None,
+            "non_null_count": non_null_count if not masked else None,
+            "distinct_non_null_count": None,
+        })
+    return candidates
 
 
-def _create_type_selection_samples(upload: UploadFile, selections: list[dict]) -> list[dict]:
+def _create_type_selection_samples(
+    upload: UploadFile, selections: list[dict], table: pa.Table | None = None,
+) -> list[dict]:
     """Attach a few privacy-safe, non-persistent examples to type choices.
 
     Samples exist only in the HTTP preflight response.  They are deliberately
@@ -893,25 +916,31 @@ def _create_type_selection_samples(upload: UploadFile, selections: list[dict]) -
     samples = {item["column"]: item for item in _create_deduplication_candidates(upload, [
         {"name": item["column"], "type": item.get("suggested_target_type", item.get("source_type", "STRING"))}
         for item in selections
-    ])}
-    with _temporary_upload_path(upload) as path:
-        source = _read_upload_table(path, upload.filename or "upload")
-        source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
-        for choice in selections:
-            source_name = source_by_canonical.get(choice["column"])
-            impacts: dict[str, dict[str, int | str]] = {}
-            if source_name:
-                series = source[source_name].to_pandas()
-                non_null = series.notna()
-                for target_type, parser in (("DATE", parse_documented_date), ("TIMESTAMP", parse_documented_timestamp)):
-                    converted = series.map(parser)
-                    invalid_count = int((non_null & converted.isna()).sum())
-                    if invalid_count:
-                        impacts[target_type] = {
-                            "invalid_value_count": invalid_count,
-                            "behaviour": "invalid_values_become_null",
-                        }
-            choice["lossy_target_types"] = impacts
+    ], table)}
+    if table is None:
+        with _temporary_upload_path(upload) as path:
+            table = _read_upload_table(path, upload.filename or "upload")
+    source = table
+    source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
+    for choice in selections:
+        source_name = source_by_canonical.get(choice["column"])
+        impacts: dict[str, dict[str, int | str]] = {}
+        if source_name:
+            column = source[source_name]
+            for target_type in SELECTABLE_ICEBERG_TYPES:
+                if target_type == "STRING":
+                    continue
+                issues = _unsafe_cast_issues(
+                    upload, [{"name": choice["column"], "type": target_type}], source
+                )
+                if issues:
+                    impacts[target_type] = {
+                        "invalid_value_count": int(issues[0]["unsafe_value_count"]),
+                        "behaviour": "invalid_values_become_null"
+                        if target_type in {"DATE", "TIMESTAMP"}
+                        else "invalid_values_rejected",
+                    }
+        choice["lossy_target_types"] = impacts
     for choice in selections:
         choice.update({key: samples[choice["column"]][key] for key in ("sample_values", "samples_masked")})
     return selections
@@ -971,15 +1000,19 @@ def _apply_create_type_overrides(preview: dict, overrides: dict[str, str]) -> li
     return result
 
 
-def _unsafe_cast_issues(upload: UploadFile, target: list[dict[str, str]]) -> list[dict[str, int | str]]:
+def _unsafe_cast_issues(
+    upload: UploadFile, target: list[dict[str, str]], table: pa.Table | None = None,
+) -> list[dict[str, int | str]]:
     """Return value-level casts Spark would turn into NULL, without values.
 
     This keeps a bad append out of temporary S3 and Glue.  It deliberately
     returns only column names and counts: raw healthcare values never enter the
     preflight response or logs.
     """
-    with _temporary_upload_path(upload) as path:
-        table = _read_upload_table(path, upload.filename or "upload")
+    if table is None:
+        with _temporary_upload_path(upload) as path:
+            table = _read_upload_table(path, upload.filename or "upload")
+    if table is not None:
         sanitized_schema, plan = sanitised_schema(table.schema)
         normalized = normalise_names([field.name for field in sanitized_schema])
         source_columns = dict(zip(normalized, sanitized_schema.names))
@@ -1010,10 +1043,12 @@ def _unsafe_cast_issues(upload: UploadFile, target: list[dict[str, str]]) -> lis
                 converted = pd.to_numeric(series, errors="coerce")
                 if target_type == "BIGINT":
                     converted = converted.where((converted % 1) == 0)
-            elif target_type == "DATE":
-                converted = series.map(parse_documented_date)
-            elif target_type == "TIMESTAMP":
-                converted = series.map(parse_documented_timestamp)
+            elif target_type in {"DATE", "TIMESTAMP"}:
+                converted = temporal_array(source, target_type)
+                count = int(pc.count(source).as_py()) - (len(converted) - converted.null_count)
+                if count:
+                    issues.append({"column": name, "source_type": str(source_type), "target_type": target_type, "unsafe_value_count": count})
+                continue
             elif target_type == "BOOLEAN":
                 converted = series.astype("string").str.strip().str.lower().isin({"true", "false", "0", "1"})
                 invalid = non_null & ~converted
@@ -1196,6 +1231,82 @@ def _raw_key_impact_metrics(paths: list[tuple[Path, str]], key_columns: list[str
     }
 
 
+def _raw_key_row_selection(
+    paths: list[tuple[Path, str]], key_columns: list[str],
+) -> tuple[dict[int, list[int]], dict[str, int]]:
+    """Select retained source rows with the exact raw key-impact semantics."""
+    frames: list[tuple[pl.LazyFrame, dict[str, str]]] = []
+    all_columns: set[str] = set()
+    for path, filename in paths:
+        frame = _raw_analysis_lazy_frame(path, filename)
+        source_names = list(frame.collect_schema().names())
+        canonical_names = normalise_names(source_names)
+        lookup = dict(zip(canonical_names, source_names))
+        frames.append((frame, lookup))
+        all_columns.update(canonical_names)
+    missing_keys = sorted(set(key_columns) - all_columns)
+    if missing_keys:
+        raise HTTPException(422, f"The selected key columns are not present in the upload: {', '.join(missing_keys)}")
+    columns = sorted(all_columns)
+    projected = []
+    for file_number, (frame, lookup) in enumerate(frames):
+        projected.append(
+            frame.select([
+                pl.col(lookup[name]).cast(pl.String, strict=False).alias(name)
+                if name in lookup else pl.lit(None, dtype=pl.String).alias(name)
+                for name in columns
+            ])
+            .with_row_index("__source_row")
+            .with_columns(pl.lit(file_number, dtype=pl.Int32).alias("__source_file"))
+        )
+    incoming = pl.concat(projected, how="vertical_relaxed")
+    key_components = [
+        pl.when(pl.col(name).is_null() | (pl.col(name).str.strip_chars() == ""))
+        .then(pl.lit("~"))
+        .otherwise(pl.col(name))
+        .alias(name)
+        for name in key_columns
+    ]
+    classified_source = incoming.with_columns(
+        pl.struct(key_components).alias("__uploader_composite_key")
+    )
+    grouped = classified_source.group_by("__uploader_composite_key").agg(
+        pl.len().alias("rows"),
+        pl.struct([pl.col(name) for name in columns]).n_unique().alias("variants"),
+    )
+    classified = classified_source.join(grouped, on="__uploader_composite_key", how="left")
+    selected = (
+        classified.filter(pl.col("variants") == 1)
+        .sort("__source_file", "__source_row")
+        .unique(subset=["__uploader_composite_key"], keep="first", maintain_order=True)
+        .select("__source_file", "__source_row")
+    )
+    summary = grouped.select(
+        pl.col("rows").sum().alias("incoming_rows"),
+        pl.len().alias("unique_composite_keys"),
+        pl.when(pl.col("variants") == 1).then(pl.col("rows") - 1).otherwise(0).sum().alias("exact_duplicate_rows"),
+        (pl.col("variants") > 1).sum().alias("conflicting_key_groups"),
+        pl.when(pl.col("variants") > 1).then(pl.col("rows")).otherwise(0).sum().alias("rows_in_conflicting_key_groups"),
+        (pl.col("variants") == 1).sum().alias("expected_retained_rows"),
+    )
+    summary_frame, selected_frame = pl.collect_all([summary, selected])
+    values = summary_frame.row(0, named=True)
+    total = int(values["incoming_rows"] or 0)
+    retained = int(values["expected_retained_rows"] or 0)
+    selections: dict[int, list[int]] = {number: [] for number in range(len(paths))}
+    for file_number, source_row in selected_frame.iter_rows():
+        selections[int(file_number)].append(int(source_row))
+    return selections, {
+        "incoming_rows": total,
+        "unique_composite_keys": int(values["unique_composite_keys"] or 0),
+        "duplicate_rows_within_upload": int(values["exact_duplicate_rows"] or 0),
+        "within_upload_key_conflicts": int(values["rows_in_conflicting_key_groups"] or 0),
+        "within_upload_conflict_keys": int(values["conflicting_key_groups"] or 0),
+        "rows_retained_after_local_deduplication": retained,
+        "expected_skipped_rows": total - retained,
+    }
+
+
 def _analyse_selected_key(
     files: list[UploadFile], key_columns: list[str],
 ) -> tuple[dict[str, int], list[str]]:
@@ -1211,17 +1322,72 @@ def _analyse_selected_key(
             path.unlink(missing_ok=True)
 
 
-def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, files: list[UploadFile]) -> dict:
-    schemas, sanitization = _read_schemas(files)
-    nric_reviews = [_nric_sanitization_review(upload) for upload in files]
+def _preflight(
+    mode: str, table_bucket_arn: str, namespace: str, table: str, files: list[UploadFile],
+) -> dict:
+    """Copy each non-session upload once and parse every file once."""
+    started = time.perf_counter()
+    parse_ms = 0.0
+    digest_ms = 0.0
+    with ExitStack() as stack:
+        tables: list[pa.Table] = []
+        digests: list[str] = []
+        for upload in files:
+            if not upload.filename or not upload.filename.lower().endswith(SUPPORTED_UPLOAD_SUFFIXES):
+                raise HTTPException(400, f"Supported files are Parquet, XLSX, XLS, CSV, and TSV: {upload.filename or '<unnamed>'}")
+            try:
+                path = stack.enter_context(_temporary_upload_path(upload))
+                phase_started = time.perf_counter()
+                tables.append(_read_upload_table(path, upload.filename))
+                parse_ms += (time.perf_counter() - phase_started) * 1000
+                known_digest = getattr(upload, "_pilot_sha256", None)
+                phase_started = time.perf_counter()
+                digests.append(known_digest or _digest_path(path))
+                digest_ms += (time.perf_counter() - phase_started) * 1000
+            except Exception as error:
+                raise HTTPException(400, f"Cannot read {upload.filename} as a supported upload: {error}") from error
+        result = _preflight_tables(
+            mode, table_bucket_arn, namespace, table, files, tables, digests,
+        )
+        result["phase_timings_ms"] = {
+            **result.get("phase_timings_ms", {}),
+            "parse": round(parse_ms, 1),
+            "digest": round(digest_ms, 1),
+            "profile_total": round((time.perf_counter() - started) * 1000, 1),
+        }
+        return result
+
+
+def _preflight_tables(
+    mode: str, table_bucket_arn: str, namespace: str, table: str,
+    files: list[UploadFile], tables: list[pa.Table], digests: list[str],
+) -> dict:
+    phase_timings: dict[str, float] = {}
+    phase_started = time.perf_counter()
+    schemas = []
+    sanitization = []
+    for source in tables:
+        schema, details = _sanitization_details(source.schema)
+        schemas.append(schema)
+        sanitization.append(details)
+    phase_timings["schema_and_sanitization"] = round((time.perf_counter() - phase_started) * 1000, 1)
+    phase_started = time.perf_counter()
+    nric_reviews = [
+        _nric_sanitization_review(upload, source, digest)
+        for upload, source, digest in zip(files, tables, digests)
+    ]
+    phase_timings["nric_detection"] = round((time.perf_counter() - phase_started) * 1000, 1)
     if not schemas:
         raise HTTPException(400, "Choose at least one Parquet file")
     if mode == "create":
-        target, creation_warnings, manual_type_columns = _first_upload_contract(files[0])
+        phase_started = time.perf_counter()
+        target, creation_warnings, manual_type_columns = _first_upload_contract(files[0], tables[0])
+        phase_timings["type_inference"] = round((time.perf_counter() - phase_started) * 1000, 1)
         contract = {"schema": target, "deduplication_columns": [], "deduplication_policy": "skip-existing-key-report-conflict-v1"}
     else:
         contract = _load_contract_record(table_bucket_arn, namespace, table)
         target, creation_warnings, manual_type_columns = contract["schema"], [], set()
+    phase_started = time.perf_counter()
     comparisons = [compare_schema(schema, target) for schema in schemas]
     target_by_name = {field["name"]: field["type"] for field in target}
     incompatible_sensitive_columns = []
@@ -1235,7 +1401,7 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
                 incompatible_sensitive_columns.append({"column": field_name, "target_type": target_type})
     file_results = []
     rejection_reasons = []
-    for upload, comparison, details, nric_review in zip(files, comparisons, sanitization, nric_reviews):
+    for upload, source, comparison, details, nric_review in zip(files, tables, comparisons, sanitization, nric_reviews):
         file_rejection_reasons = []
         sanitized_columns = sorted(set(
             details["dropped_columns"]
@@ -1254,7 +1420,7 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
             )
             rejection_reasons.append(reason)
             file_rejection_reasons.append(reason)
-        unsafe_casts = _unsafe_cast_issues(upload, target) if mode == "append" else []
+        unsafe_casts = _unsafe_cast_issues(upload, target, source) if mode == "append" else []
         if unsafe_casts:
             columns = ", ".join(
                 f"{item['column']} ({item['unsafe_value_count']} invalid value{'s' if item['unsafe_value_count'] != 1 else ''})"
@@ -1281,16 +1447,23 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
         rejection_reasons.append(
             "The selected table has non-string sensitive columns and cannot accept encrypted or masked values."
         )
+    phase_timings["schema_comparison_and_cast_validation"] = round(
+        (time.perf_counter() - phase_started) * 1000, 1
+    )
+    phase_started = time.perf_counter()
     type_selections = _create_type_selection_samples(
-        files[0], _create_type_selections(comparisons, target, manual_type_columns)
+        files[0], _create_type_selections(comparisons, target, manual_type_columns), tables[0]
     ) if mode == "create" else []
+    phase_timings["type_samples_and_cast_impacts"] = round((time.perf_counter() - phase_started) * 1000, 1) if mode == "create" else 0.0
+    phase_started = time.perf_counter()
     automatic_encrypted = sorted(set(
         item for details, nric_review in zip(sanitization, nric_reviews)
         for item in details["encrypted_columns"] + nric_review["nric_detected_columns"]
     ))
-    candidates = _create_deduplication_candidates(files[0], target) if (
+    candidates = _create_deduplication_candidates(files[0], target, tables[0]) if (
         mode == "create" or not contract["deduplication_columns"]
     ) else []
+    phase_timings["deduplication_candidates"] = round((time.perf_counter() - phase_started) * 1000, 1)
     if mode == "append" and not contract["deduplication_columns"]:
         incoming_names = {field["name"] for field in schema_from_arrow(schemas[0])[0]}
         candidates = [candidate for candidate in candidates if candidate["column"] in incoming_names]
@@ -1315,6 +1488,8 @@ def _preflight(mode: str, table_bucket_arn: str, namespace: str, table: str, fil
         "deduplication_candidates": candidates,
         "deduplication_columns": contract["deduplication_columns"],
         "deduplication_policy": contract["deduplication_policy"],
+        "contract_fingerprint": None if mode == "create" else _contract_fingerprint(contract),
+        "phase_timings_ms": phase_timings,
         "incompatible_sensitive_columns": incompatible_sensitive_columns,
         "accepted": not rejection_reasons,
         "rejection_reasons": rejection_reasons,
@@ -1331,31 +1506,52 @@ def _normalise_temporal_column(
     column: pa.ChunkedArray, target_type: str, *, allow_invalid_values: bool = False,
 ) -> tuple[pa.Array, int]:
     """Apply the documented date/time rules before Spark sees the staged file."""
-    series = column.to_pandas()
-    if target_type == "DATE":
-        parsed = series.map(parse_documented_date)
-        invalid = series.notna() & parsed.isna()
-        invalid_count = int(invalid.sum())
-        if invalid_count and not allow_invalid_values:
-            raise ValueError(f"DATE conversion would discard {int(invalid.sum())} value(s)")
-        return pa.array(parsed.tolist(), type=pa.date32(), from_pandas=True), invalid_count
-    if target_type == "TIMESTAMP":
-        parsed = series.map(parse_documented_timestamp)
-        invalid = series.notna() & parsed.isna()
-        invalid_count = int(invalid.sum())
-        if invalid_count and not allow_invalid_values:
-            raise ValueError(f"TIMESTAMP conversion would discard {int(invalid.sum())} value(s)")
-        return pa.array(parsed.tolist(), type=pa.timestamp("us"), from_pandas=True), invalid_count
-    raise ValueError(f"Unsupported temporal target type: {target_type}")
+    if target_type not in {"DATE", "TIMESTAMP"}:
+        raise ValueError(f"Unsupported temporal target type: {target_type}")
+    parsed = temporal_array(column, target_type)
+    invalid_count = int(pc.count(column).as_py()) - (len(parsed) - parsed.null_count)
+    if invalid_count and not allow_invalid_values:
+        raise ValueError(f"{target_type} conversion would discard {invalid_count} value(s)")
+    return parsed, invalid_count
+
+
+def _arrow_contract_type(target_type: str) -> pa.DataType:
+    return {
+        "STRING": pa.string(),
+        "BIGINT": pa.int64(),
+        "DOUBLE": pa.float64(),
+        "BOOLEAN": pa.bool_(),
+        "DATE": pa.date32(),
+        "TIMESTAMP": pa.timestamp("us"),
+    }[target_type]
+
+
+def _cast_contract_column(column: pa.ChunkedArray, target_type: str) -> pa.Array | pa.ChunkedArray:
+    if target_type in {"DATE", "TIMESTAMP"}:
+        return _normalise_temporal_column(column, target_type)[0]
+    if target_type == "BOOLEAN" and not pa.types.is_boolean(column.type):
+        text = pl.from_arrow(column).cast(pl.String, strict=False).str.strip_chars().str.to_lowercase()
+        converted = pl.DataFrame({"v": text}).select(
+            pl.when(pl.col("v").is_in(["true", "1"]))
+            .then(True)
+            .when(pl.col("v").is_in(["false", "0"]))
+            .then(False)
+            .otherwise(None)
+        )
+        return converted.to_series().to_arrow()
+    return pc.cast(column, _arrow_contract_type(target_type), safe=False)
 
 
 def _make_glue_compatible_parquet(
     source: Path, filename: str, key=None, target_schema: list[dict[str, str]] | None = None,
     manual_encryption_columns: list[str] | None = None, nric_columns: list[str] | None = None,
     lossy_temporal_columns: set[str] | None = None,
+    row_indices: list[int] | None = None,
 ) -> tuple[Path, bool, dict]:
     """Stage every supported file as Spark-safe Parquet for the Glue job."""
     table = _read_upload_table(source, filename)
+    if row_indices is not None:
+        table = table.take(pa.array(row_indices, type=pa.int64()))
     manual_encryption_columns = manual_encryption_columns or []
     nric_columns = nric_columns or []
     lossy_temporal_columns = lossy_temporal_columns or set()
@@ -1372,20 +1568,34 @@ def _make_glue_compatible_parquet(
     names = normalise_names([field.name for field in schema])
     table = table.rename_columns(names)
     target_types = {field["name"]: field["type"] for field in (target_schema or [])}
-    arrays = []
-    for name in names:
-        column = table[name]
-        target_type = target_types.get(name)
-        if target_type in {"DATE", "TIMESTAMP"}:
-            parsed, invalid_count = _normalise_temporal_column(
-                column, target_type, allow_invalid_values=name in lossy_temporal_columns,
-            )
-            if invalid_count:
-                audit["lossy_temporal_nulls"][name] = invalid_count
-            arrays.append(parsed)
-        else:
-            arrays.append(column)
-    table = pa.table(arrays, names=names)
+    if target_schema:
+        arrays = []
+        output_names = []
+        for field in target_schema:
+            name, target_type = field["name"], field["type"]
+            output_names.append(name)
+            if name not in table.schema.names:
+                arrays.append(pa.nulls(len(table), type=_arrow_contract_type(target_type)))
+                continue
+            column = table[name]
+            if target_type in {"DATE", "TIMESTAMP"}:
+                parsed, invalid_count = _normalise_temporal_column(
+                    column, target_type, allow_invalid_values=name in lossy_temporal_columns,
+                )
+                if invalid_count:
+                    audit["lossy_temporal_nulls"][name] = invalid_count
+                arrays.append(parsed)
+            else:
+                arrays.append(_cast_contract_column(column, target_type))
+        table = pa.table(arrays, names=output_names)
+        names = output_names
+    else:
+        arrays = []
+        for name in names:
+            column = table[name]
+            target_type = target_types.get(name)
+            arrays.append(_cast_contract_column(column, target_type) if target_type else column)
+        table = pa.table(arrays, names=names)
     has_nanosecond_timestamps = any(
         pa.types.is_timestamp(field.type) and field.type.unit == "ns" for field in schema
     )
@@ -1396,7 +1606,7 @@ def _make_glue_compatible_parquet(
     has_time_of_day_values = any(pa.types.is_time(field.type) for field in schema)
     has_unsafe_names = names != list(schema.names)
     is_parquet = filename.lower().endswith((".parquet", ".parquet.gzip"))
-    if is_parquet and not sanitization_required and not has_nanosecond_timestamps and not has_time_of_day_values and not has_unsafe_names:
+    if is_parquet and not target_schema and row_indices is None and not sanitization_required and not has_nanosecond_timestamps and not has_time_of_day_values and not has_unsafe_names:
         # Temporal fields need a rewritten Parquet payload even when the input
         # was already Parquet, because DATE/TIMESTAMP parsing is explicit.
         if not any(kind in {"DATE", "TIMESTAMP"} for kind in target_types.values()):
@@ -1413,11 +1623,13 @@ def _make_glue_compatible_parquet(
             if pa.types.is_timestamp(field.type) and field.type.unit == "ns"
             else pa.string()
             if pa.types.is_time(field.type)
+            else _arrow_contract_type(target_types[name])
+            if name in target_types
             else field.type,
             nullable=field.nullable,
             metadata=field.metadata,
         )
-        for field, name in zip(schema, names)
+        for field, name in zip(table.schema, names)
     ]
     target_schema = pa.schema(fields, metadata=schema.metadata)
     table = table.cast(target_schema, safe=False)
@@ -1774,7 +1986,10 @@ def _session_upload_files(session) -> Iterator[list[UploadFile]]:
     try:
         for file in session.files:
             stream = Path(file.path).open("rb")
-            streams.append((stream, UploadFile(filename=file.name, file=stream)))
+            upload = UploadFile(filename=file.name, file=stream)
+            upload._pilot_session_path = file.path
+            upload._pilot_sha256 = file.sha256
+            streams.append((stream, upload))
         yield [upload for _, upload in streams]
     finally:
         for stream, _ in streams:
@@ -1908,11 +2123,15 @@ def _profile_upload_session(session_id: str, user_id: str) -> None:
             session = upload_sessions.update(session_id, user_id, phase="PROFILING", progress_message="Analysing file structure and proposed schema.")
             with _session_upload_files(session) as files:
                 preview = _preflight(session.mode, session.table_bucket_arn, session.namespace, session.table, files)
+        timings = {**session.phase_timings_ms, **preview.get("phase_timings_ms", {})}
         upload_sessions.update(
             session_id, user_id, phase="READY_FOR_REVIEW", progress_message="Data structure analysis is complete.",
-            preflight=preview,
+            preflight=preview, phase_timings_ms=timings,
         )
-        logger.info("upload_session_profiled", extra={"session_id": session_id, "file_count": len(session.files), "phase": "READY_FOR_REVIEW"})
+        logger.info("upload_session_profiled", extra={
+            "session_id": session_id, "file_count": len(session.files),
+            "phase": "READY_FOR_REVIEW", "phase_timings_ms": timings,
+        })
     except Exception as error:
         _session_error(session_id, user_id, "PROFILING", "Data structure analysis failed.", error)
 
@@ -1973,15 +2192,26 @@ async def create_upload_session(
     if invalid:
         raise HTTPException(400, "Supported files are Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV")
     try:
+        receipt_started = time.perf_counter()
         session = upload_sessions.create(
             owner_user_id=user.user_id, mode=mode, table_bucket_arn=table_bucket_arn,
             namespace=namespace, table=table, files=[(upload.filename or "upload", upload.file) for upload in files],
+        )
+        receipt_ms = round((time.perf_counter() - receipt_started) * 1000, 1)
+        session = upload_sessions.update(
+            session.session_id, user.user_id, phase="RECEIVED",
+            progress_message="Files received locally; waiting to profile them.",
+            phase_timings_ms={"local_copy_and_sha256": receipt_ms},
         )
     except Exception as error:
         error_id = safe_error(logger, "upload_session_receipt_failed", phase="RECEIVED", file_count=len(files))
         raise HTTPException(500, detail={"message": "Unable to store the selected files in a private local session.", "error_id": error_id}) from error
     background_tasks.add_task(_profile_upload_session, session.session_id, user.user_id)
-    logger.info("upload_session_created", extra={"session_id": session.session_id, "file_count": len(session.files), "total_bytes": sum(file.size_bytes for file in session.files), "phase": "RECEIVED"})
+    logger.info("upload_session_created", extra={
+        "session_id": session.session_id, "file_count": len(session.files),
+        "total_bytes": sum(file.size_bytes for file in session.files),
+        "phase": "RECEIVED", "local_copy_and_sha256_ms": receipt_ms,
+    })
     return session.safe_dict()
 
 
@@ -2015,6 +2245,12 @@ def analyse_upload_session_key_impact(
     if session.phase not in {"READY_FOR_REVIEW", "READY_FOR_ACKNOWLEDGEMENT"}:
         raise HTTPException(409, f"Key-impact analysis is unavailable while session phase is {session.phase}")
     _validate_key_analysis_columns(payload.deduplication_columns)
+    try:
+        upload_sessions.start_key_analysis(session_id, user.user_id)
+    except ValueError as error:
+        raise HTTPException(409, f"Key-impact analysis is unavailable while session phase is {error}") from error
+    except KeyError as error:
+        raise HTTPException(404, "The upload session has expired") from error
     background_tasks.add_task(_analyse_session_key_impact, session_id, user.user_id, payload)
     return {"session_id": session_id, "phase": "KEY_ANALYSING", "message": "Composite-key impact analysis has started."}
 
@@ -2055,7 +2291,11 @@ async def _start_session_ingestion(session_id: str, user: PilotUser, payload: Se
         try:
             def prepare_and_start() -> dict:
                 with _session_upload_files(session) as files:
-                    return asyncio.run(_start_ingestion(request=request.model_dump_json(), files=files, user=user))
+                    return asyncio.run(_start_ingestion(
+                        request=request.model_dump_json(), files=files, user=user,
+                        reviewed_preview=session.preflight,
+                        file_digests=[file.sha256 for file in session.files],
+                    ))
             result = await asyncio.to_thread(prepare_and_start)
         finally:
             ingestion_progress_hooks.pop(payload.request_id, None)
@@ -2188,7 +2428,7 @@ async def key_impact_analysis(
 
 def _validate_key_analysis_acknowledgement(
     payload: IngestionRequest, key_columns: list[str],
-    files: list[UploadFile], user: PilotUser,
+    files: list[UploadFile], user: PilotUser, file_digests: list[str] | None = None,
 ) -> None:
     if not payload.key_analysis_token:
         raise HTTPException(422, "Run and acknowledge the composite-key impact analysis before uploading")
@@ -2204,11 +2444,11 @@ def _validate_key_analysis_acknowledgement(
     for key, value in expected.items():
         if acknowledgement.get(key) != value:
             raise HTTPException(422, "The key-impact analysis is stale; run it again")
-    digests = []
-    for upload in files:
-        path, digest = _copy_upload_with_digest(upload)
-        path.unlink(missing_ok=True)
-        digests.append(digest)
+    digests = file_digests or []
+    if not digests:
+        for upload in files:
+            with _temporary_upload_path(upload) as path:
+                digests.append(getattr(upload, "_pilot_sha256", None) or _digest_path(path))
     if acknowledgement.get("file_digests") != digests:
         raise HTTPException(422, "The selected files changed after key analysis; run it again")
 
@@ -2217,6 +2457,8 @@ async def _start_ingestion(
     request: str = Form(),
     files: list[UploadFile] = File(),
     user: PilotUser = Depends(_current_user),
+    reviewed_preview: dict | None = None,
+    file_digests: list[str] | None = None,
 ):
     try:
         payload = IngestionRequest.model_validate_json(request)
@@ -2230,8 +2472,24 @@ async def _start_ingestion(
         raise HTTPException(409, "This table is browse-only because it has no uploader schema and recovery contract")
     if not files:
         raise HTTPException(400, "Choose at least one supported file")
-    _report_ingestion_progress(payload.request_id, "Revalidating schema, data types, and sanitization requirements.")
-    preview = _preflight(payload.mode, payload.table_bucket_arn, payload.namespace, payload.table, files)
+    if reviewed_preview is None:
+        _report_ingestion_progress(payload.request_id, "Validating schema, data types, and sanitization requirements.")
+        preview = _preflight(payload.mode, payload.table_bucket_arn, payload.namespace, payload.table, files)
+    else:
+        preview = reviewed_preview
+        if (
+            preview.get("mode") != payload.mode
+            or preview.get("table_bucket_arn") != payload.table_bucket_arn
+            or preview.get("namespace") != payload.namespace
+            or preview.get("table") != payload.table
+        ):
+            raise HTTPException(409, "The reviewed upload destination changed; review the upload again")
+        if payload.mode == "append":
+            current_contract = _load_contract_record(
+                payload.table_bucket_arn, payload.namespace, payload.table
+            )
+            if preview.get("contract_fingerprint") != _contract_fingerprint(current_contract):
+                raise HTTPException(409, "The table contract changed after review; review the upload again")
     if not preview["accepted"]:
         raise HTTPException(
             422,
@@ -2270,9 +2528,18 @@ async def _start_ingestion(
     # conversion. Appends always keep this empty and remain strictly checked.
     lossy_temporal_columns: set[str] = set()
     if payload.mode == "create":
+        selections = {
+            item["column"]: item for item in preview.get("type_selections", [])
+        }
         override_issues = []
-        for upload in files:
-            override_issues.extend(_unsafe_cast_issues(upload, target_schema))
+        for column, target_type in payload.type_overrides.items():
+            impact = selections.get(column, {}).get("lossy_target_types", {}).get(target_type)
+            if impact:
+                override_issues.append({
+                    "column": column,
+                    "target_type": target_type,
+                    "unsafe_value_count": impact["invalid_value_count"],
+                })
         # A user may deliberately choose DATE or TIMESTAMP for an ambiguous
         # first-upload field.  That explicit choice has a documented lossy
         # behaviour: valid temporal values are retained and incompatible
@@ -2298,7 +2565,9 @@ async def _start_ingestion(
                 },
             )
         if effective_deduplication_mode == "keyed":
-            _validate_key_analysis_acknowledgement(payload, deduplication_columns, files, user)
+            _validate_key_analysis_acknowledgement(
+                payload, deduplication_columns, files, user, file_digests
+            )
     if payload.mode == "append":
         _report_ingestion_progress(payload.request_id, "Configuring S3 Tables recovery snapshot retention.")
         try:
@@ -2325,14 +2594,34 @@ async def _start_ingestion(
     except Exception as error:
         raise HTTPException(500, "Unable to configure the 30-day sanitized-upload archive lifecycle") from error
     request_prefix = f"{WEB_UPLOAD_PREFIX}/{payload.request_id}"
+    local_key_deduplication = bool(
+        reviewed_preview is not None
+        and effective_deduplication_mode == "keyed"
+        and all(getattr(upload, "_pilot_session_path", None) for upload in files)
+    )
+    row_selections: dict[int, list[int]] = {}
+    local_deduplication_metrics: dict[str, int] = {}
+    if local_key_deduplication:
+        _report_ingestion_progress(
+            payload.request_id,
+            "Removing exact duplicates and excluding conflicting raw key groups locally.",
+        )
+        row_selections, local_deduplication_metrics = _raw_key_row_selection(
+            [
+                (Path(getattr(upload, "_pilot_session_path")), upload.filename or "upload")
+                for upload in files
+            ],
+            deduplication_columns,
+        )
     objects, sanitization_audits = [], []
+    prepared_row_count = 0
     for number, upload in enumerate(files):
         _report_ingestion_progress(
             payload.request_id,
             f"Sanitizing and converting file {number + 1} of {len(files)} to Glue-compatible Parquet.",
         )
-        path, digest = _copy_upload_with_digest(upload)
-        try:
+        with _temporary_upload_path(upload) as path:
+            digest = getattr(upload, "_pilot_sha256", None) or _digest_path(path)
             original_filename = upload.filename or "upload.parquet"
             key = f"{request_prefix}/input/{number:02d}-{Path(original_filename).stem}.parquet"
             staged, transformed, audit = _make_glue_compatible_parquet(
@@ -2340,6 +2629,7 @@ async def _start_ingestion(
                 manual_encryption_columns=manual_encryption_columns,
                 nric_columns=preview["files"][number].get("nric_detected_columns", []),
                 lossy_temporal_columns=lossy_temporal_columns,
+                row_indices=row_selections.get(number) if local_key_deduplication else None,
             )
             try:
                 _report_ingestion_progress(
@@ -2365,13 +2655,12 @@ async def _start_ingestion(
                         },
                         ServerSideEncryption="AES256",
                     )
+                prepared_row_count += int(pq.ParquetFile(staged).metadata.num_rows)
             finally:
                 if staged != path:
                     staged.unlink(missing_ok=True)
             objects.append(f"s3://{SOURCE_BUCKET}/{key}")
             sanitization_audits.append({"filename": original_filename, "sanitized_archive_uri": f"s3://{SOURCE_BUCKET}/{key}", **audit})
-        finally:
-            path.unlink(missing_ok=True)
     if payload.mode == "create":
         _report_ingestion_progress(payload.request_id, "Writing the immutable uploader schema and de-duplication contract.")
         s3.put_object(
@@ -2392,9 +2681,22 @@ async def _start_ingestion(
         )
     _report_ingestion_progress(payload.request_id, "Writing the staged-upload manifest for AWS Glue.")
     manifest_key = f"{request_prefix}/manifest.json"
+    if local_key_deduplication and prepared_row_count != local_deduplication_metrics.get(
+        "rows_retained_after_local_deduplication"
+    ):
+        raise RuntimeError("Prepared row count does not match local de-duplication result")
+    incoming_row_count = local_deduplication_metrics.get(
+        "incoming_rows", prepared_row_count
+    )
     s3.put_object(
         Bucket=SOURCE_BUCKET, Key=manifest_key,
         Body=json.dumps({
+            "manifest_version": 2,
+            "prepared_contract_types": True,
+            "prepared_row_count": prepared_row_count,
+            "incoming_row_count": incoming_row_count,
+            "local_key_deduplication": local_key_deduplication,
+            "local_deduplication_metrics": local_deduplication_metrics,
             "files": objects, "schema": target_schema, "sanitization": sanitization_audits,
             "deduplication_columns": deduplication_columns,
             "deduplication_mode": effective_deduplication_mode,

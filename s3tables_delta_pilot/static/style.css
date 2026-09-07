@@ -121,3 +121,8 @@ summary { cursor: pointer; } details pre { margin-top: 16px; } pre { white-space
 .deduplication-candidate .sample-values { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .78rem; overflow-wrap: anywhere; }
 .deduplication-candidate.ineligible { opacity: .62; cursor: not-allowed; }
 .deduplication-candidate .key-ineligible { color: #8e1b27; }
+
+.key-analysis-action:disabled { background: #aeb8c5; color: #243447; opacity: 1; }
+.deduplication-candidate[hidden] { display: none; }
+.deduplication-search-label { display: grid; gap: .35rem; max-width: 28rem; }
+.deduplication-search-label input { width: 100%; box-sizing: border-box; }

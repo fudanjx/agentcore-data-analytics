@@ -8,6 +8,7 @@ from typing import Any, Iterable
 
 import pandas as pd
 import pyarrow as pa
+import polars as pl
 
 
 def normalise_name(name: str) -> str:
@@ -143,8 +144,51 @@ def _all_valid_time_only(values: pd.Series) -> bool:
     return bool(pd.to_datetime(text, format="%H:%M:%S", errors="coerce").notna().all())
 
 
+def temporal_array(column: pa.Array | pa.ChunkedArray, target_type: str) -> pa.Array:
+    """Vectorized strict parsing with the same formats as the scalar oracle.
+
+    Regex guards forbid permissive parsing (single-digit fields, fractions,
+    alternate separators). Chrono validates calendar dates and supports 9999.
+    """
+    series = pl.from_arrow(column)
+    if pa.types.is_timestamp(column.type):
+        if column.type.tz:
+            series = series.dt.replace_time_zone(None)
+        return series.cast(pl.Date if target_type == "DATE" else pl.Datetime("us")).to_arrow()
+    if pa.types.is_date(column.type) and target_type == "DATE":
+        return series.cast(pl.Date).to_arrow()
+    text = series.cast(pl.String, strict=False).str.strip_chars()
+    if target_type == "DATE":
+        parsed = []
+        for pattern, fmt in _DATE_ONLY_PATTERNS:
+            # Series.set/filter would allocate Python masks; expressions keep
+            # both the guard and parse in native code.
+            parsed.append(pl.when(pl.col("v").str.contains(pattern.pattern))
+                          .then(pl.col("v").str.strptime(pl.Date, fmt, strict=False, exact=True))
+                          .otherwise(None))
+        return pl.DataFrame({"v": text}).select(pl.coalesce(parsed)).to_series().to_arrow()
+    expression = (
+        pl.when(pl.col("v").str.contains(_TIMESTAMP_PATTERN.pattern))
+        .then(
+            pl.col("v").str.strptime(
+                pl.Datetime("us"), "%Y-%m-%d %H:%M:%S", strict=False, exact=True
+            )
+        )
+        .otherwise(None)
+    )
+    return pl.DataFrame({"v": text}).select(expression).to_series().to_arrow()
+
+
+def _populated_native(values: pa.ChunkedArray) -> pl.Series:
+    series = pl.from_arrow(values).drop_nulls()
+    if series.dtype.is_float():
+        series = series.filter(~series.is_nan())
+    if series.dtype == pl.String:
+        series = series.filter(~series.str.strip_chars().is_in(["", "nan", "none", "nat"]))
+    return series
+
+
 def strict_temporal_type(field: pa.Field, values: pa.ChunkedArray | None) -> str | None:
-    """Return DATE/TIMESTAMP/STRING when the documented temporal contract applies."""
     if pa.types.is_date(field.type):
         return "DATE"
     if pa.types.is_timestamp(field.type):
@@ -153,32 +197,30 @@ def strict_temporal_type(field: pa.Field, values: pa.ChunkedArray | None) -> str
         return "STRING"
     if values is None:
         return None
-    populated = _non_empty_values(values)
-    if populated.empty:
+    populated = _populated_native(values)
+    if not len(populated):
         return None
-    if _all_valid_timestamp(populated):
-        return "TIMESTAMP"
-    if _all_valid_date_only(populated):
-        return "DATE"
-    if _all_valid_time_only(populated):
-        return "STRING"
+    text = populated.cast(pl.String, strict=False).str.strip_chars()
+    # Cheap native shape checks avoid parsing ordinary categories or measures.
+    if text.str.contains(_TIMESTAMP_PATTERN.pattern).all():
+        if temporal_array(populated.to_arrow(), "TIMESTAMP").null_count == 0:
+            return "TIMESTAMP"
+    if text.str.contains(r"^(?:[0-9]{8}|[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{4}\.[0-9]{2}\.[0-9]{2})$").all():
+        if temporal_array(populated.to_arrow(), "DATE").null_count == 0:
+            return "DATE"
+    if text.str.contains(_TIME_ONLY_PATTERN.pattern).all():
+        if text.str.strptime(pl.Time, "%H:%M:%S", strict=False, exact=True).null_count() == 0:
+            return "STRING"
     return None
 
 
 def profiled_iceberg_type(field: pa.Field, values: pa.ChunkedArray | None) -> tuple[str, bool]:
-    """Infer a conservative table type from all populated values.
-
-    This is used only when the first upload creates a new table.  It avoids the
-    Excel all-empty-column ``float64`` trap and protects known healthcare text
-    fields such as surgeon, ward, specialty, MCR, codes, and identifiers.
-    """
+    """Infer a conservative type using native column operations."""
     tokens = _name_tokens(field.name)
-    if tokens & _STRING_NAME_TOKENS:
+    if tokens & _STRING_NAME_TOKENS or values is None:
         return "STRING", False
-    if values is None:
-        return "STRING", False
-    populated = _non_empty_values(values)
-    if populated.empty:
+    populated = _populated_native(values)
+    if not len(populated):
         return "STRING", False
     temporal = strict_temporal_type(field, values)
     if temporal is not None:
@@ -189,25 +231,12 @@ def profiled_iceberg_type(field: pa.Field, values: pa.ChunkedArray | None) -> tu
         return "DOUBLE", False
     if pa.types.is_integer(field.type):
         return "BIGINT", False
-    # Strings that are truly all numeric may represent a measure.  Any text
-    # value makes the column STRING; this scans every populated value, not just
-    # the first visible Excel row.
-    numeric = pd.to_numeric(populated, errors="coerce")
+    # Retain pandas' established numeric inference, which is vectorized.
+    numeric = pd.to_numeric(populated.to_pandas(), errors="coerce")
     if numeric.notna().all():
-        text = _text_values(populated)
-        # Any decimal/scientific representation is a decimal number, even if
-        # the concrete samples happen to be whole-valued (for example 1.0).
-        if text.str.contains(r"[.eE]", regex=True, na=False).any():
-            return "DOUBLE", False
-        return "BIGINT", False
-    # Date/time-looking values which do not comply with the documented formats
-    # require an explicit operator decision rather than a heuristic cast.
-    if tokens & _TIMESTAMP_NAME_TOKENS:
-        return "STRING", True
-    # Values containing clear prose/categorical text are unambiguously strings.
-    # The earlier implementation made every ordinary text field a manual choice,
-    # which burdened users with confirming fields such as notes and categories.
-    return "STRING", False
+        text = populated.cast(pl.String, strict=False).str.strip_chars()
+        return ("DOUBLE" if text.str.contains(r"[.eE]").any() else "BIGINT"), False
+    return "STRING", bool(tokens & _TIMESTAMP_NAME_TOKENS)
 
 
 def schema_from_arrow(schema: pa.Schema) -> tuple[list[dict[str, str]], list[str]]:
@@ -224,11 +253,11 @@ def schema_from_arrow(schema: pa.Schema) -> tuple[list[dict[str, str]], list[str
     return fields, warnings
 
 
-def schema_from_table(
+def profile_table(
     table: pa.Table,
     schema: pa.Schema | None = None,
     force_string_columns: Iterable[str] = (),
-) -> tuple[list[dict[str, str]], list[str]]:
+) -> tuple[list[dict[str, str]], list[str], set[str]]:
     """Create a new-table contract from full-column values, not row order.
 
     ``schema`` may be the sanitised schema. ``force_string_columns`` is used
@@ -240,6 +269,7 @@ def schema_from_table(
     forced = set(force_string_columns)
     fields: list[dict[str, str]] = []
     warnings: list[str] = []
+    manual: set[str] = set()
     names = normalise_names([field.name for field in active_schema])
     for field, name in zip(active_schema, names):
         raw_field = table.schema.field(field.name) if field.name in table.schema.names else None
@@ -250,7 +280,17 @@ def schema_from_table(
             data_type, warning = profiled_iceberg_type(field, raw_values)
         fields.append({"name": name, "type": data_type, "source_name": field.name})
         if warning:
+            manual.add(name)
             warnings.append(f"{field.name} has ambiguous values and requires an explicit initial type selection")
+    return fields, warnings, manual
+
+
+def schema_from_table(
+    table: pa.Table,
+    schema: pa.Schema | None = None,
+    force_string_columns: Iterable[str] = (),
+) -> tuple[list[dict[str, str]], list[str]]:
+    fields, warnings, _ = profile_table(table, schema, force_string_columns)
     return fields, warnings
 
 

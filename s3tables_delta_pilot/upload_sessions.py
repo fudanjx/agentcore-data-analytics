@@ -42,6 +42,7 @@ class UploadSession:
     preflight: dict[str, Any] | None = None
     key_impact: dict[str, Any] | None = None
     ingestion: dict[str, Any] | None = None
+    phase_timings_ms: dict[str, float] = field(default_factory=dict)
     created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     updated_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     phase_started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
@@ -142,6 +143,18 @@ class UploadSessionStore:
         with self._lock:
             self.get(session_id, owner_user_id)
             self._remove_locked(session_id)
+
+    def start_key_analysis(self, session_id: str, owner_user_id: str) -> UploadSession:
+        """Reserve analysis before returning 202 or scheduling background work."""
+        with self._lock:
+            session = self.get(session_id, owner_user_id)
+            if session.phase not in {"READY_FOR_REVIEW", "READY_FOR_ACKNOWLEDGEMENT"}:
+                raise ValueError(session.phase)
+            return self.update(
+                session_id, owner_user_id, phase="KEY_ANALYSING",
+                progress_message="Analysing the selected key; waiting for local processing capacity.",
+                key_impact=None,
+            )
 
     def cleanup_expired(self) -> int:
         with self._lock:

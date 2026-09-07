@@ -1,6 +1,6 @@
 const SESSION_STORAGE_KEY = 's3tables-uploader-v2-session-id';
 const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED'];
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastRequestId: null };
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastRequestId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
@@ -25,9 +25,15 @@ function bucketQuery() { return new URLSearchParams({ table_bucket_arn: state.bu
 function userTag() { return $('reporting-month').value.trim(); }
 function escapeHtml(value) { const node = document.createElement('span'); node.textContent = String(value); return node.innerHTML; }
 function formatTime(value) { return value ? new Date(value).toLocaleString() : 'Unavailable'; }
-function clearSessionPoll() { if (state.sessionPollTimer) { clearTimeout(state.sessionPollTimer); state.sessionPollTimer = null; } }
+function clearSessionPoll() {
+  state.sessionPollGeneration += 1;
+  if (state.sessionPollTimer) clearTimeout(state.sessionPollTimer);
+  state.sessionPollTimer = null;
+  if (state.sessionPollResolve) state.sessionPollResolve();
+  state.sessionPollResolve = null;
+}
 function clearGluePoll() { if (state.gluePollTimer) { clearTimeout(state.gluePollTimer); state.gluePollTimer = null; } state.activeJobRunId = null; }
-function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
+function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
 function identityRequestPayload() {
   return {
     headers: { 'X-Pilot-User-Id': state.emulatedUserId },
@@ -354,7 +360,7 @@ function valid() {
   if (!hasFiles) requirements.push('select one or more files');
   const ready = requirements.length === 0;
   const hasReviewedSession = Boolean(state.sessionId && state.review);
-  $('preflight').disabled = !ready || hasReviewedSession;
+  $('preflight').disabled = !ready || hasReviewedSession || ['RECEIVED', 'PROFILING', 'QUEUED'].includes(state.sessionPhase);
   $('preflight').title = ready ? 'Review the selected upload.' : `Still required: ${requirements.join('; ')}.`;
   $('review-requirements').textContent = hasReviewedSession ? 'This submitted upload is already under review. Change a file, destination, user tag, or processing choice to start a new session.' : ready ? 'All required fields are complete. The upload is ready for review.' : `To enable Review upload: ${requirements.join('; ')}.`;
   if (!state.bucket) $('destination-help').textContent = 'No S3 Tables bucket is assigned to this user.';
@@ -397,7 +403,10 @@ function renderSessionProgress(session) {
     $('status').textContent = message;
     $('upload-status').className = 'operation-status';
     $('upload-status').textContent = message;
-  } else if (['PROFILING', 'KEY_ANALYSING'].includes(session.phase)) {
+  } else if (keyAnalysisBusy() && $('key-analysis-status')) {
+    $('key-analysis-status').className = 'operation-status';
+    $('key-analysis-status').textContent = message;
+  } else if (['RECEIVED', 'PROFILING', 'QUEUED'].includes(session.phase)) {
     $('review-status').className = 'operation-status';
     $('review-status').textContent = message;
   }
@@ -407,19 +416,19 @@ function applySessionState(session) {
   state.sessionId = session.session_id;
   sessionStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
   if (session.phase === 'FAILED' && session.error) sessionFailure(session);
-  // Key analysis completion redraws preflight. Preserve the choices covered
-  // by the analysis so the redraw does not leave the acknowledgement visible
-  // while silently clearing the selected composite key.
+  // Render preflight once. Polling must preserve selections, search text and
+  // focus; a refreshed page restores choices from the acknowledged analysis.
   const restoredDeduplicationColumns = session.key_impact?.deduplication_columns || selectedDeduplicationColumns();
   const restoredTypeOverrides = session.key_impact?.type_overrides || selectedTypeOverrides();
-  if (session.preflight) {
+  if (session.preflight && !state.review) {
     state.review = session.preflight;
     $('review').hidden = false;
     $('review').open = true;
     renderPreflight(session.preflight, { restoredDeduplicationColumns, restoredTypeOverrides });
     $('upload-actions').hidden = !session.preflight.accepted;
   }
-  if (session.key_impact) {
+  if (session.key_impact && session.phase === 'READY_FOR_ACKNOWLEDGEMENT' && state.appliedKeyToken !== session.key_impact.acknowledgement_token) {
+    state.appliedKeyToken = session.key_impact.acknowledgement_token;
     const impact = session.key_impact;
     state.keyAnalysis = {
       token: impact.acknowledgement_token,
@@ -428,6 +437,10 @@ function applySessionState(session) {
     };
     state.keyAnalysisAcknowledged = false;
     renderKeyAnalysis(impact);
+    if ($('key-analysis-status')) {
+      $('key-analysis-status').className = 'operation-status complete';
+      $('key-analysis-status').textContent = 'Key-impact analysis completed. Review the results below.';
+    }
   }
   if (session.ingestion?.job_run_id) {
     $('outcome').hidden = false;
@@ -451,11 +464,17 @@ function applySessionState(session) {
     }
   }
   updateCreateUploadEligibility();
+  updateDeduplicationSelectionControls();
+  valid();
 }
 
 function sessionFailure(session) {
   const reason = responseDetail(session.error, session.progress_message || 'The upload session failed.');
   $('activity').textContent = 'Upload session failed.';
+  if ($('key-analysis-status')) {
+    $('key-analysis-status').className = 'operation-status failed';
+    $('key-analysis-status').textContent = reason;
+  }
   $('review-status').className = 'operation-status failed';
   $('review-status').textContent = reason;
   $('upload-status').className = 'operation-status failed';
@@ -468,27 +487,27 @@ function sessionFailure(session) {
 
 async function pollUploadSession(sessionId, { until = [] } = {}) {
   clearSessionPoll();
-  try {
+  const generation = state.sessionPollGeneration;
+  while (generation === state.sessionPollGeneration) {
     const response = await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(sessionId)}`);
     const session = await response.json();
-    if (!response.ok) {
-      state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY);
-      throw new Error(responseDetail(session, 'The upload session is no longer available.'));
-    }
-    if (state.sessionId && state.sessionId !== session.session_id) return session;
-    state.sessionId = session.session_id;
-    renderSessionProgress(session);
-    if (session.phase === 'FAILED') { sessionFailure(session); return session; }
+    if (generation !== state.sessionPollGeneration || state.sessionId !== sessionId) break;
+    if (!response.ok) throw new Error(responseDetail(session, 'Unable to refresh upload progress. Refresh the page to reconnect.'));
+    state.sessionPhase = session.phase;
     applySessionState(session);
-    if (until.includes(session.phase) || session.phase === 'FAILED' || (!until.length && sessionTerminalPhases.includes(session.phase))) return session;
-    state.sessionPollTimer = setTimeout(() => { pollUploadSession(sessionId, { until }).catch(error => {
-      $('review-status').className = 'operation-status failed'; $('review-status').textContent = error.message;
-    }); }, 1000);
-    return session;
-  } catch (error) {
-    clearSessionPoll();
-    throw error;
+    if (session.phase === 'FAILED') return session;
+    renderSessionProgress(session);
+    if (until.includes(session.phase) || ['GLUE_RUNNING', 'SUCCEEDED'].includes(session.phase) || (!until.length && sessionTerminalPhases.includes(session.phase))) return session;
+    await new Promise(resolve => {
+      state.sessionPollResolve = resolve;
+      state.sessionPollTimer = setTimeout(() => {
+        state.sessionPollTimer = null;
+        state.sessionPollResolve = null;
+        resolve();
+      }, 1000);
+    });
   }
+  return { phase: 'CANCELLED' };
 }
 
 async function resumeUploadSession() {
@@ -509,6 +528,7 @@ async function resumeUploadSession() {
     $('new-table-wrap').hidden = session.mode !== 'create';
     if (session.mode === 'create') $('new-table').value = session.table;
     selectTable(); valid();
+    state.sessionPhase = session.phase;
     applySessionState(session);
     if (!sessionTerminalPhases.includes(session.phase)) await pollUploadSession(sessionId);
     if (session?.preflight) {
@@ -537,12 +557,31 @@ function updateTypeChoiceImpact(control) {
   const impact = impacts[control.value];
   if (!impact) { holder.textContent = ''; holder.hidden = true; return; }
   holder.hidden = false;
-  holder.textContent = `Choosing ${control.value} will convert ${Number(impact.invalid_value_count).toLocaleString()} non-compliant populated value(s) to NULL. Choose STRING to preserve every value.`;
+  holder.textContent = impact.behaviour === 'invalid_values_become_null'
+    ? `Choosing ${control.value} will convert ${Number(impact.invalid_value_count).toLocaleString()} non-compliant populated value(s) to NULL. Choose STRING to preserve every value.`
+    : `Choosing ${control.value} is incompatible with ${Number(impact.invalid_value_count).toLocaleString()} populated value(s). Choose a compatible type.`;
 }
 
 function selectedDeduplicationColumns() {
   return [...document.querySelectorAll('[data-deduplication-column]:checked')]
     .map(control => control.dataset.deduplicationColumn);
+}
+
+function keyAnalysisBusy() {
+  return state.keyAnalysisPending || ['KEY_ANALYSING', 'QUEUED'].includes(state.sessionPhase);
+}
+
+function filterDeduplicationColumns() {
+  const query = ($('deduplication-search')?.value || '').trim().toLowerCase();
+  const controls = [...document.querySelectorAll('[data-deduplication-column]')];
+  let visible = 0;
+  controls.forEach(control => {
+    const matches = control.dataset.deduplicationColumn.toLowerCase().includes(query);
+    control.closest('.deduplication-candidate').hidden = !matches;
+    if (matches) visible += 1;
+  });
+  const summary = $('deduplication-filter-count');
+  if (summary) summary.textContent = visible ? `${visible} of ${controls.length} columns shown. Filtering keeps all selections.` : 'No matching columns. Try another name.';
 }
 
 function updateDeduplicationSelectionControls() {
@@ -558,7 +597,13 @@ function updateDeduplicationSelectionControls() {
   const count = $('deduplication-selection-count');
   if (count) count.textContent = `${selectedCount} of ${controls.length} eligible columns selected.`;
   const analyse = $('analyse-key');
-  if (analyse) analyse.disabled = selectedCount === 0;
+  if (analyse) {
+    const busy = keyAnalysisBusy();
+    analyse.disabled = selectedCount === 0 || busy;
+    analyse.classList.toggle('is-busy', busy);
+    analyse.setAttribute('aria-busy', String(busy));
+    analyse.textContent = busy ? 'Analysing selected key…' : 'Analyse selected key impact';
+  }
 }
 
 function deduplicationSelectionChanged() {
@@ -575,6 +620,7 @@ function toggleAllDeduplicationColumns() {
 
 function updateCreateUploadEligibility() {
   if (!state.review) return;
+  if (keyAnalysisBusy() || (state.sessionPhase && !['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT'].includes(state.sessionPhase))) { $('upload').disabled = true; return; }
   const mode = selectedDeduplicationMode();
   if (mode === 'none') {
     $('upload').disabled = !state.review.accepted;
@@ -638,8 +684,15 @@ function renderKeyAnalysis(result) {
 }
 
 async function analyseSelectedKey() {
+  if (keyAnalysisBusy()) return;
   const selected = selectedDeduplicationColumns();
-  if (!selected.length || !state.sessionId) return;
+  if (!selected.length || !state.sessionId) {
+    $('key-analysis-status').textContent = !selected.length ? 'Choose at least one column to analyse.' : 'Review the upload before analysing a key.';
+    return;
+  }
+  state.keyAnalysisPending = true;
+  invalidateKeyAnalysis();
+  const sessionId = state.sessionId;
   const button = $('analyse-key');
   const status = $('key-analysis-status');
   button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Analysing selected key…';
@@ -657,18 +710,23 @@ async function analyseSelectedKey() {
       status.className = 'operation-status failed'; status.textContent = `Key-impact analysis failed: ${reason}`;
       return;
     }
+    if (state.sessionId !== sessionId) return;
+    state.sessionPhase = result.phase || 'KEY_ANALYSING';
     status.textContent = 'Composite-key impact analysis is in progress…';
-    const session = await pollUploadSession(state.sessionId, { until: ['READY_FOR_ACKNOWLEDGEMENT'] });
+    const session = await pollUploadSession(sessionId, { until: ['READY_FOR_ACKNOWLEDGEMENT'] });
     if (session.phase === 'READY_FOR_ACKNOWLEDGEMENT') {
       $('activity').textContent = 'Key-impact analysis is ready. Review it, revise the key if needed, or acknowledge it to enable upload.';
       status.className = 'operation-status complete'; status.textContent = 'Key-impact analysis completed. Review the results below.';
     }
   } catch (error) {
     $('activity').textContent = 'Key-impact analysis failed.';
-    status.className = 'operation-status failed'; status.textContent = `Key-impact analysis failed: ${error.message || 'network request failed'}`;
+    status.className = 'operation-status failed'; status.textContent = `Unable to confirm key-analysis status: ${error.message || 'network request failed'}. Refresh the page to reconnect.`;
   } finally {
-    button.classList.remove('is-busy'); button.textContent = 'Analyse selected key impact';
-    button.disabled = selectedDeduplicationColumns().length === 0;
+    if (state.sessionId === sessionId) {
+      state.keyAnalysisPending = false;
+      updateDeduplicationSelectionControls();
+      updateCreateUploadEligibility();
+    }
   }
 }
 
@@ -741,11 +799,13 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
     const activationNote = result.mode === 'append'
       ? 'This older table has no composite key yet. Your first acknowledged key will be saved prospectively for this and later keyed appends; existing table rows are not rewritten.'
       : 'This selection becomes the table’s immutable de-duplication contract.';
-    section.innerHTML = `<h3>Choose de-duplication columns</h3><p>Select one stable identifier, or multiple fields for a composite key. CSN, case, HRN, MRN, and other encrypted identifiers may be selected; their examples remain masked. ${activationNote} Before upload, analyse the full incoming dataset to see the duplicate/conflict impact. Per-column non-empty and distinct counts help assess a single-column key.</p><p class="deduplication-notice" id="deduplication-selection-notice">Choose at least one de-duplication column before uploading.</p><div class="deduplication-actions"><button type="button" id="select-all-deduplication" class="secondary" aria-pressed="false">Select all columns</button><span id="deduplication-selection-count" class="hint"></span></div><div class="deduplication-candidates">${rows}</div><button type="button" id="analyse-key" class="key-analysis-action" disabled>Analyse selected key impact</button><p id="key-analysis-status" class="operation-status" aria-live="polite"></p><div id="key-analysis-result"></div>`;
+    section.innerHTML = `<h3>Choose de-duplication columns</h3><p>Select one stable identifier, or multiple fields for a composite key. CSN, case, HRN, MRN, and other encrypted identifiers may be selected; their examples remain masked. ${activationNote} Before upload, analyse the full incoming dataset to see the duplicate/conflict impact. Per-column non-empty and distinct counts help assess a single-column key.</p><p class="deduplication-notice" id="deduplication-selection-notice">Choose at least one de-duplication column before uploading.</p><div class="deduplication-actions"><button type="button" id="select-all-deduplication" class="secondary" aria-pressed="false">Select all columns</button><span id="deduplication-selection-count" class="hint"></span></div><label class="deduplication-search-label" for="deduplication-search">Find a column<input id="deduplication-search" type="search" placeholder="Filter column names…" aria-controls="deduplication-candidate-list"></label><p id="deduplication-filter-count" class="hint" aria-live="polite"></p><div id="deduplication-candidate-list" class="deduplication-candidates">${rows}</div><button type="button" id="analyse-key" class="key-analysis-action" disabled>Analyse selected key impact</button><p id="key-analysis-status" class="operation-status" aria-live="polite"></p><div id="key-analysis-result"></div>`;
     holder.append(section);
     section.querySelectorAll('[data-deduplication-column]').forEach(control => control.addEventListener('change', deduplicationSelectionChanged));
     $('select-all-deduplication').onclick = toggleAllDeduplicationColumns;
     $('analyse-key').onclick = analyseSelectedKey;
+    $('deduplication-search').oninput = filterDeduplicationColumns;
+    filterDeduplicationColumns();
     updateDeduplicationSelectionControls();
   }
   if (selectedDeduplicationMode() === 'keyed' && result.mode === 'append' && result.deduplication_columns?.length) {
@@ -865,7 +925,7 @@ $('deduplication-mode').onchange = () => { state.deduplicationMode = selectedDed
 $('preflight').onclick = async () => {
   const button = $('preflight'); const status = $('review-status');
   button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Reviewing upload…';
-  status.className = 'operation-status'; status.textContent = 'Analysing file structure, column names, types, and sanitization requirements…';
+  status.className = 'operation-status'; status.textContent = 'Sending files to the server. File analysis starts after receipt…';
   $('activity').textContent = 'Scanning selected file schemas…';
   try {
     const response = await apiFetch('/api/v2/upload-sessions', { method: 'POST', body: formData() });

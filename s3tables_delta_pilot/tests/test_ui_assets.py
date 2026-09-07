@@ -1,3 +1,4 @@
+import ast
 import asyncio
 import json
 import unittest
@@ -6,7 +7,7 @@ from datetime import datetime, timezone
 from io import BytesIO
 from tempfile import TemporaryDirectory
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -49,7 +50,9 @@ from s3tables_delta_pilot.webapp import (
     _unsafe_cast_issues,
     _preflight,
     _raw_key_impact_metrics,
+    _raw_key_row_selection,
     _report_ingestion_progress,
+    _start_ingestion,
     retired_ingestions,
     retired_key_impact_analysis,
     retired_preflight,
@@ -61,6 +64,24 @@ from starlette.datastructures import UploadFile
 
 STATIC = Path(__file__).parents[1] / "static"
 GLUE_JOB = Path(__file__).parents[1] / "generic_glue_job.py"
+
+
+def _glue_job_helpers(*names: str) -> dict:
+    """Evaluate pure Glue-script helpers without importing awsglue/pyspark."""
+    module = ast.parse(GLUE_JOB.read_text())
+    wanted = set(names)
+    selected = [
+        node for node in module.body
+        if (isinstance(node, (ast.FunctionDef, ast.ClassDef)) and node.name in wanted)
+        or (isinstance(node, ast.Assign) and any(
+            isinstance(target, ast.Name) and target.id in wanted for target in node.targets
+        ))
+    ]
+    if len(selected) != len(wanted):
+        raise AssertionError(f"Glue job is missing definitions for {sorted(wanted)}")
+    namespace: dict = {}
+    exec(compile(ast.Module(body=selected, type_ignores=[]), str(GLUE_JOB), "exec"), namespace)
+    return namespace
 
 
 class UiAssetTests(unittest.TestCase):
@@ -289,6 +310,220 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("__uploader_composite_key", script)
         self.assertIn("duplicate_rows_within_upload", script)
         self.assertIn("spark.table(TARGET).select(*key_columns)", script)
+        self.assertIn('manifest.get("local_key_deduplication")', script)
+        self.assertIn('manifest.get("prepared_contract_types")', script)
+        self.assertIn('manifest["prepared_row_count"]', script)
+
+    def test_prepared_parquet_timestamp_without_timezone_matches_the_contract(self):
+        comparable = _glue_job_helpers("_TIMESTAMP_FLAVOURS", "_comparable_type")["_comparable_type"]
+        # Spark 3.4+ infers naive Parquet timestamps as ``timestamp_ntz``; the
+        # contract states ``TIMESTAMP``, and both describe the same wall clock.
+        self.assertEqual(comparable("timestamp"), comparable("timestamp_ntz"))
+        self.assertEqual(comparable("timestamp"), comparable("timestamp_ltz"))
+        self.assertNotEqual(comparable("timestamp"), comparable("date"))
+        self.assertNotEqual(comparable("bigint"), comparable("double"))
+        self.assertEqual("string", comparable("STRING"))
+        script = GLUE_JOB.read_text()
+        # The staged flavour must still be cast to the contract type before the
+        # Iceberg write, not silently accepted.
+        self.assertIn("column.cast(contract_type)", script)
+
+    def test_preflight_reads_a_session_file_only_once(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"record_id": [1, 2], "status": ["a", "b"]}), sink)
+        upload = UploadFile(filename="source.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        with patch(
+            "s3tables_delta_pilot.webapp._read_upload_table",
+            wraps=_read_upload_table,
+        ) as reader:
+            result = _preflight("create", TABLE_BUCKET_ARN, NAMESPACE, "new_table", [upload])
+        self.assertTrue(result["accepted"])
+        self.assertEqual(1, reader.call_count)
+
+    def test_local_key_selection_handles_duplicates_and_conflicts_across_files(self):
+        with TemporaryDirectory() as directory:
+            first = Path(directory) / "first.parquet"
+            second = Path(directory) / "second.parquet"
+            pq.write_table(pa.table({"case": ["A", "B", "C"], "value": ["same", "old", "only"]}), first)
+            pq.write_table(pa.table({"case": ["A", "B", "D"], "value": ["same", "new", "only"]}), second)
+
+            selected, metrics = _raw_key_row_selection(
+                [(first, first.name), (second, second.name)], ["case"]
+            )
+            impact = _raw_key_impact_metrics(
+                [(first, first.name), (second, second.name)], ["case"]
+            )
+
+        self.assertEqual({0: [0, 2], 1: [2]}, selected)
+        self.assertEqual(6, metrics["incoming_rows"])
+        self.assertEqual(1, metrics["duplicate_rows_within_upload"])
+        self.assertEqual(2, metrics["within_upload_key_conflicts"])
+        self.assertEqual(3, metrics["rows_retained_after_local_deduplication"])
+        self.assertEqual(impact["incoming_rows"], metrics["incoming_rows"])
+        self.assertEqual(impact["exact_duplicate_rows"], metrics["duplicate_rows_within_upload"])
+        self.assertEqual(impact["rows_in_conflicting_key_groups"], metrics["within_upload_key_conflicts"])
+        self.assertEqual(impact["expected_retained_rows"], metrics["rows_retained_after_local_deduplication"])
+
+    def test_staging_writes_exact_contract_types_and_order(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.csv"
+            source.write_text("flag,count,measure,day,extra\n1,3,1.5,2026-09-07,ignored\n")
+            target = [
+                {"name": "day", "type": "DATE"},
+                {"name": "flag", "type": "BOOLEAN"},
+                {"name": "count", "type": "BIGINT"},
+                {"name": "measure", "type": "DOUBLE"},
+                {"name": "missing", "type": "STRING"},
+            ]
+            staged, _, _ = _make_glue_compatible_parquet(source, source.name, target_schema=target)
+            try:
+                table = pq.read_table(staged)
+                self.assertEqual([field["name"] for field in target], table.schema.names)
+                self.assertEqual(
+                    [pa.date32(), pa.bool_(), pa.int64(), pa.float64(), pa.string()],
+                    [field.type for field in table.schema],
+                )
+                self.assertEqual([True], table["flag"].to_pylist())
+                self.assertEqual([None], table["missing"].to_pylist())
+            finally:
+                staged.unlink(missing_ok=True)
+
+    def test_session_ingestion_reuses_review_and_writes_prepared_manifest(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.parquet"
+            pq.write_table(pa.table({"record_id": [1, 2]}), source)
+            stream = source.open("rb")
+            upload = UploadFile(filename=source.name, file=stream)
+            upload._pilot_session_path = str(source)
+            upload._pilot_sha256 = "known-digest"
+            preview = {
+                "mode": "create",
+                "table_bucket_arn": TABLE_BUCKET_ARN,
+                "namespace": NAMESPACE,
+                "table": "new_table",
+                "accepted": True,
+                "target_schema": [{"name": "record_id", "type": "BIGINT", "source_name": "record_id"}],
+                "type_selections": [],
+                "deduplication_columns": [],
+                "deduplication_policy": "skip-existing-key-report-conflict-v2",
+                "files": [{"sanitization": {"encrypted_columns": []}, "nric_detected_columns": []}],
+                "sanitization_review": {"manual_encryption_candidates": [], "automatic_encrypted_columns": []},
+            }
+            request = IngestionRequest(
+                mode="create", table="new_table", request_id="request-1",
+                table_bucket_arn=TABLE_BUCKET_ARN, namespace=NAMESPACE,
+                reporting_month="test", deduplication_mode="none",
+            )
+            s3 = Mock()
+            staged_bodies = {}
+            def capture_put(**kwargs):
+                body = kwargs["Body"]
+                staged_bodies[kwargs["Key"]] = body.read() if hasattr(body, "read") else body
+                return {}
+            s3.put_object.side_effect = capture_put
+            glue = Mock()
+            glue.start_job_run.return_value = {"JobRunId": "job-1"}
+            try:
+                with patch("s3tables_delta_pilot.webapp.s3", s3), patch(
+                    "s3tables_delta_pilot.webapp.glue", glue
+                ), patch("s3tables_delta_pilot.webapp._require_scope"), patch(
+                    "s3tables_delta_pilot.webapp._ensure_upload_archive_lifecycle"
+                ), patch("s3tables_delta_pilot.webapp._ensure_web_job"), patch(
+                    "s3tables_delta_pilot.webapp._preflight",
+                    side_effect=AssertionError("accepted session review must be reused"),
+                ):
+                    result = asyncio.run(_start_ingestion(
+                        request=request.model_dump_json(), files=[upload],
+                        user=PilotUser("local-admin", True, True, True, ()),
+                        reviewed_preview=preview, file_digests=["known-digest"],
+                    ))
+            finally:
+                stream.close()
+            manifest_call = next(
+                call for call in s3.put_object.call_args_list
+                if call.kwargs["Key"].endswith("/manifest.json")
+            )
+            manifest = json.loads(manifest_call.kwargs["Body"])
+            self.assertEqual("job-1", result["job_run_id"])
+            self.assertEqual(2, manifest["manifest_version"])
+            self.assertTrue(manifest["prepared_contract_types"])
+            self.assertEqual(2, manifest["prepared_row_count"])
+            self.assertEqual(2, manifest["incoming_row_count"])
+
+    def test_keyed_session_stages_only_locally_retained_rows(self):
+        with TemporaryDirectory() as directory:
+            source = Path(directory) / "source.parquet"
+            pq.write_table(pa.table({
+                "record_id": ["A", "A", "B", "B", "C"],
+                "value": ["same", "same", "old", "new", "only"],
+            }), source)
+            stream = source.open("rb")
+            upload = UploadFile(filename=source.name, file=stream)
+            upload._pilot_session_path = str(source)
+            upload._pilot_sha256 = "known-digest"
+            preview = {
+                "mode": "create", "table_bucket_arn": TABLE_BUCKET_ARN,
+                "namespace": NAMESPACE, "table": "new_table", "accepted": True,
+                "target_schema": [
+                    {"name": "record_id", "type": "STRING", "source_name": "record_id"},
+                    {"name": "value", "type": "STRING", "source_name": "value"},
+                ],
+                "type_selections": [], "deduplication_columns": [],
+                "deduplication_candidates": [
+                    {"column": "record_id", "deduplication_eligible": True}
+                ],
+                "deduplication_policy": "skip-existing-key-report-conflict-v2",
+                "files": [{"sanitization": {"encrypted_columns": []}, "nric_detected_columns": []}],
+                "sanitization_review": {"manual_encryption_candidates": [], "automatic_encrypted_columns": []},
+            }
+            token = _sign_key_analysis({
+                "v": 2,
+                "expires_at": int(datetime.now(timezone.utc).timestamp()) + 300,
+                "user_id": "local-admin", "table_bucket_arn": TABLE_BUCKET_ARN,
+                "namespace": NAMESPACE, "table": "new_table", "type_overrides": {},
+                "deduplication_columns": ["record_id"], "file_digests": ["known-digest"],
+            })
+            request = IngestionRequest(
+                mode="create", table="new_table", request_id="request-2",
+                table_bucket_arn=TABLE_BUCKET_ARN, namespace=NAMESPACE,
+                reporting_month="test", deduplication_mode="keyed",
+                deduplication_columns=["record_id"], key_analysis_token=token,
+            )
+            s3 = Mock()
+            staged_bodies = {}
+            def capture_put(**kwargs):
+                body = kwargs["Body"]
+                staged_bodies[kwargs["Key"]] = body.read() if hasattr(body, "read") else body
+                return {}
+            s3.put_object.side_effect = capture_put
+            glue = Mock()
+            glue.start_job_run.return_value = {"JobRunId": "job-2"}
+            try:
+                with patch("s3tables_delta_pilot.webapp.s3", s3), patch(
+                    "s3tables_delta_pilot.webapp.glue", glue
+                ), patch("s3tables_delta_pilot.webapp._require_scope"), patch(
+                    "s3tables_delta_pilot.webapp._ensure_upload_archive_lifecycle"
+                ), patch("s3tables_delta_pilot.webapp._ensure_web_job"):
+                    asyncio.run(_start_ingestion(
+                        request=request.model_dump_json(), files=[upload],
+                        user=PilotUser("local-admin", True, True, True, ()),
+                        reviewed_preview=preview, file_digests=["known-digest"],
+                    ))
+            finally:
+                stream.close()
+            parquet_body = next(body for key, body in staged_bodies.items() if "/input/" in key)
+            staged = pq.read_table(pa.BufferReader(parquet_body))
+            self.assertEqual(["A", "C"], staged["record_id"].to_pylist())
+            manifest_call = next(
+                call for call in s3.put_object.call_args_list
+                if call.kwargs["Key"].endswith("/manifest.json")
+            )
+            manifest = json.loads(manifest_call.kwargs["Body"])
+            self.assertTrue(manifest["local_key_deduplication"])
+            self.assertEqual(5, manifest["incoming_row_count"])
+            self.assertEqual(2, manifest["prepared_row_count"])
+            self.assertEqual(1, manifest["local_deduplication_metrics"]["duplicate_rows_within_upload"])
+            self.assertEqual(2, manifest["local_deduplication_metrics"]["within_upload_key_conflicts"])
 
     def test_staging_converts_time_of_day_to_spark_compatible_string(self):
         with TemporaryDirectory() as directory:
@@ -560,7 +795,7 @@ class UiAssetTests(unittest.TestCase):
         self.assertLess(html.index('id="review"'), html.index('id="upload-actions"'))
         self.assertIn('id="upload-status"', html)
         self.assertIn("Reviewing upload…", javascript)
-        self.assertIn("Analysing file structure, column names, types, and sanitization requirements…", javascript)
+        self.assertIn("Sending files to the server. File analysis starts after receipt…", javascript)
         self.assertIn("Upload review failed:", javascript)
         self.assertIn("Starting upload…", javascript)
         self.assertIn("Preparing the sanitized upload, recovery point, and ETL job…", javascript)

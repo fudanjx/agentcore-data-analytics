@@ -179,7 +179,23 @@ def _source_lookup(columns: list[str]) -> dict[str, str]:
     return lookup
 
 
-def _project_incoming(manifest: dict):
+_TIMESTAMP_FLAVOURS = {"timestamp", "timestamp_ntz", "timestamp_ltz"}
+
+
+def _comparable_type(type_name: str) -> str:
+    """Normalise a type name so timestamp flavours compare as equal.
+
+    Local preparation writes contract ``TIMESTAMP`` columns as Parquet
+    ``TIMESTAMP(MICROS, isAdjustedToUTC=false)``, which Spark 3.4 and later
+    infer as ``timestamp_ntz``.  The stored wall-clock value is exactly what
+    the contract asked for, so the flavour difference is a physical-encoding
+    detail resolved by the cast below, not a contract violation.
+    """
+    normalised = type_name.strip().lower()
+    return "timestamp" if normalised in _TIMESTAMP_FLAVOURS else normalised
+
+
+def _project_incoming(manifest: dict, persist: bool = True):
     """Project only to the immutable contract.
 
     The v2 local preparation path already writes Parquet with these physical
@@ -189,6 +205,26 @@ def _project_incoming(manifest: dict):
     frames = []
     for uri in manifest["files"]:
         raw = spark.read.parquet(uri)
+        if manifest.get("prepared_contract_types"):
+            expected = [(field["name"], field["type"].lower()) for field in manifest["schema"]]
+            actual = [(field.name, field.dataType.simpleString().lower()) for field in raw.schema.fields]
+            if [(name, _comparable_type(kind)) for name, kind in actual] != [
+                (name, _comparable_type(kind)) for name, kind in expected
+            ]:
+                raise ValueError(
+                    f"Prepared Parquet schema does not match manifest: expected={expected}, actual={actual}"
+                )
+            # The Iceberg column created from the contract is ``TIMESTAMP``, so
+            # timestamp-without-timezone staging is cast once per column here
+            # rather than relying on an implicit write-time conversion.
+            projection = []
+            for (name, contract_type), (_, staged_type) in zip(expected, actual):
+                column = F.col(_quoted(name))
+                projection.append(
+                    (column if staged_type == contract_type else column.cast(contract_type)).alias(name)
+                )
+            frames.append(raw.select(*projection))
+            continue
         lookup, expressions = _source_lookup(raw.columns), []
         for field in manifest["schema"]:
             source_column = field.get("source_name") if field.get("source_name") in raw.columns else lookup.get(field["name"])
@@ -201,7 +237,7 @@ def _project_incoming(manifest: dict):
     incoming = frames[0]
     for frame in frames[1:]:
         incoming = incoming.unionByName(frame)
-    return incoming.persist(StorageLevel.MEMORY_AND_DISK), 0
+    return incoming.persist(StorageLevel.MEMORY_AND_DISK) if persist else incoming, 0
 
 
 def _with_row_fingerprint(frame, columns: list[str]):
@@ -291,10 +327,14 @@ def _keyed_rows_to_append(incoming, columns: list[str], key_columns: list[str]):
     joined = candidate.join(existing, "__uploader_composite_key", "left").persist(StorageLevel.MEMORY_AND_DISK)
     overlap_rows = int(joined.where(F.col("__uploader_existing_key").isNotNull()).count())
     rows_to_append = joined.where(F.col("__uploader_existing_key").isNull()).select(*columns).persist(StorageLevel.MEMORY_AND_DISK)
+    rows_after_target_filter = int(rows_to_append.count())
     joined.unpersist()
     existing.unpersist()
     candidate.unpersist()
-    return rows_to_append, {"existing_key_overlap_rows": overlap_rows}
+    return rows_to_append, {
+        "existing_key_overlap_rows": overlap_rows,
+        "rows_after_target_key_filter": rows_after_target_filter,
+    }
 
 
 def _run_ingestion() -> dict:
@@ -307,21 +347,46 @@ def _run_ingestion() -> dict:
     if MODE == "append" and not _exists():
         raise ValueError(f"Target {TARGET} does not exist")
 
-    incoming, unsafe_casts = _project_incoming(manifest)
-    incoming_rows = int(incoming.count())
-    columns = [field["name"] for field in manifest["schema"]]
     deduplication_mode = manifest.get("deduplication_mode") or ("keyed" if manifest.get("deduplication_columns") else "legacy-full-row")
     deduplication_columns = manifest.get("deduplication_columns") or []
+    prepared = bool(manifest.get("prepared_contract_types"))
+    local_key_deduplication = bool(manifest.get("local_key_deduplication"))
+    incoming, unsafe_casts = _project_incoming(
+        manifest, persist=not (prepared and deduplication_mode == "none")
+    )
+    incoming_rows = int(manifest["incoming_row_count"]) if prepared else int(incoming.count())
+    columns = [field["name"] for field in manifest["schema"]]
     if deduplication_mode not in {"none", "keyed", "legacy-full-row"}:
         raise ValueError(f"Unsupported de-duplication mode: {deduplication_mode}")
     if deduplication_columns:
         invalid_keys = sorted(set(deduplication_columns) - set(columns))
         if invalid_keys:
             raise ValueError(f"Manifest de-duplication columns are not in the table schema: {invalid_keys}")
+    if prepared:
+        prepared_row_count = int(manifest.get("prepared_row_count", -1))
+        incoming_row_count = int(manifest.get("incoming_row_count", -1))
+        if prepared_row_count < 0 or incoming_row_count < prepared_row_count:
+            raise ValueError("Prepared manifest row counts are invalid")
+    if local_key_deduplication:
+        metrics = manifest.get("local_deduplication_metrics") or {}
+        required_metrics = {
+            "incoming_rows", "duplicate_rows_within_upload",
+            "within_upload_key_conflicts", "rows_retained_after_local_deduplication",
+        }
+        if not prepared or deduplication_mode != "keyed" or not required_metrics.issubset(metrics):
+            raise ValueError("Local keyed de-duplication metadata is incomplete")
+        if (
+            int(metrics["incoming_rows"]) != incoming_row_count
+            or int(metrics["rows_retained_after_local_deduplication"]) != prepared_row_count
+        ):
+            raise ValueError("Local keyed de-duplication row counts do not match the prepared manifest")
     # Legacy tables retain the original full-row contract.  New tables choose
     # an immutable key at creation, which governs both within-file and target
     # table duplicate handling.
-    if deduplication_mode == "keyed":
+    if deduplication_mode == "keyed" and local_key_deduplication:
+        incoming_key_metrics = dict(manifest.get("local_deduplication_metrics") or {})
+        unique_incoming = incoming
+    elif deduplication_mode == "keyed":
         if not deduplication_columns:
             raise ValueError("Keyed de-duplication requires at least one contract key column")
         unique_incoming, incoming_key_metrics = _deduplicate_incoming_by_keys(incoming, columns, deduplication_columns)
@@ -331,7 +396,10 @@ def _run_ingestion() -> dict:
     else:
         unique_incoming = incoming.dropDuplicates().persist(StorageLevel.MEMORY_AND_DISK)
         incoming_key_metrics = {"duplicate_rows_within_upload": incoming_rows - int(unique_incoming.count())}
-    unique_incoming_rows = incoming_rows if deduplication_mode == "none" else int(unique_incoming.count())
+    if prepared and (deduplication_mode == "none" or local_key_deduplication):
+        unique_incoming_rows = int(manifest["prepared_row_count"])
+    else:
+        unique_incoming_rows = incoming_rows if deduplication_mode == "none" else int(unique_incoming.count())
     duplicate_rows_within_upload = incoming_key_metrics["duplicate_rows_within_upload"]
     duplicate_metrics = {}
     if MODE == "create":
@@ -350,7 +418,14 @@ def _run_ingestion() -> dict:
         else:
             rows_to_append = _exclude_existing_rows(unique_incoming, columns).persist(StorageLevel.MEMORY_AND_DISK)
             duplicate_rows_already_in_table = unique_incoming_rows - int(rows_to_append.count())
-    rows_appended = int(rows_to_append.count())
+    if MODE == "create" and prepared:
+        rows_appended = int(manifest["prepared_row_count"])
+    elif deduplication_mode == "none" and prepared:
+        rows_appended = int(manifest["prepared_row_count"])
+    elif deduplication_mode == "keyed" and MODE == "append":
+        rows_appended = int(duplicate_metrics["rows_after_target_key_filter"])
+    else:
+        rows_appended = int(rows_to_append.count())
     audit_metadata = {
         "deduplication_mode": deduplication_mode,
         "deduplication_columns": json.dumps(deduplication_columns),

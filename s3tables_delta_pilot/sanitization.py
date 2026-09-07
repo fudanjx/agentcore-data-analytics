@@ -19,6 +19,7 @@ from typing import Any, Iterable
 import boto3
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
@@ -145,11 +146,15 @@ def detect_nric_columns(table: pa.Table, seed: str, sample_size: int = 5, thresh
     for field in table.schema:
         if field.name in excluded or not (pa.types.is_string(field.type) or pa.types.is_large_string(field.type)):
             continue
-        values = table[field.name].to_pylist()
-        nonempty = [str(value).strip() for value in values if value is not None and str(value).strip()]
-        if not nonempty:
+        column = table[field.name]
+        trimmed = pc.utf8_trim_whitespace(column)
+        populated = pc.filter(trimmed, pc.and_(pc.is_valid(trimmed), pc.not_equal(trimmed, "")))
+        if not len(populated):
             continue
-        sample = random.Random(f"{seed}:{field.name}").sample(nonempty, min(sample_size, len(nonempty)))
+        indexes = random.Random(f"{seed}:{field.name}").sample(
+            range(len(populated)), min(sample_size, len(populated))
+        )
+        sample = pc.take(populated, pa.array(indexes, type=pa.int64())).to_pylist()
         matches = sum(bool(NRIC_PATTERN.fullmatch(value)) for value in sample)
         is_detected = matches >= threshold
         details[field.name] = {"sample_count": len(sample), "nric_match_count": matches, "nric_detected": is_detected}

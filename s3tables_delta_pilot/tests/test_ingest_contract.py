@@ -9,6 +9,7 @@ from s3tables_delta_pilot.ingest_contract import (
     parse_documented_date,
     schema_from_arrow,
     schema_from_table,
+    temporal_array,
 )
 
 
@@ -89,6 +90,17 @@ class IngestContractTests(unittest.TestCase):
     def test_date_parser_accepts_the_year_9999_without_pandas_timestamp_bounds(self):
         self.assertEqual("9999-12-31", parse_documented_date("9999-12-31").isoformat())
         self.assertIsNone(parse_documented_date("9999-02-29"))
+
+    def test_vectorized_temporal_parser_matches_strict_date_rules(self):
+        source = pa.array([
+            "2026-09-07", "20260907", "2026.09.07", "9999-12-31",
+            "2026-02-29", "2026/09/07", None,
+        ])
+        parsed = temporal_array(source, "DATE").to_pylist()
+        self.assertEqual(
+            [parse_documented_date(value) for value in source.to_pylist()],
+            parsed,
+        )
 
     def test_plain_text_is_automatic_string_but_invalid_date_like_values_are_manual(self):
         table = pa.table({

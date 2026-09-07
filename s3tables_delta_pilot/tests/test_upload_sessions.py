@@ -1,6 +1,7 @@
 import io
 import hashlib
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from tempfile import TemporaryDirectory
 from pathlib import Path
 
@@ -23,6 +24,29 @@ class UploadSessionTests(unittest.TestCase):
             self.assertNotIn("path", safe["files"][0])
             store.delete(session.session_id, "local-editor")
             self.assertFalse(Path(source.path).exists())
+
+    def test_only_one_concurrent_key_analysis_claim_succeeds(self):
+        with TemporaryDirectory() as directory:
+            store = UploadSessionStore(Path(directory))
+            session = store.create(
+                owner_user_id="alice", mode="create", table_bucket_arn="arn:bucket/example",
+                namespace="pilot", table="example", files=[("source.csv", io.BytesIO(b"key\n1\n"))],
+            )
+            store.update(session.session_id, "alice", phase="READY_FOR_ACKNOWLEDGEMENT",
+                         progress_message="Ready", key_impact={"acknowledgement_token": "old"})
+
+            def claim(_):
+                try:
+                    store.start_key_analysis(session.session_id, "alice")
+                    return True
+                except ValueError:
+                    return False
+
+            with ThreadPoolExecutor(max_workers=4) as executor:
+                self.assertEqual(1, sum(executor.map(claim, range(4))))
+            current = store.get(session.session_id, "alice")
+            self.assertEqual("KEY_ANALYSING", current.phase)
+            self.assertIsNone(current.key_impact)
 
     def test_session_is_owned_by_creator(self):
         with TemporaryDirectory() as directory:
