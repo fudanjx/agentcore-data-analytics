@@ -5,7 +5,12 @@
 		},
 		{
 			"path": "../../../../Volumes/Moonshot/ITR"
+		},
+		{
+			"path": "../Claude/encryption/AH-DSA-Automation"
 		}
 	],
-	"settings": {}
+	"settings": {
+		"liveServer.settings.multiRootWorkspaceName": "AgentCore"
+	}
 }

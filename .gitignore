@@ -42,4 +42,9 @@ Strands-runtime/dist/
 /tests/
 docs/architecture/
 nuh_s3tables_migration/_build/
-
+outputs/su_encoded_random_3000.csv
+outputs/inp_case_no_review/baseline_em_encoded_14_rows.csv
+outputs/inp_case_no_review/inp_case_no_difference_index.csv
+outputs/inp_case_no_review/README.json
+outputs/inp_case_no_review/uploaded_emd_may2026_14_rows.csv
+.gitignore
