@@ -111,6 +111,29 @@ def test_tool_failure_is_returned_to_agent(monkeypatch):
     assert result["is_error"] is True
 
 
+def test_bootstrap_packages_runs_in_the_python_kernel(monkeypatch):
+    client = FakeAgentCoreClient()
+    monkeypatch.setattr(code_interpreter, "_client", client)
+    monkeypatch.setattr(code_interpreter, "CODE_INTERPRETER_ID", "geo-interpreter-id")
+    monkeypatch.setattr(code_interpreter, "BOOTSTRAP_PACKAGES", ("geopandas==1.1.4", "folium==0.20.0"))
+    calls = []
+
+    def fake_invoke(session_id, name, arguments):
+        calls.append((session_id, name, arguments))
+        return '[{"isError":false}]'
+
+    monkeypatch.setattr(code_interpreter, "_invoke_and_collect", fake_invoke)
+
+    session_id = code_interpreter._start_session("runtime-session")
+
+    assert session_id == "managed-code-session-id"
+    assert calls[0][0] == session_id
+    assert calls[0][1] == "executeCode"
+    assert calls[0][2]["language"] == "python"
+    assert "geopandas==1.1.4" in calls[0][2]["code"]
+    assert "folium==0.20.0" in calls[0][2]["code"]
+
+
 def test_code_interpreter_result_error_is_returned_to_agent(monkeypatch):
     monkeypatch.setattr(
         code_interpreter,

@@ -29,6 +29,11 @@ MAX_RESULT_CHARS = max(
     1_000,
     int(os.environ.get("CODE_INTERPRETER_MAX_RESULT_CHARS", "200000")),
 )
+BOOTSTRAP_PACKAGES = tuple(
+    item
+    for item in os.environ.get("CODE_INTERPRETER_BOOTSTRAP_PACKAGES", "").split()
+    if item and all(character.isalnum() or character in ".-_=<>!~" for character in item)
+)
 
 _client = None
 
@@ -68,6 +73,40 @@ def _start_session(runtime_session_id: str | None) -> str:
     session_id = response.get("sessionId")
     if not isinstance(session_id, str) or not session_id:
         raise RuntimeError("Code Interpreter did not return a session ID")
+    if BOOTSTRAP_PACKAGES:
+        try:
+            # Install through the same Python kernel used by executeCode.  A
+            # pip command sent to executeCommand may use a separate shell
+            # environment whose site-packages are not on the notebook kernel's
+            # sys.path.
+            packages = repr(list(BOOTSTRAP_PACKAGES))
+            code = (
+                "import site, subprocess, sys\n"
+                f"packages = {packages}\n"
+                "subprocess.check_call([sys.executable, '-m', 'pip', 'install', "
+                "'--disable-pip-version-check', '--user', *packages])\n"
+                "site.addsitedir(site.getusersitepackages())\n"
+                "print('Installed bootstrap packages:', ', '.join(packages))"
+            )
+            logger.info("Bootstrapping Code Interpreter packages: %s", ", ".join(BOOTSTRAP_PACKAGES))
+            bootstrap_result = _invoke_and_collect(
+                session_id,
+                "executeCode",
+                {"code": code, "language": "python"},
+            )
+            try:
+                events = json.loads(bootstrap_result)
+            except json.JSONDecodeError as error:
+                raise RuntimeError("Code Interpreter package bootstrap returned invalid output") from error
+            if any(isinstance(event, dict) and bool(event.get("isError")) for event in events):
+                raise RuntimeError("Code Interpreter package bootstrap failed")
+        except Exception:
+            # A failed bootstrap must not leak the newly-created session.
+            try:
+                _stop_session(session_id)
+            except Exception:
+                logger.warning("Unable to stop failed bootstrap session %s", session_id, exc_info=True)
+            raise
     logger.info("Code Interpreter session started: %s", session_id)
     return session_id
 

@@ -254,6 +254,17 @@ Blocking boto3 calls run in worker threads so they do not block SSE delivery. To
 4. If it must read uploads or publish generated files, grant those S3 permissions to the Code Interpreter's execution role as well.
 5. Redeploy the Runtime.
 
+AgentCore Code Interpreter definitions do not currently support custom Python
+package layers. For geospatial work, create the separate interpreter with
+`python infra/geospatial_code_interpreter_bootstrap.py`, set
+`CODE_INTERPRETER_ID` to the printed ID, and set
+`CODE_INTERPRETER_BOOTSTRAP_PACKAGES=geopandas==1.1.4 folium==0.20.0`. The Runtime installs
+those packages at the start of each session before exposing code execution.
+The interpreter should use `PUBLIC` network mode for PyPI access, or a VPC
+package mirror if public egress is not permitted. This bootstrap is opt-in and
+does not change the existing interpreter unless those environment variables are
+set.
+
 To expose another interpreter operation, add a decorated tool in `build_mcp_server()`, map it to the corresponding `invoke_code_interpreter` operation name, and add its MCP name to `allowed_tools` in `_build_agent_options()`.
 
 ## Configuration
@@ -274,6 +285,7 @@ To expose another interpreter operation, add a decorated tool in `build_mcp_serv
 | `CODE_INTERPRETER_REGION` | `AWS_DEFAULT_REGION` or `ap-southeast-1` | Interpreter service region |
 | `CODE_INTERPRETER_SESSION_TIMEOUT_SECONDS` | `1800` | Managed session timeout, constrained to 60-28,800 seconds |
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Maximum interpreter result text returned to the model |
+| `CODE_INTERPRETER_BOOTSTRAP_PACKAGES` | Empty | Space-separated safe package names installed at session start, e.g. `geopandas==1.1.4 folium==0.20.0` |
 | `CLAUDE_AGENT_MAX_BUFFER_BYTES` | `10485760` | Claude SDK receive buffer size |
 | `AWS_DEFAULT_REGION` | Set by deployment | Default AWS region |
 | `CLAUDE_CODE_USE_BEDROCK` | `1` | Makes the Claude SDK use Amazon Bedrock with IAM credentials |

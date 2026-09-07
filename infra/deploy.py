@@ -51,6 +51,9 @@ CODE_INTERPRETER_ID = os.environ.get(
     "CODE_INTERPRETER_ID",
     "code_interpreter_runtime_dev-PEpoCecsBL",
 )
+CODE_INTERPRETER_BOOTSTRAP_PACKAGES = os.environ.get(
+    "CODE_INTERPRETER_BOOTSTRAP_PACKAGES", ""
+).strip()
 
 # AgentCore Memory. The Runtime discovers its active long-term strategy IDs.
 MEMORY_ID = os.environ.get("MEMORY_ID", "memory_runtime_dev-QNTwTS3Onp")
@@ -226,6 +229,7 @@ def deploy_agent_runtime(image_uri: str, role_arn: str) -> str:
         "SKILLS_PREFIX": SKILLS_PREFIX,
         "CODE_INTERPRETER_ID": CODE_INTERPRETER_ID,
         "CODE_INTERPRETER_REGION": REGION,
+        "CODE_INTERPRETER_BOOTSTRAP_PACKAGES": CODE_INTERPRETER_BOOTSTRAP_PACKAGES,
         "MEMORY_ID": MEMORY_ID,
         "MEMORY_REGION": REGION,
         # Tells the claude subprocess to use Bedrock IAM auth (no API key needed)
