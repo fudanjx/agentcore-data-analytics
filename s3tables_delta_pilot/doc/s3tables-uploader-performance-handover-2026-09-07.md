@@ -1,6 +1,6 @@
 # S3 Tables uploader: performance work handover — 2026-09-07
 
-**Status:** implemented locally, unit-tested, not deployed and not benchmarked against production.
+**Status:** implemented, unit-tested, and confirmed by two successful live Glue runs against `ah.admint_test2` (see 4.1). Not benchmarked before/after, and only one shape of upload has run live (see 5).
 
 **Scope of this document:** everything changed on 2026-09-07 in
 `s3tables_delta_pilot/`, plus the Glue failure found during the first real test
@@ -228,11 +228,56 @@ writer was not switched to `tz="UTC"`. Each would change instants for the legacy
 path and for tables already created.
 
 **Recovery for the failed run.** The `ValueError` is raised in
-`_project_incoming`, before `_create`, so `ah.admit_test2` was never created.
-Re-running the same upload with the same table name is safe. No cleanup is
-required.
+`_project_incoming`, before `_create`, so `ah.admit_test2` was never created and
+no cleanup was required.
 
 ## 4. Validation performed
+
+### 4.1 Live Glue runs
+
+The fix was confirmed end to end the same evening against `ah.admint_test2` in
+table bucket `ah-analytics`, using the real NGEMR admission basedeck:
+
+| Run | Mode | File | Rows | Result |
+|---|---|---|---|---|
+| `UPLOAD-00FBA951C7C8` | create | `NGEMR_Admission_Basedeck_from_Jan_2023.xlsx`, 34 MB | 76,060 appended, target 0 → 76,060 | `SUCCEEDED`, `committed`, snapshot 3389103366773695168 |
+| `UPLOAD-CA0D492280EA` | append | `NGEMR_Admission_Basedeck_July.xlsx`, 968 KB | 2,208 appended, target 76,060 → 78,268 | `SUCCEEDED`, `committed`, snapshot 4185490023994104410 |
+
+Both used `encounter_no_csn` as the composite key, reported
+`unsafe_cast_values: 0`, and recorded no within-upload conflicts and no existing
+key overlap.
+
+Three independent checks confirm these runs exercised the new code and the fix:
+
+- the script at `s3://ah-data-analytics/temp_s3_update/_pilot_assets/generic_glue_job.py`,
+  uploaded by `_ensure_web_job()` at 13:15:20 UTC, is byte-identical to the
+  fixed source and contains `_comparable_type` and `column.cast(contract_type)`;
+- both QC reports carry `rows_retained_after_local_deduplication` and the
+  append report carries `rows_after_target_key_filter` — fields only the
+  manifest v2 path emits, so local keyed de-duplication and the manifest counts
+  were used rather than Spark recomputation;
+- the create run ingested the same `death_date` and `admission_datetime`
+  columns whose `timestamp_ntz` inference had failed on `admit_test2`. A
+  pre-fix script would have raised the same `ValueError`; this one committed.
+
+Per-phase timings from those two sessions, for reference rather than as a
+benchmark (no before/after comparison was run on the same file):
+
+| Phase | create, 34 MB | append, 968 KB |
+|---|---|---|
+| `parse` | 15,408.2 ms | 587.8 ms |
+| `type_inference` | 414.5 ms | n/a (append) |
+| `deduplication_candidates` | 151.0 ms | 0.0 ms |
+| `nric_detection` | 64.1 ms | 14.9 ms |
+| `local_copy_and_sha256` | 36.4 ms | 3.1 ms |
+| `digest` | 0.0 ms (session digest reused) | 0.0 ms |
+| `profile_total` | 16,042.7 ms | 647.4 ms |
+
+Parsing the workbook now dominates preflight — 96% of the create profile —
+which is where the next optimisation belongs. `digest` is 0.0 ms in both,
+confirming the session SHA-256 reuse works.
+
+### 4.2 Local checks
 
 | Check | Result |
 |---|---|
@@ -265,13 +310,15 @@ the script, as before.
 
 ## 5. What is not verified
 
-- **No live Glue re-run.** The timestamp fix is verified by unit test and by
-  reading Parquet metadata back from a written file. It has not been confirmed
-  end to end against S3 Tables. This is the first thing to do.
-- **No performance benchmark of the new path.** No warm before/after timing on
-  a large real file, and no Spark execution plan inspected for the keyed
-  anti-join. The 224-second profiling figure from the review screenshot is
-  derived from `phase_started_at` and remains unexplained in production terms.
+- **No performance benchmark of the new path.** The timings in 4.1 are a single
+  post-change run; there is no warm before/after comparison on the same file and
+  no Spark execution plan inspected for the keyed anti-join. The 224-second
+  profiling figure from the review screenshot is derived from `phase_started_at`
+  and remains unexplained in production terms.
+- **Only one shape of data has run live.** Both runs in 4.1 were single-file,
+  conflict-free, zero-overlap uploads of the same source system. Untested live:
+  multi-file uploads, within-upload key conflicts, existing-key overlap on
+  append, and a legacy (pre-manifest-v2) manifest taking the fallback path.
 - **No rendered-browser verification** of the UI fixes; the node tests exercise
   the module logic, not a real DOM.
 - **Concurrency guarantee is single-process only.** `start_key_analysis` is
@@ -294,28 +341,42 @@ the script, as before.
 
 ## 7. Follow-ups, in order
 
-1. Re-run `UPLOAD-EB21DD720024` (or an equivalent create with timestamp
-   columns) end to end and confirm the values land as expected wall-clock
-   times.
-2. Benchmark the same large real file before and after, warm, using
+1. Spot-check the committed timestamp values in `ah.admint_test2` against the
+   source workbook. The runs in 4.1 prove the cast no longer fails; they do not
+   prove the wall-clock values are what an analyst expects. Query a handful of
+   `admission_datetime` rows and compare.
+2. Attack workbook parsing. It is 96% of the create profile and now the only
+   large item left. Everything else in `phase_timings_ms` is already sub-second.
+3. Exercise the untested live shapes listed in section 5: a multi-file upload,
+   an upload with within-upload key conflicts, an append with existing-key
+   overlap, and one legacy manifest to confirm the fallback path still works.
+4. Benchmark the same large real file before and after, warm, using
    `phase_timings_ms`. Record it here.
-3. Inspect the Spark plan for the keyed target anti-join before changing its
+5. Inspect the Spark plan for the keyed target anti-join before changing its
    caching. The review flagged a possible recomputation cost that was never
    confirmed.
-4. Decide whether target-key comparison should also move local. It was left in
+6. Decide whether target-key comparison should also move local. It was left in
    Spark on purpose; moving it would need target data locally and changes the
    trust model.
-5. Re-examine the transport question only if measurement shows receipt or
+7. Re-examine the transport question only if measurement shows receipt or
    spooling actually matters. The review's recommendation stands: keep the
    single multipart POST for now.
 
 ## 8. Housekeeping observed while preparing this handover
 
 Raw uploaded workbooks were found in the repository root as untracked
-`<hex>/00.xlsx` plus `session.json` directories, one of them 34 MB. The layout
-matches `UploadSessionStore.create`, so these are upload-session directories.
-`PILOT_UPLOAD_SESSION_ROOT` defaults to the system temporary directory, so a
-local run must have had it pointed at the repository. They were left untracked
-and uncommitted. Run the pilot with
+`<hex>/00.xlsx` plus `session.json` directories, one of them 34 MB. They are the
+private session directories for the two runs in 4.1 — `651a563d0e…` is the
+34 MB create, `038b5a847d…` is the append — stored as `<session_id>/<NN><suffix>`
+by `UploadSessionStore.create`, which is why the original filename is only
+recoverable from `session.json`.
+
+They are in the repository because `PILOT_UPLOAD_SESSION_ROOT` was pointed at
+the working directory; it defaults to the system temporary directory. Both
+sessions are past their one-hour `expires_at`, but `cleanup_expired` only runs
+while the service is up, so they persisted after it stopped.
+
+They were left untracked and uncommitted. Run the pilot with
 `PILOT_UPLOAD_SESSION_ROOT` set outside the working tree, and delete those
-directories once they are no longer needed — they contain real uploaded data.
+directories once they are no longer needed — they contain real uploaded patient
+data.
