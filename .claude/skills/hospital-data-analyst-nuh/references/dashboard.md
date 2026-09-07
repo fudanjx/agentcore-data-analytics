@@ -18,7 +18,8 @@ the user requests a mobile dashboard.
 - Use half-open primary-date ranges and double-quoted NUH columns.
 - Do not use `UID`, `Hosp_ABBR`, or `Period` as a date-range filter. Keep surgery's
   `UID` only inside its approved hybrid category CASE.
-- Use the current SOC and surgery hybrid classifications for any range that includes CY2023.
+- Use the universal SOC classifications in `soc.md` for every period and the
+  surgery hybrid classifications for ranges that include CY2023.
 - Group ED arrival mode with `ARRIVAL_MODE_DESC`; its groups must total the base-filtered EMD count. Do not use superseded raw-code normalisation rules.
 - For ED output, follow the row-counting rules in `emd.md`; do not substitute
   distinct ID counts or duplicate-status filters.

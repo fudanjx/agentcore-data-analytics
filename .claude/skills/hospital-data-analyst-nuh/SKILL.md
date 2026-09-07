@@ -5,7 +5,7 @@ description: Analyze National University Hospital (NUH) operational data in the 
 
 # NUH Analytics
 
-Please Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
+Use the `nuh` data tool for read-only SQL against `nuh-analytics` tables `emd`,
 `inpatient_movement`, `soc`, and `surgery`.
 
 ## Scope gate
@@ -41,7 +41,6 @@ query using the applicable reference rules.
 | Surgery, day surgery, normal delivery, inpatient surgery, or emergency/elective procedures | `surgery` | `SVISITDATE` | references/surgery.md |
 | Department, cluster, MOH specialty, or subspecialty report | Relevant table + subspec mapping | — | references/subspec-mapping.md |
 | Chart, visualization, or dashboard | Relevant table references | — | references/dashboard.md |
-| Geographic or location-based dashboard (patient origin map, district map) | Relevant table references | — | references/dashboard.md + references/folium-map.md |
 
 ## Composite reference requirements
 
@@ -52,7 +51,6 @@ query using the applicable reference rules.
 | SOC First/New vs Repeat visits | `soc.md` |
 | Inpatient discharges by Elective/Emergency | `inpatient-movement.md` |
 | Any chart, visualization, or dashboard | Responsible table references + `dashboard.md` |
-| Geographic or location-based dashboard | Responsible table references + `dashboard.md` + `folium-map.md` |
 
 ## Coverage and source-era limits
 
