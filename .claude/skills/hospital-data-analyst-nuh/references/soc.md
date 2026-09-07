@@ -10,6 +10,24 @@ rows; no deduplication or additional global filter is required for total SOC
 visits. Use a half-open `SOC_VISIT_DATE` range. For department, cluster, MOH,
 or subspecialty reporting, also read `subspec-mapping.md`.
 
+## Locked CY2023 gender classification
+
+For CY2023 SOC gender reporting, use the `SEX` field. Map `1` to `Male` and
+`2` to `Female`. Do not substitute another gender-like field for CY2023.
+
+```sql
+CASE
+  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '1' THEN 'Male'
+  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '2' THEN 'Female'
+  ELSE 'Unclassified'
+END AS gender_group
+```
+
+Use the exact RDS field `"SEX"`; for S3 use the lowercase physical field
+`"sex"`. This rule is specific to CY2023 and must not be extrapolated to later
+periods. Profile null and unexpected values as `Unclassified`, and require
+`Male + Female + Unclassified = source total` monthly and annually.
+
 ## Locked new / repeat classification
 
 Apply this `VISIT_TYPE` mapping universally to the whole SOC table for every
