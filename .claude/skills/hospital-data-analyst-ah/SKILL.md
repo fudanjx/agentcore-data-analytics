@@ -12,4 +12,5 @@ Before writing any SQL:
 2. Read the selected table's reference file for its detailed columns, derived metrics, and SQL patterns.
 3. If the deliverable is an HTML dashboard, KPI report, management report, or chart page, also read `references/dashboard-design.md`.
 4. If the query involves patient class, residency, or paying status, also read `references/pt-class-lookup.md`.
-5. Inspect the live schema with `describe_table` when a requested field or type is uncertain.
+5. If the request is geographic — map, catchment area, patient origin, by district/area, or by postal code — also read `references/geo-map.md` and use `references/postal-districts.json` for the postal-to-district mapping.
+6. Inspect the live schema with `describe_table` when a requested field or type is uncertain.

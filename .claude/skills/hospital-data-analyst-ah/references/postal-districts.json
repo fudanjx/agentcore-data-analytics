@@ -1,0 +1,501 @@
+{
+  "name": "singapore-postal-districts",
+  "description": "Singapore's 28 postal districts keyed by the first 2 digits of the 6-digit postal code, with an approximate representative centroid for map plotting.",
+  "centroid_note": "lat/lon is an approximate representative point inside the district, chosen for bubble placement. It is not an official boundary centroid and must not be presented as a precise patient location.",
+  "prefix_count": 81,
+  "district_count": 28,
+  "unassigned_prefixes": [
+    "00",
+    "74",
+    "83",
+    "84",
+    "85",
+    "86",
+    "87",
+    "88",
+    "89",
+    "90",
+    "91",
+    "92",
+    "93",
+    "94",
+    "95",
+    "96",
+    "97",
+    "98",
+    "99"
+  ],
+  "prefix_to_district": {
+    "01": 1,
+    "02": 1,
+    "03": 1,
+    "04": 1,
+    "05": 1,
+    "06": 1,
+    "07": 2,
+    "08": 2,
+    "09": 4,
+    "10": 4,
+    "11": 5,
+    "12": 5,
+    "13": 5,
+    "14": 3,
+    "15": 3,
+    "16": 3,
+    "17": 6,
+    "18": 7,
+    "19": 7,
+    "20": 8,
+    "21": 8,
+    "22": 9,
+    "23": 9,
+    "24": 10,
+    "25": 10,
+    "26": 10,
+    "27": 10,
+    "28": 11,
+    "29": 11,
+    "30": 11,
+    "31": 12,
+    "32": 12,
+    "33": 12,
+    "34": 13,
+    "35": 13,
+    "36": 13,
+    "37": 13,
+    "38": 14,
+    "39": 14,
+    "40": 14,
+    "41": 14,
+    "42": 15,
+    "43": 15,
+    "44": 15,
+    "45": 15,
+    "46": 16,
+    "47": 16,
+    "48": 16,
+    "49": 17,
+    "50": 17,
+    "51": 18,
+    "52": 18,
+    "53": 19,
+    "54": 19,
+    "55": 19,
+    "56": 20,
+    "57": 20,
+    "58": 21,
+    "59": 21,
+    "60": 22,
+    "61": 22,
+    "62": 22,
+    "63": 22,
+    "64": 22,
+    "65": 23,
+    "66": 23,
+    "67": 23,
+    "68": 23,
+    "69": 24,
+    "70": 24,
+    "71": 24,
+    "72": 25,
+    "73": 25,
+    "75": 27,
+    "76": 27,
+    "77": 26,
+    "78": 26,
+    "79": 28,
+    "80": 28,
+    "81": 17,
+    "82": 19
+  },
+  "prefix_to_area": {
+    "01": "Raffles Place, Marina, Cecil, People's Park",
+    "02": "Raffles Place, Marina, Cecil, People's Park",
+    "03": "Raffles Place, Marina, Cecil, People's Park",
+    "04": "Raffles Place, Marina, Cecil, People's Park",
+    "05": "Raffles Place, Marina, Cecil, People's Park",
+    "06": "Raffles Place, Marina, Cecil, People's Park",
+    "07": "Anson, Tanjong Pagar",
+    "08": "Anson, Tanjong Pagar",
+    "09": "Telok Blangah, Harbourfront",
+    "10": "Telok Blangah, Harbourfront",
+    "11": "Pasir Panjang, Hong Leong Garden, Clementi New Town",
+    "12": "Pasir Panjang, Hong Leong Garden, Clementi New Town",
+    "13": "Pasir Panjang, Hong Leong Garden, Clementi New Town",
+    "14": "Queenstown, Tiong Bahru",
+    "15": "Queenstown, Tiong Bahru",
+    "16": "Queenstown, Tiong Bahru",
+    "17": "High Street, Beach Road (part)",
+    "18": "Middle Road, Golden Mile",
+    "19": "Middle Road, Golden Mile",
+    "20": "Little India",
+    "21": "Little India",
+    "22": "Orchard, Cairnhill, River Valley",
+    "23": "Orchard, Cairnhill, River Valley",
+    "24": "Ardmore, Bukit Timah, Holland Road, Tanglin",
+    "25": "Ardmore, Bukit Timah, Holland Road, Tanglin",
+    "26": "Ardmore, Bukit Timah, Holland Road, Tanglin",
+    "27": "Ardmore, Bukit Timah, Holland Road, Tanglin",
+    "28": "Watten Estate, Novena, Thomson",
+    "29": "Watten Estate, Novena, Thomson",
+    "30": "Watten Estate, Novena, Thomson",
+    "31": "Balestier, Toa Payoh, Serangoon",
+    "32": "Balestier, Toa Payoh, Serangoon",
+    "33": "Balestier, Toa Payoh, Serangoon",
+    "34": "Macpherson, Braddell",
+    "35": "Macpherson, Braddell",
+    "36": "Macpherson, Braddell",
+    "37": "Macpherson, Braddell",
+    "38": "Geylang, Eunos",
+    "39": "Geylang, Eunos",
+    "40": "Geylang, Eunos",
+    "41": "Geylang, Eunos",
+    "42": "Katong, Joo Chiat, Amber Road",
+    "43": "Katong, Joo Chiat, Amber Road",
+    "44": "Katong, Joo Chiat, Amber Road",
+    "45": "Katong, Joo Chiat, Amber Road",
+    "46": "Bedok, Upper East Coast, Eastwood, Kew Drive",
+    "47": "Bedok, Upper East Coast, Eastwood, Kew Drive",
+    "48": "Bedok, Upper East Coast, Eastwood, Kew Drive",
+    "49": "Loyang, Changi",
+    "50": "Loyang, Changi",
+    "51": "Tampines, Pasir Ris",
+    "52": "Tampines, Pasir Ris",
+    "53": "Serangoon Garden, Hougang, Sengkang, Punggol",
+    "54": "Serangoon Garden, Hougang, Sengkang, Punggol",
+    "55": "Serangoon Garden, Hougang, Sengkang, Punggol",
+    "56": "Bishan, Ang Mo Kio",
+    "57": "Bishan, Ang Mo Kio",
+    "58": "Upper Bukit Timah, Clementi Park, Ulu Pandan",
+    "59": "Upper Bukit Timah, Clementi Park, Ulu Pandan",
+    "60": "Jurong",
+    "61": "Jurong",
+    "62": "Jurong",
+    "63": "Jurong",
+    "64": "Jurong",
+    "65": "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang",
+    "66": "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang",
+    "67": "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang",
+    "68": "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang",
+    "69": "Lim Chu Kang, Tengah",
+    "70": "Lim Chu Kang, Tengah",
+    "71": "Lim Chu Kang, Tengah",
+    "72": "Kranji, Woodgrove, Woodlands",
+    "73": "Kranji, Woodgrove, Woodlands",
+    "75": "Yishun, Sembawang",
+    "76": "Yishun, Sembawang",
+    "77": "Upper Thomson, Springleaf",
+    "78": "Upper Thomson, Springleaf",
+    "79": "Seletar",
+    "80": "Seletar",
+    "81": "Loyang, Changi",
+    "82": "Serangoon Garden, Hougang, Sengkang, Punggol"
+  },
+  "districts": [
+    {
+      "district": 1,
+      "area": "Raffles Place, Marina, Cecil, People's Park",
+      "prefixes": [
+        "01",
+        "02",
+        "03",
+        "04",
+        "05",
+        "06"
+      ],
+      "lat": 1.2845,
+      "lon": 103.851
+    },
+    {
+      "district": 2,
+      "area": "Anson, Tanjong Pagar",
+      "prefixes": [
+        "07",
+        "08"
+      ],
+      "lat": 1.276,
+      "lon": 103.844
+    },
+    {
+      "district": 3,
+      "area": "Queenstown, Tiong Bahru",
+      "prefixes": [
+        "14",
+        "15",
+        "16"
+      ],
+      "lat": 1.29,
+      "lon": 103.816
+    },
+    {
+      "district": 4,
+      "area": "Telok Blangah, Harbourfront",
+      "prefixes": [
+        "09",
+        "10"
+      ],
+      "lat": 1.268,
+      "lon": 103.816
+    },
+    {
+      "district": 5,
+      "area": "Pasir Panjang, Hong Leong Garden, Clementi New Town",
+      "prefixes": [
+        "11",
+        "12",
+        "13"
+      ],
+      "lat": 1.296,
+      "lon": 103.78
+    },
+    {
+      "district": 6,
+      "area": "High Street, Beach Road (part)",
+      "prefixes": [
+        "17"
+      ],
+      "lat": 1.29,
+      "lon": 103.852
+    },
+    {
+      "district": 7,
+      "area": "Middle Road, Golden Mile",
+      "prefixes": [
+        "18",
+        "19"
+      ],
+      "lat": 1.299,
+      "lon": 103.859
+    },
+    {
+      "district": 8,
+      "area": "Little India",
+      "prefixes": [
+        "20",
+        "21"
+      ],
+      "lat": 1.308,
+      "lon": 103.852
+    },
+    {
+      "district": 9,
+      "area": "Orchard, Cairnhill, River Valley",
+      "prefixes": [
+        "22",
+        "23"
+      ],
+      "lat": 1.303,
+      "lon": 103.834
+    },
+    {
+      "district": 10,
+      "area": "Ardmore, Bukit Timah, Holland Road, Tanglin",
+      "prefixes": [
+        "24",
+        "25",
+        "26",
+        "27"
+      ],
+      "lat": 1.32,
+      "lon": 103.808
+    },
+    {
+      "district": 11,
+      "area": "Watten Estate, Novena, Thomson",
+      "prefixes": [
+        "28",
+        "29",
+        "30"
+      ],
+      "lat": 1.326,
+      "lon": 103.842
+    },
+    {
+      "district": 12,
+      "area": "Balestier, Toa Payoh, Serangoon",
+      "prefixes": [
+        "31",
+        "32",
+        "33"
+      ],
+      "lat": 1.332,
+      "lon": 103.857
+    },
+    {
+      "district": 13,
+      "area": "Macpherson, Braddell",
+      "prefixes": [
+        "34",
+        "35",
+        "36",
+        "37"
+      ],
+      "lat": 1.339,
+      "lon": 103.872
+    },
+    {
+      "district": 14,
+      "area": "Geylang, Eunos",
+      "prefixes": [
+        "38",
+        "39",
+        "40",
+        "41"
+      ],
+      "lat": 1.318,
+      "lon": 103.889
+    },
+    {
+      "district": 15,
+      "area": "Katong, Joo Chiat, Amber Road",
+      "prefixes": [
+        "42",
+        "43",
+        "44",
+        "45"
+      ],
+      "lat": 1.302,
+      "lon": 103.902
+    },
+    {
+      "district": 16,
+      "area": "Bedok, Upper East Coast, Eastwood, Kew Drive",
+      "prefixes": [
+        "46",
+        "47",
+        "48"
+      ],
+      "lat": 1.324,
+      "lon": 103.93
+    },
+    {
+      "district": 17,
+      "area": "Loyang, Changi",
+      "prefixes": [
+        "49",
+        "50",
+        "81"
+      ],
+      "lat": 1.35,
+      "lon": 103.97
+    },
+    {
+      "district": 18,
+      "area": "Tampines, Pasir Ris",
+      "prefixes": [
+        "51",
+        "52"
+      ],
+      "lat": 1.354,
+      "lon": 103.944
+    },
+    {
+      "district": 19,
+      "area": "Serangoon Garden, Hougang, Sengkang, Punggol",
+      "prefixes": [
+        "53",
+        "54",
+        "55",
+        "82"
+      ],
+      "lat": 1.372,
+      "lon": 103.893
+    },
+    {
+      "district": 20,
+      "area": "Bishan, Ang Mo Kio",
+      "prefixes": [
+        "56",
+        "57"
+      ],
+      "lat": 1.36,
+      "lon": 103.848
+    },
+    {
+      "district": 21,
+      "area": "Upper Bukit Timah, Clementi Park, Ulu Pandan",
+      "prefixes": [
+        "58",
+        "59"
+      ],
+      "lat": 1.335,
+      "lon": 103.777
+    },
+    {
+      "district": 22,
+      "area": "Jurong",
+      "prefixes": [
+        "60",
+        "61",
+        "62",
+        "63",
+        "64"
+      ],
+      "lat": 1.333,
+      "lon": 103.718
+    },
+    {
+      "district": 23,
+      "area": "Hillview, Dairy Farm, Bukit Panjang, Choa Chu Kang",
+      "prefixes": [
+        "65",
+        "66",
+        "67",
+        "68"
+      ],
+      "lat": 1.373,
+      "lon": 103.762
+    },
+    {
+      "district": 24,
+      "area": "Lim Chu Kang, Tengah",
+      "prefixes": [
+        "69",
+        "70",
+        "71"
+      ],
+      "lat": 1.39,
+      "lon": 103.71
+    },
+    {
+      "district": 25,
+      "area": "Kranji, Woodgrove, Woodlands",
+      "prefixes": [
+        "72",
+        "73"
+      ],
+      "lat": 1.436,
+      "lon": 103.786
+    },
+    {
+      "district": 26,
+      "area": "Upper Thomson, Springleaf",
+      "prefixes": [
+        "77",
+        "78"
+      ],
+      "lat": 1.396,
+      "lon": 103.823
+    },
+    {
+      "district": 27,
+      "area": "Yishun, Sembawang",
+      "prefixes": [
+        "75",
+        "76"
+      ],
+      "lat": 1.43,
+      "lon": 103.834
+    },
+    {
+      "district": 28,
+      "area": "Seletar",
+      "prefixes": [
+        "79",
+        "80"
+      ],
+      "lat": 1.402,
+      "lon": 103.87
+    }
+  ]
+}

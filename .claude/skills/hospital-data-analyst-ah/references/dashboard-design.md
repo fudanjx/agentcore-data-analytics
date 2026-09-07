@@ -78,6 +78,10 @@ The dashboard should communicate in this order:
 
 **What is happening → how it is changing → why it matters → what the limitations are.**
 
+For a geographic dashboard, an interactive Leaflet/OpenStreetMap map is a mandatory
+component and sits in a wide card directly below the KPI row — see
+`references/geo-map.md` for the map and postal-mapping contract.
+
 ---
 
 # 3. Header
