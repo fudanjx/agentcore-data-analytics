@@ -1,6 +1,7 @@
 """Amazon Bedrock AgentCore entry point for the Strands data analyst."""
 
-import logging
+import logging # noqa: I001
+import os
 from contextlib import asynccontextmanager
 
 from bedrock_agentcore import BedrockAgentCoreApp
@@ -20,7 +21,7 @@ async def lifespan(_app):
     yield
 
 
-app = BedrockAgentCoreApp(lifespan=lifespan)
+app = BedrockAgentCoreApp(lifespan=lifespan, debug=bool(os.getenv("ENV", "HCC") == "local"))
 
 
 @app.entrypoint

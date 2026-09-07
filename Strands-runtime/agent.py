@@ -1,6 +1,6 @@
 """Strands data analyst with Gateway, Memory, skills, and Code Interpreter."""
 
-import asyncio
+import asyncio # noqa: I001
 import json
 import logging
 import os
@@ -11,16 +11,18 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+from botocore.config import Config as BotocoreConfig
+from strands import Agent, AgentSkills
+from strands.handlers.callback_handler import null_callback_handler
+from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
+from strands.tools.mcp import MCPClient
+
 import code_interpreter
 import gateway_proxy
 import memory
 import skills_sync
 import system_prompt
-from strands import Agent, AgentSkills
-from strands.handlers.callback_handler import null_callback_handler
-from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
-from strands.tools.mcp import MCPClient
-from botocore.config import Config as BotocoreConfig
+from hooks import DataToolsPermissionGate
 
 logger = logging.getLogger(__name__)
 
@@ -298,20 +300,18 @@ def _log_model_usage(
     return payload
 
 
-def _make_gateway_clients(user_gateway_permissions: list[str]) -> list[MCPClient]:
+def _make_gateway_clients() -> list[MCPClient]:
     if not ENABLE_GATEWAYS:
         return []
-    ACTIVATE_ALL_PERMS = "all" in user_gateway_permissions
     clients = []
     for slug, gateway in gateway_proxy.GATEWAY_CONFIGS.items():
-        if ACTIVATE_ALL_PERMS or (slug.lower() in user_gateway_permissions):
-            clients.append(
-                MCPClient(
-                    lambda target=gateway: gateway_proxy.mcp_transport(target),
-                    startup_timeout=30,
-                    prefix=slug,
-                )
+        clients.append(
+            MCPClient(
+                lambda target=gateway: gateway_proxy.mcp_transport(target),
+                startup_timeout=30,
+                prefix=slug,
             )
+        )
     return clients
 
 
@@ -364,7 +364,8 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         plugins: list = []
         if skills_enabled:
             tools.append(skills_sync.read_skill_resource)
-            plugins.append(AgentSkills(skills=skills_sync.LOCAL_DIR))
+            logger.info(f'Loaded skills:{[skills_sync.get_skill_path_by_name(skill_name) for skill_name in request.user_gateway_permissions]}')
+            plugins.append(AgentSkills(skills=[skills_sync.get_skill_path_by_name(skill_name) for skill_name in request.user_gateway_permissions]))
         if interpreter_enabled:
             interpreter_session = code_interpreter.start_session(request.session_id)
             tools.extend(
@@ -375,7 +376,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                     ),
                 )
             )
-        tools.extend(_make_gateway_clients(user_gateway_permissions=request.user_gateway_permissions))
+        tools.extend(_make_gateway_clients())
 
         model = BedrockModel(
             model_id=MODEL_ID,
@@ -402,12 +403,15 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
             callback_handler=null_callback_handler,
             name=AGENT_NAME,
             description=AGENT_DESCRIPTION,
+            hooks=[DataToolsPermissionGate()]
         )
+        invocation_state: dict[str, Any] = {"user_gateway_permissions": request.user_gateway_permissions}
         return (
             runtime_agent,
             interpreter_session,
             memory_session_manager,
             prompt,
+            invocation_state
         )
     except BaseException:
         if interpreter_session:
@@ -461,11 +465,11 @@ def run(request: InvocationRequest) -> dict:
     response = None
     usage_payload = None
     try:
-        runtime_agent, interpreter_session, memory_session_manager, prompt = _prepare(request)
-        result = runtime_agent(prompt)
+        runtime_agent, interpreter_session, memory_session_manager, prompt, invocation_state = _prepare(request)
+        result = runtime_agent(prompt, invocation_state=invocation_state)
         text = _result_text(result)
         succeeded = True
-        response = {
+        response: dict[str, Any] | None = {
             "result": text,
             "session_id": request.session_id,
             "model": request.model_slug,
@@ -623,7 +627,7 @@ async def _events_with_heartbeats(events: AsyncIterator[dict]) -> AsyncIterator[
                 await queue.put(("event", event))
         except asyncio.CancelledError:
             raise
-        except Exception as error:
+        except Exception as error: # noqa: BLE001
             await queue.put(("error", error))
         else:
             await queue.put(("done", None))
@@ -704,11 +708,11 @@ async def stream(request: InvocationRequest) -> AsyncIterator[dict]:
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
     created = int(time.time())
     try:
-        runtime_agent, interpreter_session, memory_session_manager, prompt = await asyncio.to_thread(
+        runtime_agent, interpreter_session, memory_session_manager, prompt, invocation_state = await asyncio.to_thread(
             _prepare, request
         )
         async for event in _events_with_heartbeats(
-            runtime_agent.stream_async(prompt)
+            runtime_agent.stream_async(prompt, invocation_state=invocation_state)
         ):
             if event.get("event") == "heartbeat":
                 yield event

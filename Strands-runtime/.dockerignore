@@ -1,0 +1,10 @@
+.env
+tests/
+.bundle-build
+_yaml
+.gitignore
+.git/
+.git
+README.md
+test-result.txt
+USER_GUIDE.md

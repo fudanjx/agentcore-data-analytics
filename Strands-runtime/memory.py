@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+from typing import Literal, cast
 
 import boto3
 from bedrock_agentcore.memory.integrations.strands.bedrock_converter import (
@@ -82,6 +83,7 @@ class _ConversationMemoryConverter(AgentCoreMemoryConverter):
                 if role not in {"user", "assistant"} or not isinstance(text, str):
                     continue
                 if text.strip():
+                    role = cast(Literal["assistant", "user"], role)
                     messages.append(
                         SessionMessage.from_message(
                             {"role": role, "content": [{"text": text}]},

@@ -32,6 +32,7 @@ $runtimeFiles = @(
     "code_interpreter_result.py",
     "gateway_config.py",
     "gateway_proxy.py",
+    "hooks.py",
     "main.py",
     "memory.py",
     "requirements.txt",
