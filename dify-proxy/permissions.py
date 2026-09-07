@@ -10,7 +10,7 @@ async def get_gateway_permissions_by_user_id(
 ) -> Iterable[str]:
     user_email = await _get_email_by_user_id(dify_conn, user_id)
     
-    if _is_admin(nuhs_conn, user_email):
+    if await _is_admin(nuhs_conn, user_email):
         permissions = ["all"]
     else:
         permissions = await _get_permissions_by_email(nuhs_conn, user_email)
