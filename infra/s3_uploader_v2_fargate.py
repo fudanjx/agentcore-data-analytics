@@ -34,6 +34,7 @@ def render_template() -> dict[str, Any]:
                 "Properties": {
                     "VersioningConfiguration": {"Status": "Enabled"},
                     "BucketEncryption": {"ServerSideEncryptionConfiguration": [{"ServerSideEncryptionByDefault": {"SSEAlgorithm": "aws:kms"}}]},
+                    "CorsConfiguration": {"CorsRules": [{"AllowedOrigins": ["https://s3-uploader-v2.bot-alex.com"], "AllowedMethods": ["PUT"], "AllowedHeaders": ["*"], "ExposedHeaders": ["ETag"], "MaxAge": 900}]},
                     "PublicAccessBlockConfiguration": {"BlockPublicAcls": True, "IgnorePublicAcls": True, "BlockPublicPolicy": True, "RestrictPublicBuckets": True},
                     "LifecycleConfiguration": {"Rules": [
                         {"Id": "expire-raw", "Status": "Enabled", "Prefix": "s3-uploader-v2/uploads/", "ExpirationInDays": 1},

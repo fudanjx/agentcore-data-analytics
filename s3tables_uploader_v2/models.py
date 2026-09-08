@@ -22,7 +22,7 @@ class UploadSession(BaseModel):
     content_type: str = Field(min_length=1, max_length=255)
     source_key: str
     multipart_upload_id: str
-    expected_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
@@ -35,7 +35,7 @@ class JobRequest(BaseModel):
     destination: Destination
     source_key: str = Field(min_length=1)
     source_version_id: str = Field(min_length=1)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_size_bytes: int = Field(gt=0)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 

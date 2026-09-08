@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from pathlib import Path
 from typing import Any, Literal
 
 import boto3
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
@@ -24,7 +25,7 @@ class LoginRequest(BaseModel):
 class CreateSessionRequest(BaseModel):
     file_name: str = Field(min_length=1, max_length=512)
     content_type: str = Field(min_length=1, max_length=255)
-    source_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
 
 
 class CompleteSessionRequest(BaseModel):
@@ -42,6 +43,7 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     sqs = sqs_client or boto3.client("sqs", region_name=settings.region)
     store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
     app = FastAPI(title="S3 Uploader v2", docs_url=None, redoc_url=None)
+    static_root = Path(__file__).parent / "static"
 
     def current_user(request: Request) -> str:
         return require_user(request, settings)
@@ -50,11 +52,13 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/", response_class=HTMLResponse)
-    def landing() -> str:
-        return """<!doctype html><html><head><title>S3 Uploader v2</title></head>
-<body><h1>S3 Uploader v2</h1><p>Service is ready.</p>
-<p>The upload UI will be integrated here; the authenticated API is available under <code>/api/v2</code>.</p></body></html>"""
+    @app.get("/")
+    def landing() -> FileResponse:
+        return FileResponse(static_root / "index.html", headers={"Cache-Control": "no-store"})
+
+    @app.get("/static/{asset}")
+    def static_asset(asset: Literal["app.js", "style.css"]) -> FileResponse:
+        return FileResponse(static_root / asset, headers={"Cache-Control": "no-store"})
 
     @app.post("/login")
     def login(payload: LoginRequest, response: Response) -> dict[str, bool]:
@@ -85,7 +89,7 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             Key=key,
             ContentType=payload.content_type,
             ServerSideEncryption="aws:kms",
-            Metadata={"session-id": session_id, "owner-user-id": user_id, "sha256": payload.source_sha256},
+            Metadata={"session-id": session_id, "owner-user-id": user_id, **({"sha256": payload.source_sha256} if payload.source_sha256 else {})},
         )
         session = UploadSession(
             session_id=session_id,
@@ -130,7 +134,7 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             MultipartUpload={"Parts": payload.parts},
         )
         source = s3.head_object(Bucket=settings.landing_bucket, Key=session.source_key)
-        if S3JobStore.object_sha256(source) != session.expected_sha256:
+        if session.expected_sha256 and S3JobStore.object_sha256(source) != session.expected_sha256:
             raise HTTPException(409, "UPLOAD_CHECKSUM_MISMATCH")
         version_id = source.get("VersionId")
         if not version_id:
