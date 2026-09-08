@@ -9,7 +9,7 @@ from typing import Any, Literal
 
 import boto3
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel, Field
 
 from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
@@ -48,6 +48,18 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     def current_user(request: Request) -> str:
         return require_user(request, settings)
 
+    @app.middleware("http")
+    async def browser_login_gate(request: Request, call_next: Any) -> Response:
+        if request.url.path in {"/login", "/healthz"}:
+            return await call_next(request)
+        try:
+            require_user(request, settings)
+        except HTTPException:
+            if request.url.path.startswith("/api/"):
+                return JSONResponse(status_code=401, content={"code": "LOGIN_REQUIRED", "detail": "Log in before using the uploader API."})
+            return RedirectResponse(url="/login", status_code=303)
+        return await call_next(request)
+
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
@@ -60,10 +72,19 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     def static_asset(asset: Literal["app.js", "style.css"]) -> FileResponse:
         return FileResponse(static_root / asset, headers={"Cache-Control": "no-store"})
 
+    @app.get("/login")
+    def login_form() -> HTMLResponse:
+        return HTMLResponse("<!doctype html><title>S3 Uploader v2 login</title><form method='post'><label>Password <input name='password' type='password' autofocus></label><button>Sign in</button></form>")
+
     @app.post("/login")
-    def login(payload: LoginRequest, response: Response) -> dict[str, bool]:
+    async def login(request: Request) -> Response:
+        is_json = request.headers.get("content-type", "").startswith("application/json")
+        payload = LoginRequest.model_validate(await request.json()) if is_json else LoginRequest(password=str((await request.form()).get("password", "")))
         if not valid_password(payload.password, settings):
-            raise HTTPException(401, "LOGIN_FAILED")
+            if is_json:
+                raise HTTPException(401, "LOGIN_FAILED")
+            return HTMLResponse("<!doctype html><p>Invalid password.</p><a href='/login'>Try again</a>", status_code=401)
+        response: Response = JSONResponse({"authenticated": True}) if is_json else RedirectResponse(url="/", status_code=303)
         response.set_cookie(
             COOKIE_NAME,
             login_cookie(settings),
@@ -73,12 +94,13 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             max_age=settings.session_ttl_seconds,
             path="/",
         )
-        return {"authenticated": True}
+        return response
 
     @app.post("/logout")
-    def logout(response: Response) -> dict[str, bool]:
+    def logout(request: Request, response: Response) -> Response:
+        response = JSONResponse({"authenticated": False}) if request.headers.get("accept", "").startswith("application/json") else RedirectResponse(url="/login", status_code=303)
         response.delete_cookie(COOKIE_NAME, path="/")
-        return {"authenticated": False}
+        return response
 
     @app.post("/api/v2/upload-sessions", status_code=201)
     def create_session(payload: CreateSessionRequest, user_id: str = Depends(current_user)) -> dict[str, str]:
