@@ -1,6 +1,6 @@
 ---
 name: hospital-data-analyst-nuh
-description: Analyze National University Hospital (NUH) operational data in the nuh-analytics database. Use ONLY when the user explicitly mentions "NUH" or "National University Hospital". Covers ED/EMD attendance, PACS, inpatient admissions/discharges/patient days/ALOS, SOC visits, surgery, and departmental/subspecialty workload. Always load the relevant table reference before writing SQL.
+description: Analyze National University Hospital (NUH) operational and patient-demographic data in the nuh-analytics database. Use ONLY when the user explicitly mentions "NUH" or "National University Hospital". Covers ED/EMD attendance, PACS, inpatient admissions/discharges/patient days/ALOS, SOC visits, surgery, patient gender and unique-patient counts, and departmental/subspecialty workload. Always load the relevant table reference before writing SQL.
 ---
 
 # NUH Analytics
@@ -20,7 +20,9 @@ Before using the `nuh` data tool, inspecting candidate columns, or writing SQL:
 2. Read the corresponding reference file for filters, classifications, and SQL patterns.
 3. If the request involves department, OU, cluster, subspecialty, or MOH specialty: also read `references/subspec-mapping.md`.
 4. If the request involves a chart, visualization, or dashboard: also read `references/dashboard.md`.
-5. For combined requests, load all applicable references before writing any SQL.
+5. If the request involves patient demographics or unique patients: load every
+   table reference used in the requested population.
+6. For combined requests, load all applicable references before writing any SQL.
 
 Apply reference-defined logic exactly. Never substitute a convenient source column for a documented classification, mapping, date rule, or distinct key.
 For mapped reporting, use the table-specific OU field contract in
@@ -41,6 +43,7 @@ query using the applicable reference rules.
 | Surgery, day surgery, normal delivery, inpatient surgery, or emergency/elective procedures | `surgery` | `SVISITDATE` | references/surgery.md |
 | Department, cluster, MOH specialty, or subspecialty report | Relevant table + subspec mapping | — | references/subspec-mapping.md |
 | Chart, visualization, or dashboard | Relevant table references | — | references/dashboard.md |
+| Patient demographics or unique patients | Every table defining the requested population | Each table's primary date | Relevant table references |
 
 ## Composite reference requirements
 
@@ -51,6 +54,7 @@ query using the applicable reference rules.
 | SOC First/New vs Repeat visits | `soc.md` |
 | Inpatient discharges by Elective/Emergency | `inpatient-movement.md` |
 | Any chart, visualization, or dashboard | Responsible table references + `dashboard.md` |
+| Multi-service patient demographics or unique patients | All responsible table references |
 
 ## Coverage and source-era limits
 
@@ -72,6 +76,29 @@ query using the applicable reference rules.
 - Generate annual totals and displayed subtotals programmatically from the same grouped result. A yearly total must equal the sum of its monthly values.
 - Never manually reconstruct SQL result rows. Use fresh SQL output for reconciliation; re-query when discrepancies arise.
 - State the table, date field, filters, classification, distinct key (when applicable), and QC status with every result.
+
+## Patient-demographic and unique-patient contract
+
+Apply each table reference's gender and unique-patient rules to every output
+format, including tables, summaries, charts, dashboards, and exported datasets.
+Do not treat them as dashboard-only rules.
+
+Use `HRN` in RDS and `hrn` in S3 as the patient identifier. Within one table,
+count unique patients as:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use the exact quoted lowercase field `"hrn"` for S3. Workload remains governed
+by the table's row or episode-counting rule; never substitute a distinct-HRN
+count for workload. Label workload and unique-patient measures explicitly.
+
+For a combined EMD, SOC, inpatient, or surgery patient population, select the
+normalized nonblank HRN from each requested table with `UNION`, then count the
+union rows. Do not add table-level distinct-patient counts because the same
+patient can occur in multiple services. Never display, export, or include
+individual HRN values in QC output.
 
 ## Fail-closed reporting gate
 

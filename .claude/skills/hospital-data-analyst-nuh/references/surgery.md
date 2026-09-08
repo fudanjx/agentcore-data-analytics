@@ -129,6 +129,40 @@ SQL output to reconcile them.
   Do not assume their meaning or use them as substitutes without an explicitly
   documented rule.
 
+## Patient gender and unique patients
+
+Apply these rules to every Surgery output format. For CY2023, use `SEX`: map
+`1` to `Male` and `2` to `Female`. From CY2024 onward, use `GENDER_DESC`: map
+`Male` and `Female` to the matching output. Map null, blank, `Unknown`, and
+every unexpected value to `Others`.
+
+```sql
+CASE
+  WHEN "SVISITDATE" < DATE '2024-01-01'
+   AND TRIM(CAST("SEX" AS VARCHAR)) = '1' THEN 'Male'
+  WHEN "SVISITDATE" < DATE '2024-01-01'
+   AND TRIM(CAST("SEX" AS VARCHAR)) = '2' THEN 'Female'
+  WHEN "SVISITDATE" >= DATE '2024-01-01'
+   AND UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'MALE' THEN 'Male'
+  WHEN "SVISITDATE" >= DATE '2024-01-01'
+   AND UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'FEMALE' THEN 'Female'
+  ELSE 'Others'
+END AS gender_group
+```
+
+For S3 use the quoted lowercase fields `"svisitdate"`, `"sex"`, and
+`"gender_desc"`. Require `Male + Female + Others = procedure total` at every
+reported grain.
+
+Use `HRN` in RDS and `hrn` in S3 for a distinct Surgery patient count:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use `"hrn"` for S3. Keep unique-patient counts separate from procedure counts,
+and do not display individual HRNs.
+
 ## Locked annual benchmarks
 
 | Period | Day surgery | Normal delivery | Inpatient surgery | Total | Emergency |

@@ -72,6 +72,31 @@ Inspect distinct values and nulls, and verify the resulting groups sum to the
 base-filtered ED attendance. Do not carry forward an undocumented raw
 `ARRIVAL_MODE` code normalisation from older instructions.
 
+## Patient gender and unique patients
+
+Apply these rules to every EMD output format. Use `SEX` in RDS and `sex` in S3:
+
+```sql
+CASE
+  WHEN UPPER(TRIM(CAST("SEX" AS VARCHAR))) = 'M' THEN 'Male'
+  WHEN UPPER(TRIM(CAST("SEX" AS VARCHAR))) = 'F' THEN 'Female'
+  ELSE 'Others'
+END AS gender_group
+```
+
+Map `U`, null, blank, and every unexpected value to `Others`. Require
+`Male + Female + Others = source attendance` at every reported grain.
+
+Use `HRN` in RDS and `hrn` in S3 for a distinct EMD patient count:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use the exact quoted lowercase fields `"sex"` and `"hrn"` for S3. Keep the
+distinct-patient measure separate from row-counted attendance and admissions.
+Do not display individual HRNs.
+
 ## Example: monthly PACS attendance
 
 ```sql

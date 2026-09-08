@@ -177,6 +177,38 @@ SUM(CASE WHEN "DDATE"::date - "ADATE"::date = 0 THEN 1
 
 It includes episodes admitted in earlier months; inspect the row grain first.
 
+## Patient gender and unique patients
+
+Apply these rules to every inpatient output format. The source transitioned
+from `SEX` to `GENDER_DESC`; classify each eligible row with this fallback so a
+range spanning the transition remains complete:
+
+```sql
+CASE
+  WHEN UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'MALE' THEN 'Male'
+  WHEN UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'FEMALE' THEN 'Female'
+  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '1' THEN 'Male'
+  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '2' THEN 'Female'
+  ELSE 'Others'
+END AS gender_group
+```
+
+This uses `SEX` for CY2023-CY2024, the populated field on each row during the
+CY2025 transition, and `GENDER_DESC` from H1 2026 onward. Map null, blank,
+unknown, and every unexpected value to `Others`. For S3 use the quoted lowercase
+fields `"gender_desc"` and `"sex"`. Require
+`Male + Female + Others = the corresponding inpatient measure` at every
+reported grain.
+
+Use `HRN` in RDS and `hrn` in S3 for a distinct inpatient patient count:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use `"hrn"` for S3. Do not substitute HRN for the era-specific episode key used
+to count admissions or discharges, and do not display individual HRNs.
+
 ## OU grouping and reconciliation
 
 For department, cluster, MOH-specialty, or subspecialty reporting, read
