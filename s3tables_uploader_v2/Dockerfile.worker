@@ -1,0 +1,10 @@
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+COPY s3tables_uploader_v2/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt \
+    && useradd --create-home --uid 1000 appuser
+COPY s3tables_uploader_v2 ./s3tables_uploader_v2
+USER appuser
+CMD ["python", "-m", "s3tables_uploader_v2.worker"]

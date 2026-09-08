@@ -22,7 +22,7 @@ class FakeSqs:
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET":"landing", "S3_UPLOADER_V2_QUEUE_URL":"queue", "S3_UPLOADER_V2_LOGIN_PASSWORD":"password", "S3_UPLOADER_V2_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_V2_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_ENV":"development", "S3_UPLOADER_V2_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET":"landing", "S3_UPLOADER_V2_QUEUE_URL":"queue", "S3_UPLOADER_V2_LOGIN_PASSWORD":"password", "S3_UPLOADER_V2_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_V2_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_GLUE_JOB_NAME":"s3-uploader-v2-ingest", "S3_UPLOADER_V2_ENV":"development", "S3_UPLOADER_V2_COOKIE_SECURE":"false"}
         self.s3 = FakeS3(); self.client = TestClient(create_app(Settings.from_environ(env), self.s3, FakeSqs()))
 
     def test_login_protects_session_creation_and_keeps_upload_off_api(self):

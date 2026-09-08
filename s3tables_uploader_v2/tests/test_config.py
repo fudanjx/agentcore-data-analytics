@@ -8,7 +8,7 @@ class SettingsTests(unittest.TestCase):
         return {
             "AWS_REGION": "ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET": "private-landing",
             "S3_UPLOADER_V2_QUEUE_URL": "https://sqs.example/123/jobs", "S3_UPLOADER_V2_LOGIN_PASSWORD": "password",
-            "S3_UPLOADER_V2_LOGIN_SECRET": "x" * 32, "S3_UPLOADER_V2_API_BASE_URL": "https://s3-uploader-v2.bot-alex.com",
+            "S3_UPLOADER_V2_LOGIN_SECRET": "x" * 32, "S3_UPLOADER_V2_API_BASE_URL": "https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_GLUE_JOB_NAME": "s3-uploader-v2-ingest",
         }
 
     def test_requires_deployment_resource_ids_and_secrets(self):

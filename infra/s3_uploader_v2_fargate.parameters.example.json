@@ -1,0 +1,16 @@
+{
+  "ClusterArn": "arn:aws:ecs:ap-southeast-1:964340114883:cluster/REPLACE_ME",
+  "VpcId": "vpc-REPLACE_ME",
+  "PrivateSubnets": "subnet-REPLACE_ME,subnet-REPLACE_ME",
+  "AlbListenerArn": "arn:aws:elasticloadbalancing:ap-southeast-1:964340114883:listener/app/REPLACE_ME",
+  "AlbDnsName": "REPLACE_ME.elb.ap-southeast-1.amazonaws.com",
+  "AlbCanonicalHostedZoneId": "REPLACE_ME",
+  "HostedZoneId": "Z069491219YFUFHMLLV7E",
+  "CertificateArn": "arn:aws:acm:ap-southeast-1:964340114883:certificate/REPLACE_ME",
+  "ApiImageUri": "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/s3-uploader-v2-api:REPLACE_ME",
+  "WorkerImageUri": "964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/s3-uploader-v2-worker:REPLACE_ME",
+  "LoginPasswordSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
+  "LoginSigningSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
+  "EncryptionSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
+  "ExistingAlbSecurityGroupId": "sg-REPLACE_ME"
+}

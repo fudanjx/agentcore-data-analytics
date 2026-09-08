@@ -142,7 +142,10 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         )
         store.put_request(job)
         store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload completed; waiting for processing."))
-        sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId="s3-uploader-v2")
+        group = hashlib.sha256(
+            f"{job.destination.table_bucket_arn}\x1f{job.destination.namespace}\x1f{job.destination.table}".encode("utf-8")
+        ).hexdigest()
+        sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId=group)
         return {"job_id": job_id, "phase": "QUEUED"}
 
     @app.get("/api/v2/jobs/{job_id}")

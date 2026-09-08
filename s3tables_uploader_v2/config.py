@@ -40,6 +40,7 @@ class Settings:
     session_ttl_seconds: int
     raw_retention_days: int
     api_base_url: str
+    glue_job_name: str
 
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> "Settings":
@@ -65,4 +66,23 @@ class Settings:
             session_ttl_seconds=int(env.get("S3_UPLOADER_V2_SESSION_TTL_SECONDS", "43200")),
             raw_retention_days=raw_retention_days,
             api_base_url=_required("S3_UPLOADER_V2_API_BASE_URL", env).rstrip("/"),
+            glue_job_name=_required("S3_UPLOADER_V2_GLUE_JOB_NAME", env),
+        )
+
+
+@dataclass(frozen=True)
+class WorkerSettings:
+    region: str
+    landing_bucket: str
+    landing_prefix: str
+    glue_job_name: str
+
+    @classmethod
+    def from_environ(cls, environ: dict[str, str] | None = None) -> "WorkerSettings":
+        env = dict(os.environ if environ is None else environ)
+        return cls(
+            region=_required("AWS_REGION", env),
+            landing_bucket=_required("S3_UPLOADER_V2_LANDING_BUCKET", env),
+            landing_prefix=env.get("S3_UPLOADER_V2_LANDING_PREFIX", "s3-uploader-v2").strip("/"),
+            glue_job_name=_required("S3_UPLOADER_V2_GLUE_JOB_NAME", env),
         )
