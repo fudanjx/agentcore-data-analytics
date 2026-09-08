@@ -1,0 +1,5 @@
+boto3>=1.40.67
+fastapi>=0.110.0
+pydantic>=2.6.0
+python-multipart>=0.0.9
+uvicorn>=0.29.0
