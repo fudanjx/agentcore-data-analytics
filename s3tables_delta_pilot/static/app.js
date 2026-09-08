@@ -1,6 +1,6 @@
 const SESSION_STORAGE_KEY = 's3tables-uploader-v2-session-id';
 const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED'];
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastRequestId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null };
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, temporalPolicyAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastHttpRequestId: null, currentOperationId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
@@ -33,7 +33,7 @@ function clearSessionPoll() {
   state.sessionPollResolve = null;
 }
 function clearGluePoll() { if (state.gluePollTimer) { clearTimeout(state.gluePollTimer); state.gluePollTimer = null; } state.activeJobRunId = null; }
-function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
+function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; state.temporalPolicyAcknowledged = false; state.currentOperationId = null; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
 function identityRequestPayload() {
   return {
     headers: { 'X-Pilot-User-Id': state.emulatedUserId },
@@ -45,9 +45,10 @@ async function apiFetch(url, options = {}) {
   const headers = new Headers(options.headers || {});
   if (state.emulatedUserId) headers.set('X-Pilot-User-Id', state.emulatedUserId);
   const response = await fetch(url, { credentials: 'same-origin', ...options, headers });
-  state.lastRequestId = response.headers.get('X-Request-ID') || state.lastRequestId;
+  state.lastHttpRequestId = response.headers.get('X-Request-ID') || state.lastHttpRequestId;
   return response;
 }
+function requestDiagnostic() { return state.lastHttpRequestId ? ` Support request ID: ${state.lastHttpRequestId}.` : ''; }
 function updateSkillControls() {
   const hasBucket = Boolean(state.bucket);
   const hasFiles = $('skill-bundle-files').files.length > 0;
@@ -394,8 +395,11 @@ function responseDetail(result, fallback) {
 function renderSessionProgress(session) {
   const started = session.phase_started_at ? Math.max(0, Math.floor((Date.now() - new Date(session.phase_started_at).getTime()) / 1000)) : null;
   const elapsed = Number.isFinite(started) ? ` (${started}s in ${session.phase || 'current phase'})` : '';
-  const request = state.lastRequestId ? ` Request ID: ${state.lastRequestId}.` : '';
-  const message = `${session.progress_message || 'Processing upload session…'}${elapsed}${request}`;
+  const operationId = session.ingestion?.request_id || state.currentOperationId;
+  const identifier = operationId
+    ? ` Operation ID: ${operationId}.`
+    : session.session_id ? ` Session ID: ${session.session_id}.` : '';
+  const message = `${session.progress_message || 'Processing upload session…'}${elapsed}${identifier}`;
   $('activity').textContent = message;
   if (['STARTING_GLUE', 'GLUE_RUNNING'].includes(session.phase)) {
     $('outcome').hidden = false;
@@ -621,6 +625,7 @@ function toggleAllDeduplicationColumns() {
 function updateCreateUploadEligibility() {
   if (!state.review) return;
   if (keyAnalysisBusy() || (state.sessionPhase && !['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT'].includes(state.sessionPhase))) { $('upload').disabled = true; return; }
+  if (state.review.temporal_policy_adoption?.required && !state.temporalPolicyAcknowledged) { $('upload').disabled = true; return; }
   const mode = selectedDeduplicationMode();
   if (mode === 'none') {
     $('upload').disabled = !state.review.accepted;
@@ -707,7 +712,7 @@ async function analyseSelectedKey() {
     if (!response.ok) {
       const reason = responseDetail(result, 'Key-impact analysis failed.');
       $('activity').textContent = 'Key-impact analysis failed.';
-      status.className = 'operation-status failed'; status.textContent = `Key-impact analysis failed: ${reason}`;
+      status.className = 'operation-status failed'; status.textContent = `Key-impact analysis failed: ${reason}${requestDiagnostic()}`;
       return;
     }
     if (state.sessionId !== sessionId) return;
@@ -720,7 +725,7 @@ async function analyseSelectedKey() {
     }
   } catch (error) {
     $('activity').textContent = 'Key-impact analysis failed.';
-    status.className = 'operation-status failed'; status.textContent = `Unable to confirm key-analysis status: ${error.message || 'network request failed'}. Refresh the page to reconnect.`;
+    status.className = 'operation-status failed'; status.textContent = `Unable to confirm key-analysis status: ${error.message || 'network request failed'}. Refresh the page to reconnect.${requestDiagnostic()}`;
   } finally {
     if (state.sessionId === sessionId) {
       state.keyAnalysisPending = false;
@@ -733,8 +738,11 @@ async function analyseSelectedKey() {
 function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTypeOverrides = {} } = {}) {
   const holder = $('review-body'); setChildren(holder);
   const decision = document.createElement('p');
-  decision.className = result.accepted ? 'preflight-pass' : 'preflight-reject';
-  decision.textContent = result.accepted
+  const needsTemporalPolicyAcknowledgement = Boolean(result.temporal_policy_adoption?.required);
+  decision.className = needsTemporalPolicyAcknowledgement ? 'preflight-action' : result.accepted ? 'preflight-pass' : 'preflight-reject';
+  decision.textContent = needsTemporalPolicyAcknowledgement
+    ? 'Action required: confirm the stored temporal conversion policy before uploading.'
+    : result.accepted
     ? 'Accepted: the upload meets the enforced schema and sanitization rules.'
     : 'Rejected: the upload does not meet the enforced schema and sanitization rules.';
   holder.append(decision);
@@ -768,12 +776,20 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
       const impacts = escapeHtml(JSON.stringify(choice.lossy_target_types || {}));
       return `<label class="type-selection"><span><strong>${escapeHtml(choice.column)}</strong><small>Detected: ${escapeHtml(choice.source_type)}. This choice becomes the initial table contract.</small>${samples}<small id="type-impact-${escapeHtml(choice.column)}" class="type-impact" hidden></small></span><select data-type-override="${escapeHtml(choice.column)}" data-lossy-target-types="${impacts}" ${choice.locked ? 'disabled' : ''}>${options}</select></label>`;
     }).join('');
-    choices.innerHTML = `<h3>Choose ambiguous initial column types</h3><p>Automatic DATE, TIMESTAMP, BIGINT, and DOUBLE rules have already been applied where the full first file is unambiguous. Choose a type only for these remaining ambiguous columns. Up to five random, non-empty examples are shown only for this review and are not stored. Healthcare-sanitized fields remain locked as <code>STRING</code>.</p>${rows}`;
+    choices.innerHTML = `<h3>Choose ambiguous initial column types</h3><p>Automatic DATE, TIMESTAMP, BIGINT, and DOUBLE rules have already been applied where the full first file is unambiguous. Choose a type only for these remaining ambiguous columns. Select <code>STRING</code> when preserving every source value is more important than typed conversion; it is the safest choice for minimum data loss. Up to five random, non-empty examples are shown only for this review and are not stored. Healthcare-sanitized fields remain locked as <code>STRING</code>.</p>${rows}`;
     holder.append(choices);
     choices.querySelectorAll('[data-type-override]').forEach(control => {
       updateTypeChoiceImpact(control);
       control.addEventListener('change', () => { updateTypeChoiceImpact(control); invalidateKeyAnalysis(); });
     });
+  }
+  if (needsTemporalPolicyAcknowledgement) {
+    const policy = result.temporal_policy_adoption;
+    const section = document.createElement('section'); section.className = 'temporal-policy-adoption';
+    const columns = policy.columns.map(item => `<li><code>${escapeHtml(item.column)}</code> (${escapeHtml(item.target_type)}): ${Number(item.invalid_value_count).toLocaleString()} value(s) will become NULL.</li>`).join('');
+    section.innerHTML = `<h3>Confirm temporal conversion policy</h3><p>This older table was created before its approved temporal conversion policy was stored. Confirming applies the same DATE/TIMESTAMP handling to this upload and saves it for later uploads. Valid values are retained; only non-parsable populated values become NULL.</p><ul>${columns}</ul><label class="acknowledgement"><input id="acknowledge-temporal-policy" type="checkbox"> I understand these values will become NULL and want to save this immutable policy for later uploads.</label>`;
+    holder.append(section);
+    $('acknowledge-temporal-policy').onchange = () => { state.temporalPolicyAcknowledged = $('acknowledge-temporal-policy').checked; updateCreateUploadEligibility(); };
   }
   const needsFirstKey = result.mode === 'create' || !(result.deduplication_columns || []).length;
   if (selectedDeduplicationMode() === 'keyed' && needsFirstKey && result.deduplication_candidates?.length) {
@@ -822,7 +838,9 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
     const item = document.createElement('article'); item.className = `preflight-file ${file.accepted ? 'accepted' : 'rejected'}`;
     const sanitized = file.sanitized_columns?.length ? file.sanitized_columns.join(', ') : 'None';
     const reasons = file.rejection_reasons || [];
-    const fileDecision = file.accepted
+    const fileDecision = file.temporal_policy_adoption_required
+      ? 'Requires temporal-policy confirmation'
+      : file.accepted
       ? 'Accepted'
       : reasons.length
         ? `Rejected — ${reasons.join(' ')}`
@@ -836,13 +854,23 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
       </dl>
       <p><strong>Sanitized columns:</strong> ${escapeHtml(sanitized)}</p>
       <p><strong>Decision:</strong> ${escapeHtml(fileDecision)}</p>`;
-    if (file.extra_columns?.length || file.missing_columns?.length || file.type_conversions?.length || file.warnings?.length) {
+    if (file.temporal_coercions?.length) {
+      const conversions = file.temporal_coercions.map(item =>
+        `${item.column} (${Number(item.unsafe_value_count).toLocaleString()} value(s) will become NULL)`,
+      ).join(', ');
+      const temporalNotice = document.createElement('p');
+      temporalNotice.className = 'hint';
+      temporalNotice.innerHTML = `<strong>Approved temporal conversions:</strong> ${escapeHtml(conversions)}.`;
+      item.append(temporalNotice);
+    }
+    if (file.extra_columns?.length || file.missing_columns?.length || file.type_conversions?.length || file.temporal_coercions?.length || file.warnings?.length) {
       const details = document.createElement('details');
       details.innerHTML = `<summary>Technical schema details</summary><pre>${escapeHtml(JSON.stringify({
         extra_columns_ignored: file.extra_columns,
         missing_target_columns_filled_null: file.missing_columns,
         type_conversions: file.type_conversions,
         unsafe_casts: file.unsafe_casts,
+        temporal_coercions_to_null: file.temporal_coercions,
         warnings: file.warnings,
       }, null, 2))}</pre>`;
       item.append(details);
@@ -933,7 +961,7 @@ $('preflight').onclick = async () => {
     if (!response.ok) {
       const reason = responseDetail(result, 'Data structure analysis could not start.');
       $('activity').textContent = 'Preflight failed.';
-      status.className = 'operation-status failed'; status.textContent = `Upload review failed: ${reason}`;
+      status.className = 'operation-status failed'; status.textContent = `Upload review failed: ${reason}${requestDiagnostic()}`;
       return;
     }
     state.sessionId = result.session_id;
@@ -948,7 +976,7 @@ $('preflight').onclick = async () => {
     }
   } catch (error) {
     $('activity').textContent = 'Preflight failed.';
-    status.className = 'operation-status failed'; status.textContent = `Upload review failed: ${error.message || 'network request failed'}`;
+    status.className = 'operation-status failed'; status.textContent = `Upload review failed: ${error.message || 'network request failed'}${requestDiagnostic()}`;
   } finally {
     button.classList.remove('is-busy'); button.textContent = 'Review upload'; valid();
   }
@@ -960,14 +988,15 @@ $('upload').onclick = async () => {
   $('outcome').hidden = false; $('activity').textContent = 'Preparing the session files for sanitization and AWS Glue…'; $('status').textContent = 'Upload preparation is in process…'; $('status').className = 'running';
   try {
     if (!state.sessionId) throw new Error('Review the selected upload before starting ETL.');
+    state.currentOperationId = crypto.randomUUID();
     const response = await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(state.sessionId)}/ingestions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: crypto.randomUUID(), reporting_month: userTag(), type_overrides: selectedTypeOverrides(), deduplication_mode: selectedDeduplicationMode(), deduplication_columns: selectedDeduplicationMode() === 'keyed' ? selectedDeduplicationColumns() : [], key_analysis_token: state.keyAnalysis?.token || null, manual_encryption_columns: selectedManualEncryptionColumns() }),
+      body: JSON.stringify({ request_id: state.currentOperationId, reporting_month: userTag(), type_overrides: selectedTypeOverrides(), deduplication_mode: selectedDeduplicationMode(), deduplication_columns: selectedDeduplicationMode() === 'keyed' ? selectedDeduplicationColumns() : [], key_analysis_token: state.keyAnalysis?.token || null, temporal_policy_acknowledgement_token: state.temporalPolicyAcknowledged ? state.review?.temporal_policy_adoption?.acknowledgement_token || null : null, manual_encryption_columns: selectedManualEncryptionColumns() }),
     }); const result = await response.json();
     if (!response.ok) {
       const reason = responseDetail(result, 'Upload could not be started.');
       $('status').textContent = 'Upload was not started.'; $('status').className = 'failed'; $('status-body').textContent = JSON.stringify(result, null, 2);
-      status.className = 'operation-status failed'; status.textContent = `Upload could not start: ${reason}`;
+      status.className = 'operation-status failed'; status.textContent = `Upload could not start: ${reason}${requestDiagnostic()}`;
       return;
     }
     started = true;
@@ -981,10 +1010,10 @@ $('upload').onclick = async () => {
     }
   } catch (error) {
     $('status').textContent = 'Upload was not started.'; $('status').className = 'failed';
-    status.className = 'operation-status failed'; status.textContent = `Upload could not start: ${error.message || 'network request failed'}`;
+    status.className = 'operation-status failed'; status.textContent = `Upload could not start: ${error.message || 'network request failed'}${requestDiagnostic()}`;
   } finally {
     button.classList.remove('is-busy');
-    if (!started) { button.textContent = 'Upload and run ETL'; updateCreateUploadEligibility(); }
+    if (!started) { state.currentOperationId = null; button.textContent = 'Upload and run ETL'; updateCreateUploadEligibility(); }
   }
 };
 async function poll(id, qcUri, operation, retryCount = 0) {

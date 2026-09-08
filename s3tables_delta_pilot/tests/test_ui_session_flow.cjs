@@ -64,6 +64,20 @@ test('search is case insensitive and preserves checked columns hidden by the fil
   dom.$('deduplication-search').value = ''; context.filterDeduplicationColumns();
   assert.ok(dom.controls.every(c => !c.row.hidden));
 });
+test('progress keeps a stable session or operation identifier across polling responses', () => {
+  const dom = ui();
+  const state = { lastHttpRequestId: 'http-1', currentOperationId: null };
+  const context = load(['renderSessionProgress'], { ...dom, state, Date, keyAnalysisBusy: () => false });
+  const session = { session_id: 'session-123', phase: 'PROFILING', phase_started_at: new Date().toISOString(), progress_message: 'Analysing file structure.' };
+  context.renderSessionProgress(session);
+  assert.match(dom.$('activity').textContent, /Session ID: session-123/);
+  assert.doesNotMatch(dom.$('activity').textContent, /http-1/);
+  state.lastHttpRequestId = 'http-2'; context.renderSessionProgress(session);
+  assert.match(dom.$('activity').textContent, /Session ID: session-123/);
+  session.phase = 'STARTING_GLUE'; session.ingestion = { request_id: 'operation-456' };
+  context.renderSessionProgress(session);
+  assert.match(dom.$('activity').textContent, /Operation ID: operation-456/);
+});
 test('cancelling polling resolves its caller without applying a stale response', async () => {
   let receive; let applied = 0;
   const context = load(['clearSessionPoll', 'pollUploadSession'], {

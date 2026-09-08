@@ -173,13 +173,18 @@ time-only `HH:mm:ss` values remain `STRING`. Decimal numbers always become
 as surgeon, clinician, specialty, ward, MCR, code, ID, OU, and mode are always
 `STRING`, preventing blank Excel columns from creating an incorrect numeric
 contract. Only mixed or otherwise ambiguous columns are presented for an
-operator type selection, with ephemeral safe samples. The selected
-types become the immutable initial table contract; the service validates every
-value against those choices before staging, so an unsafe selection is rejected
-instead of silently becoming `NULL`. Later uploads always follow that stored
-contract: safe conversions proceed automatically, while unsafe values are
-rejected before Glue starts. Sanitized identifier, postal, and age fields are
-always `STRING` and are not user-selectable.
+operator type selection, with ephemeral safe samples. The selected types become
+the immutable initial table contract. When an operator explicitly chooses
+`DATE` or `TIMESTAMP` for an ambiguous initial column, the contract also records
+the approved behavior for non-parsable populated values: valid values are
+retained and invalid values become `NULL`. Later uploads apply that same stored
+temporal rule and report value-free null-conversion counts before Glue starts.
+Automatically inferred temporal fields, numeric fields, boolean fields, and
+unapproved temporal fields remain strict and are rejected when a conversion
+would discard a value. Older contracts show a one-time, column-specific
+confirmation before this policy can be added; no stored table rows are
+rewritten. Sanitized identifier, postal, and age fields are always `STRING` and
+are not user-selectable.
 
 For a new table, the preflight also presents every stored column as a possible
 de-duplication component. It shows up to five ephemeral sample values for

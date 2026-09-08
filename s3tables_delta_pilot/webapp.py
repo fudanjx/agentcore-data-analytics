@@ -452,6 +452,7 @@ class SessionIngestionRequest(BaseModel):
     deduplication_mode: Literal["none", "keyed"] = "keyed"
     deduplication_columns: list[str] = Field(default_factory=list)
     key_analysis_token: str | None = Field(default=None, max_length=8192)
+    temporal_policy_acknowledgement_token: str | None = Field(default=None, max_length=8192)
     manual_encryption_columns: list[str] = Field(default_factory=list)
 
 
@@ -602,7 +603,7 @@ def _configure_snapshot_retention(table_bucket_arn: str, namespace: str, table: 
 
 
 def _load_contract_record(table_bucket_arn: str, namespace: str, table: str) -> dict:
-    """Read a table contract and lazily project legacy fields into v2."""
+    """Read a table contract and lazily project legacy fields into v3."""
     if table == "soc":
         return {"contract_version": 1, "schema": _soc_schema(), "deduplication_columns": [], "deduplication_mode": "legacy-full-row", "deduplication_policy": "legacy-full-row-v1"}
     try:
@@ -627,6 +628,11 @@ def _load_contract_record(table_bucket_arn: str, namespace: str, table: str) -> 
     record.setdefault("deduplication_policy", "skip-existing-key-report-conflict-v1" if record["deduplication_columns"] else "legacy-full-row-v1")
     record.setdefault("manual_encryption_columns", [])
     record.setdefault("automatic_sanitization_columns", [])
+    record.setdefault("temporal_invalid_value_policy", {
+        "version": 1,
+        "invalid_values": "NULL",
+        "columns": [],
+    })
     return record
 
 
@@ -642,11 +648,67 @@ def _contract_fingerprint(contract: dict) -> str:
             "contract_version", "schema", "deduplication_columns",
             "deduplication_mode", "deduplication_policy",
             "manual_encryption_columns", "automatic_sanitization_columns",
+            "temporal_invalid_value_policy",
         )
     }
     return hashlib.sha256(
         json.dumps(material, sort_keys=True, separators=(",", ":")).encode()
     ).hexdigest()
+
+
+def _temporal_policy_columns(contract: dict) -> set[str]:
+    """Return the explicitly approved DATE/TIMESTAMP null-coercion fields."""
+    policy = contract.get("temporal_invalid_value_policy") or {}
+    if policy.get("version", 1) != 1 or policy.get("invalid_values", "NULL") != "NULL":
+        raise HTTPException(400, "The stored temporal conversion policy is not supported")
+    columns = policy.get("columns", [])
+    if not isinstance(columns, list) or any(not isinstance(column, str) for column in columns):
+        raise HTTPException(400, "The stored temporal conversion policy is invalid")
+    target_types = {field["name"]: field["type"] for field in contract["schema"]}
+    invalid = sorted(column for column in set(columns) if target_types.get(column) not in {"DATE", "TIMESTAMP"})
+    if invalid:
+        raise HTTPException(400, "The stored temporal conversion policy references non-temporal columns")
+    return set(columns)
+
+
+def _temporal_invalid_value_policy(columns: set[str]) -> dict[str, object]:
+    return {
+        "version": 1,
+        "invalid_values": "NULL",
+        "columns": sorted(columns),
+    }
+
+
+def _adopt_temporal_invalid_value_policy(
+    table_bucket_arn: str, namespace: str, table: str, contract: dict,
+    columns: set[str], user_id: str,
+) -> dict:
+    """Persist an explicit, additive legacy temporal-coercion decision."""
+    existing_columns = _temporal_policy_columns(contract)
+    target_types = {field["name"]: field["type"] for field in contract["schema"]}
+    invalid = sorted(column for column in columns if target_types.get(column) not in {"DATE", "TIMESTAMP"})
+    if invalid:
+        raise HTTPException(422, "Only DATE and TIMESTAMP columns may use the temporal conversion policy")
+    updated = {
+        **contract,
+        "contract_version": max(int(contract.get("contract_version", 1)), 3),
+        "temporal_invalid_value_policy": _temporal_invalid_value_policy(existing_columns | columns),
+        "temporal_policy_adopted_by": user_id,
+        "temporal_policy_adopted_at": datetime.now(timezone.utc).isoformat(),
+    }
+    key = _contract_key(table_bucket_arn, namespace, table)
+    try:
+        etag = s3.head_object(Bucket=SOURCE_BUCKET, Key=key).get("ETag", "").strip('"')
+        s3.put_object(
+            Bucket=SOURCE_BUCKET, Key=key, Body=json.dumps(updated, indent=2).encode(),
+            ContentType="application/json", ServerSideEncryption="AES256", IfMatch=etag,
+        )
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        if code in {"PreconditionFailed", "ConditionalRequestConflict", "412"}:
+            raise HTTPException(409, "The table contract changed while saving the temporal conversion policy; review and try again") from error
+        raise HTTPException(503, "Unable to save the immutable temporal conversion policy") from error
+    return updated
 
 
 def _activate_late_deduplication_contract(
@@ -661,7 +723,7 @@ def _activate_late_deduplication_contract(
         return
     updated = {
         **contract,
-        "contract_version": 2,
+        "contract_version": max(int(contract.get("contract_version", 1)), 3),
         "deduplication_columns": columns,
         "deduplication_mode": "keyed",
         "deduplication_policy": "skip-existing-key-report-conflict-v2",
@@ -1097,6 +1159,68 @@ def _read_key_analysis_token(token: str) -> dict:
     return value
 
 
+def _temporal_policy_secret() -> bytes:
+    return os.environ.get(
+        "PILOT_TEMPORAL_POLICY_SECRET",
+        os.environ.get("PILOT_KEY_ANALYSIS_SECRET", "local-pilot-key-analysis-secret"),
+    ).encode()
+
+
+def _sign_temporal_policy(payload: dict) -> str:
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    signature = hmac.new(_temporal_policy_secret(), encoded, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(encoded + b"." + signature).decode()
+
+
+def _read_temporal_policy_token(token: str) -> dict:
+    try:
+        raw = base64.urlsafe_b64decode(token.encode())
+        if len(raw) <= hashlib.sha256().digest_size or raw[-33:-32] != b".":
+            raise ValueError("missing token delimiter")
+        encoded, signature = raw[:-33], raw[-32:]
+    except Exception as error:
+        raise HTTPException(422, "The temporal conversion acknowledgement is invalid; review the upload again") from error
+    expected = hmac.new(_temporal_policy_secret(), encoded, hashlib.sha256).digest()
+    if not hmac.compare_digest(signature, expected):
+        raise HTTPException(422, "The temporal conversion acknowledgement is invalid; review the upload again")
+    try:
+        value = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise HTTPException(422, "The temporal conversion acknowledgement is invalid; review the upload again") from error
+    if int(value.get("expires_at", 0)) < int(datetime.now(timezone.utc).timestamp()):
+        raise HTTPException(422, "The temporal conversion acknowledgement has expired; review the upload again")
+    return value
+
+
+def _validate_temporal_policy_acknowledgement(
+    payload: SessionIngestionRequest, preview: dict, session: UploadSession,
+    user: PilotUser, contract: dict,
+) -> set[str]:
+    """Validate the one-time legacy-policy confirmation against this session."""
+    proposal = preview.get("temporal_policy_adoption")
+    if not proposal:
+        return set()
+    if not payload.temporal_policy_acknowledgement_token:
+        raise HTTPException(422, "Confirm the temporal conversion policy before uploading")
+    acknowledgement = _read_temporal_policy_token(payload.temporal_policy_acknowledgement_token)
+    columns = sorted(item["column"] for item in proposal["columns"])
+    expected = {
+        "v": 1,
+        "user_id": user.user_id,
+        "session_id": session.session_id,
+        "table_bucket_arn": session.table_bucket_arn,
+        "namespace": session.namespace,
+        "table": session.table,
+        "contract_fingerprint": _contract_fingerprint(contract),
+        "file_digests": [file.sha256 for file in session.files],
+        "columns": columns,
+    }
+    for key, value in expected.items():
+        if acknowledgement.get(key) != value:
+            raise HTTPException(422, "The temporal conversion acknowledgement is stale; review the upload again")
+    return set(columns)
+
+
 def _copy_upload_with_digest(upload: UploadFile) -> tuple[Path, str]:
     """Copy one browser file locally and return a digest without any S3 write."""
     with tempfile.NamedTemporaryFile(suffix=_temporary_suffix(upload.filename or "upload"), delete=False) as temp:
@@ -1383,10 +1507,22 @@ def _preflight_tables(
         phase_started = time.perf_counter()
         target, creation_warnings, manual_type_columns = _first_upload_contract(files[0], tables[0])
         phase_timings["type_inference"] = round((time.perf_counter() - phase_started) * 1000, 1)
-        contract = {"schema": target, "deduplication_columns": [], "deduplication_policy": "skip-existing-key-report-conflict-v1"}
+        contract = {
+            "contract_version": 3,
+            "schema": target,
+            "deduplication_columns": [],
+            "deduplication_policy": "skip-existing-key-report-conflict-v1",
+            "temporal_invalid_value_policy": _temporal_invalid_value_policy(set()),
+        }
     else:
         contract = _load_contract_record(table_bucket_arn, namespace, table)
         target, creation_warnings, manual_type_columns = contract["schema"], [], set()
+    approved_temporal_columns = _temporal_policy_columns(contract)
+    legacy_temporal_policy = (
+        mode == "append"
+        and table != "soc"
+        and int(contract.get("contract_version", 1)) < 3
+    )
     phase_started = time.perf_counter()
     comparisons = [compare_schema(schema, target) for schema in schemas]
     target_by_name = {field["name"]: field["type"] for field in target}
@@ -1401,6 +1537,7 @@ def _preflight_tables(
                 incompatible_sensitive_columns.append({"column": field_name, "target_type": target_type})
     file_results = []
     rejection_reasons = []
+    pending_temporal_adoption = []
     for upload, source, comparison, details, nric_review in zip(files, tables, comparisons, sanitization, nric_reviews):
         file_rejection_reasons = []
         sanitized_columns = sorted(set(
@@ -1421,10 +1558,25 @@ def _preflight_tables(
             rejection_reasons.append(reason)
             file_rejection_reasons.append(reason)
         unsafe_casts = _unsafe_cast_issues(upload, target, source) if mode == "append" else []
-        if unsafe_casts:
+        approved_temporal_coercions = [
+            issue for issue in unsafe_casts
+            if issue["target_type"] in {"DATE", "TIMESTAMP"}
+            and issue["column"] in approved_temporal_columns
+        ]
+        proposed_temporal_coercions = [
+            issue for issue in unsafe_casts
+            if issue["target_type"] in {"DATE", "TIMESTAMP"}
+            and issue["column"] not in approved_temporal_columns
+            and legacy_temporal_policy
+        ]
+        blocking_unsafe_casts = [
+            issue for issue in unsafe_casts
+            if issue not in approved_temporal_coercions and issue not in proposed_temporal_coercions
+        ]
+        if blocking_unsafe_casts:
             columns = ", ".join(
                 f"{item['column']} ({item['unsafe_value_count']} invalid value{'s' if item['unsafe_value_count'] != 1 else ''})"
-                for item in unsafe_casts
+                for item in blocking_unsafe_casts
             )
             reason = (
                 f"{upload.filename}: values cannot be safely converted to the existing table schema: {columns}."
@@ -1439,14 +1591,48 @@ def _preflight_tables(
             "nric_detected_columns": nric_review["nric_detected_columns"],
             "sanitized_columns": sanitized_columns,
             "sanitized_column_count": len(sanitized_columns),
-            "unsafe_casts": unsafe_casts,
-            "accepted": match_accepted and not unsafe_casts,
+            "unsafe_casts": blocking_unsafe_casts,
+            "temporal_coercions": approved_temporal_coercions,
+            "_pending_temporal_adoption": proposed_temporal_coercions,
+            "accepted": match_accepted and not blocking_unsafe_casts,
             "rejection_reasons": file_rejection_reasons,
         })
+        pending_temporal_adoption.extend(proposed_temporal_coercions)
     if incompatible_sensitive_columns:
         rejection_reasons.append(
             "The selected table has non-string sensitive columns and cannot accept encrypted or masked values."
         )
+    temporal_policy_adoption = None
+    if pending_temporal_adoption and not rejection_reasons:
+        aggregate: dict[tuple[str, str], int] = {}
+        for issue in pending_temporal_adoption:
+            key = (str(issue["column"]), str(issue["target_type"]))
+            aggregate[key] = aggregate.get(key, 0) + int(issue["unsafe_value_count"])
+        temporal_policy_adoption = {
+            "required": True,
+            "columns": [
+                {"column": column, "target_type": target_type, "invalid_value_count": count}
+                for (column, target_type), count in sorted(aggregate.items())
+            ],
+        }
+        for file_result in file_results:
+            file_result["temporal_policy_adoption_required"] = bool(file_result["_pending_temporal_adoption"])
+    else:
+        for file_result in file_results:
+            pending = file_result["_pending_temporal_adoption"]
+            if not pending:
+                continue
+            columns = ", ".join(
+                f"{item['column']} ({item['unsafe_value_count']} invalid value{'s' if item['unsafe_value_count'] != 1 else ''})"
+                for item in pending
+            )
+            reason = f"{file_result['filename']}: values cannot be safely converted to the existing table schema: {columns}."
+            file_result["unsafe_casts"].extend(pending)
+            file_result["accepted"] = False
+            file_result["rejection_reasons"].append(reason)
+            rejection_reasons.append(reason)
+    for file_result in file_results:
+        file_result.pop("_pending_temporal_adoption", None)
     phase_timings["schema_comparison_and_cast_validation"] = round(
         (time.perf_counter() - phase_started) * 1000, 1
     )
@@ -1489,6 +1675,7 @@ def _preflight_tables(
         "deduplication_columns": contract["deduplication_columns"],
         "deduplication_policy": contract["deduplication_policy"],
         "contract_fingerprint": None if mode == "create" else _contract_fingerprint(contract),
+        "temporal_policy_adoption": temporal_policy_adoption,
         "phase_timings_ms": phase_timings,
         "incompatible_sensitive_columns": incompatible_sensitive_columns,
         "accepted": not rejection_reasons,
@@ -2123,6 +2310,24 @@ def _profile_upload_session(session_id: str, user_id: str) -> None:
             session = upload_sessions.update(session_id, user_id, phase="PROFILING", progress_message="Analysing file structure and proposed schema.")
             with _session_upload_files(session) as files:
                 preview = _preflight(session.mode, session.table_bucket_arn, session.namespace, session.table, files)
+        proposal = preview.get("temporal_policy_adoption")
+        if proposal:
+            expires_at = int(datetime.now(timezone.utc).timestamp()) + 30 * 60
+            columns = sorted(item["column"] for item in proposal["columns"])
+            acknowledgement = {
+                "v": 1,
+                "expires_at": expires_at,
+                "user_id": user_id,
+                "session_id": session_id,
+                "table_bucket_arn": session.table_bucket_arn,
+                "namespace": session.namespace,
+                "table": session.table,
+                "contract_fingerprint": preview["contract_fingerprint"],
+                "file_digests": [file.sha256 for file in session.files],
+                "columns": columns,
+            }
+            proposal["acknowledgement_token"] = _sign_temporal_policy(acknowledgement)
+            proposal["expires_at"] = datetime.fromtimestamp(expires_at, timezone.utc).isoformat()
         timings = {**session.phase_timings_ms, **preview.get("phase_timings_ms", {})}
         upload_sessions.update(
             session_id, user_id, phase="READY_FOR_REVIEW", progress_message="Data structure analysis is complete.",
@@ -2274,7 +2479,18 @@ async def _start_session_ingestion(session_id: str, user: PilotUser, payload: Se
         session = upload_sessions.update(
             session_id, user.user_id, phase="STARTING_GLUE",
             progress_message="Preparing sanitized Parquet and starting AWS Glue.",
+            ingestion={"request_id": payload.request_id, "operation": "ingestion"},
         )
+        temporal_policy_adoption_columns: set[str] = set()
+        if session.mode == "append":
+            current_contract = _load_contract_record(
+                session.table_bucket_arn, session.namespace, session.table
+            )
+            if session.preflight and session.preflight.get("contract_fingerprint") != _contract_fingerprint(current_contract):
+                raise HTTPException(409, "The table contract changed after review; review the upload again")
+            temporal_policy_adoption_columns = _validate_temporal_policy_acknowledgement(
+                payload, session.preflight or {}, session, user, current_contract,
+            )
         request = IngestionRequest(
             mode=session.mode, table=session.table, table_bucket_arn=session.table_bucket_arn,
             namespace=session.namespace, request_id=payload.request_id, reporting_month=payload.reporting_month,
@@ -2294,6 +2510,7 @@ async def _start_session_ingestion(session_id: str, user: PilotUser, payload: Se
                     return asyncio.run(_start_ingestion(
                         request=request.model_dump_json(), files=files, user=user,
                         reviewed_preview=session.preflight,
+                        temporal_policy_adoption_columns=temporal_policy_adoption_columns,
                         file_digests=[file.sha256 for file in session.files],
                     ))
             result = await asyncio.to_thread(prepare_and_start)
@@ -2350,6 +2567,15 @@ def start_upload_session_ingestion(
         raise HTTPException(409, f"Upload is unavailable while session phase is {session.phase}")
     if not session.preflight or not session.preflight.get("accepted"):
         raise HTTPException(422, "The uploaded files did not pass the completed preflight validation")
+    if session.mode == "append":
+        current_contract = _load_contract_record(
+            session.table_bucket_arn, session.namespace, session.table
+        )
+        if session.preflight.get("contract_fingerprint") != _contract_fingerprint(current_contract):
+            raise HTTPException(409, "The table contract changed after review; review the upload again")
+        _validate_temporal_policy_acknowledgement(
+            payload, session.preflight, session, user, current_contract,
+        )
     configured_key = (session.preflight or {}).get("deduplication_columns") or []
     if payload.deduplication_mode == "keyed" and (session.mode == "create" or not configured_key):
         impact = session.key_impact or {}
@@ -2458,6 +2684,7 @@ async def _start_ingestion(
     files: list[UploadFile] = File(),
     user: PilotUser = Depends(_current_user),
     reviewed_preview: dict | None = None,
+    temporal_policy_adoption_columns: set[str] | None = None,
     file_digests: list[str] | None = None,
 ):
     try:
@@ -2502,6 +2729,11 @@ async def _start_ingestion(
     _report_ingestion_progress(payload.request_id, "Finalizing the table schema and de-duplication settings.")
     target_schema = _apply_create_type_overrides(preview, payload.type_overrides) if payload.mode == "create" else preview["target_schema"]
     existing_contract = {"deduplication_columns": []} if payload.mode == "create" else _load_contract_record(payload.table_bucket_arn, payload.namespace, payload.table)
+    if payload.mode == "append" and temporal_policy_adoption_columns:
+        existing_contract = _adopt_temporal_invalid_value_policy(
+            payload.table_bucket_arn, payload.namespace, payload.table,
+            existing_contract, temporal_policy_adoption_columns, user.user_id,
+        )
     if payload.mode == "create":
         _report_ingestion_progress(payload.request_id, "Validating the selected first-upload type conversions.")
         allowed_manual = {item["column"] for item in preview.get("sanitization_review", {}).get("manual_encryption_candidates", [])}
@@ -2524,8 +2756,8 @@ async def _start_ingestion(
         and effective_deduplication_mode == "keyed"
         and not existing_contract.get("deduplication_columns")
     )
-    # Only an explicit first-upload temporal choice may have lossy NULL
-    # conversion. Appends always keep this empty and remain strictly checked.
+    # An explicit first-upload choice, or a confirmed legacy-policy adoption,
+    # is the sole authority to coerce invalid temporal values to NULL.
     lossy_temporal_columns: set[str] = set()
     if payload.mode == "create":
         selections = {
@@ -2568,6 +2800,8 @@ async def _start_ingestion(
             _validate_key_analysis_acknowledgement(
                 payload, deduplication_columns, files, user, file_digests
             )
+    else:
+        lossy_temporal_columns = _temporal_policy_columns(existing_contract)
     if payload.mode == "append":
         _report_ingestion_progress(payload.request_id, "Configuring S3 Tables recovery snapshot retention.")
         try:
@@ -2667,11 +2901,12 @@ async def _start_ingestion(
             Bucket=SOURCE_BUCKET,
             Key=_contract_key(payload.table_bucket_arn, payload.namespace, payload.table),
             Body=json.dumps({
-                "contract_version": 2,
+                "contract_version": 3,
                 "schema": target_schema,
                 "deduplication_columns": deduplication_columns if effective_deduplication_mode == "keyed" else [],
                 "deduplication_mode": "keyed" if effective_deduplication_mode == "keyed" else "unconfigured",
                 "deduplication_policy": "skip-existing-key-report-conflict-v2",
+                "temporal_invalid_value_policy": _temporal_invalid_value_policy(lossy_temporal_columns),
                 "manual_encryption_columns": manual_encryption_columns,
                 "automatic_sanitization_columns": preview.get("sanitization_review", {}).get("automatic_encrypted_columns", []),
                 "created_by": user.user_id,

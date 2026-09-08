@@ -12,6 +12,7 @@ from unittest.mock import Mock, patch
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
+from botocore.exceptions import ClientError
 
 from s3tables_delta_pilot.pilot import NAMESPACE, TABLE_BUCKET_ARN
 from s3tables_delta_pilot.webapp import (
@@ -22,12 +23,15 @@ from s3tables_delta_pilot.webapp import (
     IngestionRequest,
     PilotUser,
     RollbackRequest,
+    SessionIngestionRequest,
     UPLOAD_HISTORY_TABLE,
     _apply_create_type_overrides,
+    _adopt_temporal_invalid_value_policy,
     _activate_late_deduplication_contract,
     _create_deduplication_candidates,
     _create_type_selection_samples,
     _composite_key_metrics,
+    _contract_fingerprint,
     _current_user,
     create_namespace,
     create_table_bucket,
@@ -45,9 +49,13 @@ from s3tables_delta_pilot.webapp import (
     _make_glue_compatible_parquet,
     _read_upload_table,
     _read_key_analysis_token,
+    _read_temporal_policy_token,
     _require_scope,
     _sign_key_analysis,
+    _sign_temporal_policy,
+    _temporal_policy_columns,
     _unsafe_cast_issues,
+    _validate_temporal_policy_acknowledgement,
     _preflight,
     _raw_key_impact_metrics,
     _raw_key_row_selection,
@@ -60,6 +68,7 @@ from s3tables_delta_pilot.webapp import (
     ingestion_progress_hooks,
 )
 from starlette.datastructures import UploadFile
+from s3tables_delta_pilot.upload_sessions import SessionFile, UploadSession
 
 
 STATIC = Path(__file__).parents[1] / "static"
@@ -572,6 +581,140 @@ class UiAssetTests(unittest.TestCase):
                 if staged != source:
                     staged.unlink(missing_ok=True)
 
+    def test_append_uses_the_stored_temporal_null_policy(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"Event": ["0.0", "2008-01-31 12:34:00"]}), sink)
+        upload = UploadFile(filename="same-format.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        contract = {
+            "contract_version": 3,
+            "schema": [{"name": "event", "type": "TIMESTAMP", "source_name": "Event"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+            "temporal_invalid_value_policy": {"version": 1, "invalid_values": "NULL", "columns": ["event"]},
+        }
+        with patch("s3tables_delta_pilot.webapp._load_contract_record", return_value=contract):
+            result = _preflight("append", TABLE_BUCKET_ARN, NAMESPACE, "same_format", [upload])
+        self.assertTrue(result["accepted"])
+        self.assertEqual([], result["files"][0]["unsafe_casts"])
+        self.assertEqual(1, result["files"][0]["temporal_coercions"][0]["unsafe_value_count"])
+        self.assertIsNone(result["temporal_policy_adoption"])
+
+    def test_legacy_append_requires_one_time_temporal_policy_adoption(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"Event": ["0.0", "2008-01-31 12:34:00"]}), sink)
+        upload = UploadFile(filename="legacy.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        contract = {
+            "contract_version": 2,
+            "schema": [{"name": "event", "type": "TIMESTAMP", "source_name": "Event"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+        }
+        with patch("s3tables_delta_pilot.webapp._load_contract_record", return_value=contract):
+            result = _preflight("append", TABLE_BUCKET_ARN, NAMESPACE, "legacy", [upload])
+        self.assertTrue(result["accepted"])
+        self.assertEqual(
+            [{"column": "event", "target_type": "TIMESTAMP", "invalid_value_count": 1}],
+            result["temporal_policy_adoption"]["columns"],
+        )
+        self.assertTrue(result["files"][0]["temporal_policy_adoption_required"])
+
+    def test_current_contract_keeps_unapproved_temporal_casts_strict(self):
+        sink = pa.BufferOutputStream()
+        pq.write_table(pa.table({"Event": ["0.0", "2008-01-31 12:34:00"]}), sink)
+        upload = UploadFile(filename="strict.parquet", file=BytesIO(sink.getvalue().to_pybytes()))
+        contract = {
+            "contract_version": 3,
+            "schema": [{"name": "event", "type": "TIMESTAMP", "source_name": "Event"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+            "temporal_invalid_value_policy": {"version": 1, "invalid_values": "NULL", "columns": []},
+        }
+        with patch("s3tables_delta_pilot.webapp._load_contract_record", return_value=contract):
+            result = _preflight("append", TABLE_BUCKET_ARN, NAMESPACE, "strict", [upload])
+        self.assertFalse(result["accepted"])
+        self.assertEqual("event", result["files"][0]["unsafe_casts"][0]["column"])
+
+    def test_temporal_policy_adoption_is_conditional_and_additive(self):
+        contract = {
+            "contract_version": 2,
+            "schema": [
+                {"name": "event", "type": "TIMESTAMP"},
+                {"name": "visit_date", "type": "DATE"},
+            ],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+        }
+        with patch("s3tables_delta_pilot.webapp.s3.head_object", return_value={"ETag": '"contract-etag"'}), patch("s3tables_delta_pilot.webapp.s3.put_object") as put_object:
+            updated = _adopt_temporal_invalid_value_policy(
+                TABLE_BUCKET_ARN, NAMESPACE, "legacy", contract, {"event"}, "local-editor",
+            )
+        self.assertEqual({"event"}, _temporal_policy_columns(updated))
+        saved = json.loads(put_object.call_args.kwargs["Body"])
+        self.assertEqual(["event"], saved["temporal_invalid_value_policy"]["columns"])
+        self.assertEqual("contract-etag", put_object.call_args.kwargs["IfMatch"])
+
+    def test_temporal_policy_adoption_reports_a_contract_conflict_before_glue(self):
+        contract = {
+            "contract_version": 2,
+            "schema": [{"name": "event", "type": "TIMESTAMP"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+        }
+        conflict = ClientError({"Error": {"Code": "PreconditionFailed"}}, "PutObject")
+        with patch("s3tables_delta_pilot.webapp.s3.head_object", return_value={"ETag": '"contract-etag"'}), patch(
+            "s3tables_delta_pilot.webapp.s3.put_object", side_effect=conflict
+        ), patch("s3tables_delta_pilot.webapp.glue.start_job_run") as start_job:
+            with self.assertRaises(Exception) as raised:
+                _adopt_temporal_invalid_value_policy(
+                    TABLE_BUCKET_ARN, NAMESPACE, "legacy", contract, {"event"}, "local-editor",
+                )
+        self.assertEqual(409, raised.exception.status_code)
+        self.assertIn("contract changed", raised.exception.detail)
+        start_job.assert_not_called()
+
+    def test_temporal_policy_acknowledgement_is_signed(self):
+        token = _sign_temporal_policy({"expires_at": int(datetime.now(timezone.utc).timestamp()) + 60, "columns": ["event"]})
+        self.assertEqual(["event"], _read_temporal_policy_token(token)["columns"])
+        with self.assertRaises(Exception):
+            _read_temporal_policy_token(token[:-1] + ("A" if token[-1] != "A" else "B"))
+
+    def test_temporal_policy_acknowledgement_binds_session_contract_and_files(self):
+        contract = {
+            "contract_version": 2,
+            "schema": [{"name": "event", "type": "TIMESTAMP"}],
+            "deduplication_columns": [],
+            "deduplication_policy": "legacy-full-row-v1",
+        }
+        session = UploadSession(
+            session_id="session-1", owner_user_id="local-editor", mode="append",
+            table_bucket_arn=TABLE_BUCKET_ARN, namespace=NAMESPACE, table="legacy",
+            expires_at="2099-01-01T00:00:00+00:00",
+            files=[SessionFile(name="same-format.parquet", path="/private/tmp/source", sha256="digest-1", size_bytes=1)],
+        )
+        user = PilotUser("local-editor", False, True, True, (BucketScope(TABLE_BUCKET_ARN, NAMESPACE, "pilot"),))
+        preview = {"temporal_policy_adoption": {"columns": [{"column": "event", "target_type": "TIMESTAMP", "invalid_value_count": 1}]}}
+        acknowledgement = {
+            "v": 1,
+            "expires_at": int(datetime.now(timezone.utc).timestamp()) + 60,
+            "user_id": user.user_id,
+            "session_id": session.session_id,
+            "table_bucket_arn": session.table_bucket_arn,
+            "namespace": session.namespace,
+            "table": session.table,
+            "contract_fingerprint": _contract_fingerprint(contract),
+            "file_digests": ["digest-1"],
+            "columns": ["event"],
+        }
+        payload = SessionIngestionRequest(
+            request_id="request-1", reporting_month="test",
+            temporal_policy_acknowledgement_token=_sign_temporal_policy(acknowledgement),
+        )
+        self.assertEqual({"event"}, _validate_temporal_policy_acknowledgement(payload, preview, session, user, contract))
+        acknowledgement["file_digests"] = ["changed"]
+        stale = payload.model_copy(update={"temporal_policy_acknowledgement_token": _sign_temporal_policy(acknowledgement)})
+        with self.assertRaises(Exception):
+            _validate_temporal_policy_acknowledgement(stale, preview, session, user, contract)
+
     def test_type_review_reports_values_lost_by_explicit_temporal_choice(self):
         with TemporaryDirectory() as directory:
             source = Path(directory) / "mixed-timestamp.parquet"
@@ -683,6 +826,19 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("function toggleAllDeduplicationColumns()", javascript)
         self.assertIn("control => !control.disabled", javascript)
         self.assertIn("Clear all columns", javascript)
+
+    def test_progress_uses_stable_session_or_operation_ids(self):
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn("lastHttpRequestId", javascript)
+        self.assertIn("Session ID: ${session.session_id}", javascript)
+        self.assertIn("Operation ID: ${operationId}", javascript)
+        self.assertNotIn("state.lastRequestId", javascript)
+
+    def test_legacy_temporal_policy_confirmation_gates_ingestion(self):
+        javascript = (STATIC / "app.js").read_text()
+        self.assertIn("acknowledge-temporal-policy", javascript)
+        self.assertIn("temporal_policy_acknowledgement_token", javascript)
+        self.assertIn("temporalPolicyAcknowledged", javascript)
 
     def test_type_selection_samples_are_random_and_sensitive_samples_are_masked(self):
         sink = pa.BufferOutputStream()

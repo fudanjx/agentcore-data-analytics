@@ -71,13 +71,13 @@ Add structured application logging around every API request and background phase
 - Support an optional rotating local log file for the Mac pilot through `PILOT_LOG_FILE`; default rotation is 10 MB with five retained files.
 - Configure `PILOT_LOG_LEVEL`, defaulting to `INFO`, without enabling verbose boto3 request-body logging.
 - Add HTTP middleware that records request start/end, method, route template, status, duration, request ID, authenticated user ID, and response size.
-- Generate or accept `X-Request-ID`, return it in the response, and propagate it into upload-session, S3-manifest, Glue-argument, QC, history, and lock records.
+- Generate or accept `X-Request-ID`, return it in the response, and propagate it into server-side logs, error details, S3-manifest, Glue-argument, QC, history, and lock records. Do not show the changing ID in normal progress banners: show the stable upload session ID before ETL and the stable operation ID after ETL starts.
 - Log phase start/end and elapsed time for receipt, profiling, key analysis, de-duplication, sanitization, Parquet writing, S3 staging, Glue queuing, Glue execution, Iceberg commit, and cleanup.
 - Include safe identifiers such as session ID, operation ID, job-run ID, bucket/namespace/table, file count, total bytes, extension, and a shortened SHA-256. Do not log source values, full original filenames, ciphertext, encryption material, secrets, authorization headers, or request bodies.
 - Install global exception handlers that record the full server-side traceback with an `error_id`, while returning only a safe phase-specific message, error code, request ID, and error ID to the browser.
 - Reconcile Uvicorn access/error logging with the application formatter so a request produces one correlated access record rather than duplicate unstructured lines.
 
-The UI must show the request ID, current phase, elapsed time, and returned error ID in failure details. Logs themselves remain server-side and are not exposed through a general browser log-download endpoint.
+The UI must show the stable session/operation ID, current phase, and elapsed time during normal work; expose the HTTP request ID and returned error ID only in failure details. Logs themselves remain server-side and are not exposed through a general browser log-download endpoint.
 
 ### 4. Explicit per-upload de-duplication mode
 
@@ -129,6 +129,13 @@ Introduce uploader contract version 2 containing:
 - First-upload manual encryption columns.
 - NRIC detection policy and version.
 - Contract revision, creation actor, and timestamps.
+
+Contract version 3 additionally records the explicitly approved temporal
+conversion policy for manually selected `DATE`/`TIMESTAMP` fields. Valid values
+are preserved and non-parsable populated values become `NULL` on both the first
+and later uploads. Legacy contracts require one value-free, signed confirmation
+for the affected columns before that immutable policy is added; all other unsafe
+casts remain rejected and no existing table data is rewritten.
 
 Each ingestion manifest records its own `deduplication_mode`. An empty key means “not configured yet,” not implicit full-row de-duplication.
 
