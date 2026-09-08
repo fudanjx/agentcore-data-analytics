@@ -8,6 +8,7 @@ from typing import Any, Literal
 
 import boto3
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
@@ -48,6 +49,12 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/", response_class=HTMLResponse)
+    def landing() -> str:
+        return """<!doctype html><html><head><title>S3 Uploader v2</title></head>
+<body><h1>S3 Uploader v2</h1><p>Service is ready.</p>
+<p>The upload UI will be integrated here; the authenticated API is available under <code>/api/v2</code>.</p></body></html>"""
 
     @app.post("/login")
     def login(payload: LoginRequest, response: Response) -> dict[str, bool]:
