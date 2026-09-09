@@ -45,6 +45,25 @@ class S3JobStore:
     def status_key(self, job_id: str) -> str:
         return self._key(f"jobs/{job_id}/status.json")
 
+    # The unchanged v1 browser is a session-oriented client.  These records
+    # intentionally live alongside the worker job records, rather than on an
+    # ECS task filesystem, so a replacement API task can resume a browser
+    # session without losing upload state.
+    def compat_session_key(self, session_id: str) -> str:
+        return self._key(f"compat-sessions/{session_id}/session.json")
+
+    def put_compat_session(self, session: dict[str, Any], *, create_only: bool = False) -> None:
+        options = {"IfNoneMatch": "*"} if create_only else {}
+        self._put_json(self.compat_session_key(str(session["session_id"])), session, **options)
+
+    def get_compat_session(self, session_id: str) -> dict[str, Any]:
+        try:
+            return self._read_json(self.s3.get_object(Bucket=self.bucket, Key=self.compat_session_key(session_id)))
+        except ClientError as error:
+            if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
+                raise MissingRecord(session_id) from error
+            raise
+
     def _put_json(self, key: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return self.s3.put_object(
             Bucket=self.bucket,

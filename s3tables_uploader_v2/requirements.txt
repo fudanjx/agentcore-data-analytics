@@ -1,6 +1,7 @@
 boto3>=1.40.67
 fastapi>=0.110.0
 pandas>=2.2.0
+polars>=1.0.0
 pydantic>=2.6.0
 pyarrow>=18.0.0
 pycryptodome>=3.20.0
