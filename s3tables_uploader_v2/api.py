@@ -16,6 +16,7 @@ from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
 from .config import Settings
 from .job_store import MissingRecord, S3JobStore
 from .models import Destination, JobRequest, JobStatus, UploadSession
+from . import skill_bundle
 
 
 ALLOWED_TABLE_BUCKET_ARNS = {
@@ -98,6 +99,15 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             raise HTTPException(403, "TABLE_BUCKET_FORBIDDEN")
         rows = [{"name": item["name"], "created_at": str(item.get("createdAt")), "modified_at": str(item.get("modifiedAt")), "row_count": None, "uploader_managed": True} for item in s3tables.list_tables(tableBucketARN=table_bucket_arn, namespace=namespace).get("tables", [])]
         return {"table_bucket": table_bucket_arn, "namespace": namespace, "is_admin": True, "tables": sorted(rows, key=lambda item: item["name"])}
+
+    @app.get("/api/skills/files")
+    def skill_files(table_bucket_arn: str, _: str = Depends(current_user)) -> dict[str, Any]:
+        if table_bucket_arn not in ALLOWED_TABLE_BUCKET_ARNS:
+            raise HTTPException(403, "TABLE_BUCKET_FORBIDDEN")
+        try:
+            return skill_bundle.list_skill_files(table_bucket_arn)
+        except skill_bundle.SkillBundleError as error:
+            raise HTTPException(error.status_code, str(error)) from error
 
     @app.get("/")
     def landing() -> FileResponse:
