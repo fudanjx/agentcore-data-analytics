@@ -153,6 +153,21 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
             "rejection_reasons": [] if accepted else [f"{name}: only {percent:.1f}% of the initial table schema matches; at least 50.0% is required for an append."],
         })
     candidates = [{"column": field["name"], "target_type": field["type"], "source_type": field["type"], "sample_values": [], "samples_masked": True, "non_null_count": 0, "deduplication_eligible": True} for field in target]
+    automatic_encrypted = sorted({
+        normalise_names([column])[0]
+        for result in results
+        for column in result["sanitization"]["encrypted_columns"] + result["nric_detected_columns"]
+    })
+    transformed = {
+        normalise_names([column])[0]
+        for result in results
+        for column in result["sanitization"]["dropped_columns"] + result["sanitization"]["encrypted_columns"]
+        + result["sanitization"]["postal_columns"] + result["sanitization"]["age_banded_columns"] + result["nric_detected_columns"]
+    }
+    manual_candidates = [
+        {"column": item["column"], "sample_values": [], "samples_masked": True}
+        for item in candidates if item["column"] not in transformed
+    ]
     return {
         "mode": mode, "table_bucket_arn": table_bucket_arn, "namespace": namespace, "table": table,
         "target_schema": target, "creation_warnings": warnings, "initial_table_column_count": len(target),
@@ -162,5 +177,5 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
         "incompatible_sensitive_columns": [], "accepted": all(item["accepted"] for item in results),
         "rejection_reasons": [reason for item in results for reason in item["rejection_reasons"]],
         "sensitive_column_scan": "Sanitization is enforced in the isolated worker before temporary S3 staging.",
-        "sanitization_review": {"automatic_encrypted_columns": [], "manual_encryption_candidates": [], "nric_detection_policy": {"sample_size": 5, "match_threshold": 3, "kind": "sampled-heuristic-v1"}},
+        "sanitization_review": {"automatic_encrypted_columns": automatic_encrypted, "manual_encryption_candidates": manual_candidates, "nric_detection_policy": {"sample_size": 5, "match_threshold": 3, "kind": "sampled-heuristic-v1"}},
     }

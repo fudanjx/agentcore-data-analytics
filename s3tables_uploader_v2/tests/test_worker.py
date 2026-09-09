@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+import pandas as pd
 
 from s3tables_uploader_v2.worker import _iceberg_type, _write_prepared_parquet
 
@@ -31,3 +32,12 @@ class WorkerTests(unittest.TestCase):
             schema, _, audit = _write_prepared_parquet(source, output, b"x" * 32, ["free_text_id"])
         self.assertEqual(schema.field("free_text_id").type, pa.string())
         self.assertEqual(audit["manual_encryption_columns"], ["free_text_id"])
+
+    def test_excel_is_prepared_by_the_large_worker(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.xlsx", Path(directory) / "output.parquet"
+            pd.DataFrame({"PATIENT_NAME": ["Alice"], "PAT_ENC_CSN_ID": ["1"]}).to_excel(source, index=False)
+            schema, rows, _ = _write_prepared_parquet(source, output, b"x" * 32, filename="source.xlsx")
+        self.assertEqual(rows, 1)
+        self.assertNotIn("PATIENT_NAME", schema.names)
+        self.assertIn("pat_enc_csn_id", schema.names)

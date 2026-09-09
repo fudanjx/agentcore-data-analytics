@@ -26,7 +26,7 @@ from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
 from .job_store import JobAlreadyClaimed, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
-from .worker_analysis import profile_files, raw_key_impact_metrics
+from .worker_analysis import profile_files, raw_key_impact_metrics, read_upload_table
 
 
 class WorkerError(RuntimeError):
@@ -141,16 +141,24 @@ def _iceberg_type(field: pa.Field) -> str:
 
 def _write_prepared_parquet(
     source: Path, destination: Path, key: Any | None = None, manual_encryption_columns: list[str] | None = None,
+    filename: str | None = None,
 ) -> tuple[pa.Schema, int, dict[str, Any]]:
-    """Sanitise bounded Parquet batches; never materialise the entire file."""
-    parquet = pq.ParquetFile(source)
+    """Sanitise supported upload formats inside the disposable large worker."""
+    lower = (filename or source.name).lower()
+    if lower.endswith((".parquet", ".parquet.gzip")):
+        batches = pq.ParquetFile(source).iter_batches(batch_size=50_000)
+    else:
+        # Spreadsheet and delimited uploads use the exact v1-compatible reader
+        # already used during review.  This is intentionally worker-only;
+        # the small API task never parses user files.
+        batches = read_upload_table(source, filename or source.name).to_batches(max_chunksize=50_000)
     writer: pq.ParquetWriter | None = None
     output_schema: pa.Schema | None = None
     rows = 0
     audits: list[dict[str, Any]] = []
     active_key = key or encryption_key()
     try:
-        for batch in parquet.iter_batches(batch_size=50_000):
+        for batch in batches:
             sanitized, audit = sanitise_table(
                 pa.Table.from_batches([batch]), active_key,
                 manual_encryption_columns=manual_encryption_columns or (),
@@ -202,6 +210,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         s3.download_file(settings.landing_bucket, request.source_key, str(source), ExtraArgs={"VersionId": request.source_version_id})
         schema, row_count, audit = _write_prepared_parquet(
             source, prepared, manual_encryption_columns=request.manual_encryption_columns,
+            filename=Path(request.source_key).name,
         )
         store.put_status(JobStatus(job_id=job_id, phase="PREPARING", message="Writing sanitised staging artifact."))
         prepared_key = _prepared_key(settings, job_id)
@@ -255,7 +264,16 @@ def main() -> None:
     if job_id.startswith(("profile:", "key:")):
         process_compat_work(job_id, settings)
     else:
-        process_job(job_id, settings)
+        try:
+            process_job(job_id, settings)
+        except Exception as error:
+            # The browser polls durable S3 state.  Never strand it in an
+            # in-progress phase merely because the disposable Fargate process
+            # exits before Glue starts.
+            s3 = boto3.client("s3", region_name=settings.region)
+            store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
+            store.put_status(JobStatus(job_id=job_id, phase="FAILED", message="Worker preparation failed.", error_code=type(error).__name__))
+            raise
 
 
 if __name__ == "__main__":
