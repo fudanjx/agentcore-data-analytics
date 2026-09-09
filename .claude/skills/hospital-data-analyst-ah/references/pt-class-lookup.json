@@ -1,0 +1,20 @@
+{
+  "A":    {"class_abc": "A1",         "class_abc_moh": "A1",         "resident_type": "SG", "resident_moh": "SG"},
+  "AP":   {"class_abc": "A1",         "class_abc_moh": "A1",         "resident_type": "PR", "resident_moh": "PR"},
+  "ARF":  {"class_abc": "A1",         "class_abc_moh": "A1",         "resident_type": "RF", "resident_moh": "FR"},
+  "B1":   {"class_abc": "B1",         "class_abc_moh": "B1",         "resident_type": "SG", "resident_moh": "SG"},
+  "B1P":  {"class_abc": "B1",         "class_abc_moh": "B1",         "resident_type": "PR", "resident_moh": "PR"},
+  "B1RF": {"class_abc": "A1",         "class_abc_moh": "B1",         "resident_type": "RF", "resident_moh": "FR"},
+  "B2":   {"class_abc": "B2",         "class_abc_moh": "B2",         "resident_type": "SG", "resident_moh": "SG"},
+  "B2P":  {"class_abc": "B2",         "class_abc_moh": "B2",         "resident_type": "PR", "resident_moh": "PR"},
+  "B2RF": {"class_abc": "A1",         "class_abc_moh": "B2",         "resident_type": "RF", "resident_moh": "FR"},
+  "C":    {"class_abc": "C",          "class_abc_moh": "C",          "resident_type": "SG", "resident_moh": "SG"},
+  "CP":   {"class_abc": "C",          "class_abc_moh": "C",          "resident_type": "PR", "resident_moh": "PR"},
+  "CRF":  {"class_abc": "A1",         "class_abc_moh": "C",          "resident_type": "RF", "resident_moh": "FR"},
+  "NR":   {"class_abc": "A1",         "class_abc_moh": "A1",         "resident_type": "NR", "resident_moh": "FNR"},
+  "PTE":  {"class_abc": "Private",    "class_abc_moh": "Private",    "resident_type": "SG", "resident_moh": "SG"},
+  "PTEP": {"class_abc": "Private",    "class_abc_moh": "Private",    "resident_type": "PR", "resident_moh": "PR"},
+  "PTRF": {"class_abc": "Private",    "class_abc_moh": "Private",    "resident_type": "RF", "resident_moh": "FR"},
+  "SUB":  {"class_abc": "Subsidized", "class_abc_moh": "Subsidized", "resident_type": "SG", "resident_moh": "SG"},
+  "SUBP": {"class_abc": "Subsidized", "class_abc_moh": "Subsidized", "resident_type": "PR", "resident_moh": "PR"}
+}

@@ -1,0 +1,17 @@
+{
+  "admission": {
+    "2023": { "admissions": 11392, "paying": 954,  "subsidised": 10438 },
+    "2024": { "admissions": 11379, "paying": 1487, "subsidised": 9892 },
+    "2025": { "admissions": 11405, "paying": 1494, "subsidised": 9911 }
+  },
+  "discharge": {
+    "2023": { "discharges": 11389 },
+    "2024": { "discharges": 11396 },
+    "2025": { "discharges": 11451 }
+  },
+  "inflight": {
+    "2023": { "patient_days": 83482 },
+    "2024": { "patient_days": 71814 },
+    "2025": { "patient_days": 70200 }
+  }
+}

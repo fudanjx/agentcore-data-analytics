@@ -27,7 +27,7 @@ The production `pt_days_by_ward` report is **not** built from raw `inflight` alo
 
 Because the top-up join key is `PAT_ENC_CSN_ID`, it only reliably picks up **NGEMR-era** same-day cases — legacy SAP-era same-day discharges (`PAT_ENC_CSN_ID` null) won't match and are effectively excluded from the top-up.
 
-**Querying raw `inflight` alone undercounts patient-days**, especially for wards with high same-day turnover.
+**Querying raw `inflight` alone always undercounts patient-days** — this is a structural gap in the table itself, not a magnitude issue that only shows up for high-turnover wards. The same-day top-up union above is required for every patient-days query, regardless of ward or period, to take into account the same-day discharge cases; the gap is simply more visible in high-turnover wards because more rows are missing there.
 
 Conceptual union to replicate production:
 
