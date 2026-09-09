@@ -141,7 +141,7 @@ def _iceberg_type(field: pa.Field) -> str:
 
 
 def _glue_compatible_table(table: pa.Table) -> pa.Table:
-    """Convert Arrow time-only values to V1's STRING storage contract.
+    """Emit only Parquet physical types accepted by the Glue/Spark reader.
 
     Glue/Spark cannot read Parquet TIME(MICROS), while the v1 preflight
     explicitly stores time-only fields as strings.  Preserve their textual
@@ -153,6 +153,12 @@ def _glue_compatible_table(table: pa.Table) -> pa.Table:
         if pa.types.is_time(field.type):
             arrays.append(pc.cast(column, pa.string(), safe=False))
             fields.append(pa.field(field.name, pa.string(), nullable=True, metadata=field.metadata))
+        elif pa.types.is_timestamp(field.type):
+            # Spark rejects Parquet TIMESTAMP(NANOS).  The V1 S3 Tables
+            # contract uses microsecond precision, so make that conversion
+            # explicit before writing the staging artifact.
+            arrays.append(pc.cast(column, pa.timestamp("us"), safe=False))
+            fields.append(pa.field(field.name, pa.timestamp("us"), nullable=True, metadata=field.metadata))
         else:
             arrays.append(column)
             fields.append(field)

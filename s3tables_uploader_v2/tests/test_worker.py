@@ -49,3 +49,10 @@ class WorkerTests(unittest.TestCase):
             pq.write_table(pa.table({"visit_time": pa.array([time(9, 30)], type=pa.time64("us"))}), source)
             schema, _, _ = _write_prepared_parquet(source, output, b"x" * 32)
         self.assertEqual(schema.field("visit_time").type, pa.string())
+
+    def test_nanosecond_timestamps_are_staged_as_microseconds_for_glue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"
+            pq.write_table(pa.table({"visit_at": pa.array([1_726_000_000_123_456_789], type=pa.timestamp("ns"))}), source)
+            schema, _, _ = _write_prepared_parquet(source, output, b"x" * 32)
+        self.assertEqual(schema.field("visit_at").type, pa.timestamp("us"))
