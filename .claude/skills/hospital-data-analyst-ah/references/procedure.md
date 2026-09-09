@@ -152,7 +152,3 @@ GROUP BY 1, 2 ORDER BY 1, cases_with_case_no DESC;
 ## Joins
 
 Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period. Prefer `Adm_CSN` over `Case_No` when joining to `admission` for NGEMR-era procedures.
-
-## Open items
-
-See `references/procedure-open-questions.md`.

@@ -262,7 +262,3 @@ Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provis
 ## Joins
 
 Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.
-
-## Open items
-
-Anything still uncertain is tracked separately in **`discharge-open-questions.md`** (same folder), not here.

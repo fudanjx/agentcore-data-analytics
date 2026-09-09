@@ -136,7 +136,3 @@ GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC;
 ## Join to admission
 
 Use the `pat_enc_csn_id` candidate join and validate its row count for the requested period. The complete join rules are in `references/data-ontology.yaml`.
-
-## Open items
-
-See `references/urgentcarecenter-open-questions.md`.

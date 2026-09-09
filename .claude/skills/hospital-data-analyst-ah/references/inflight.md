@@ -145,7 +145,3 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 ## Join to admission / discharge
 
 Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period. For NGEMR-era joins prefer `PAT_ENC_CSN_ID` (see the `Case_No` caution above).
-
-## Open items
-
-See `references/inflight-open-questions.md`.

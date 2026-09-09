@@ -133,7 +133,3 @@ GROUP BY 1 ORDER BY 1;
 ## Join to procedure
 
 Use the candidate join in `references/data-ontology.yaml` and validate counts for the requested period.
-
-## Open items
-
-See `references/outpatient-open-questions.md`.
