@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from datetime import time
 from pathlib import Path
 
 import pyarrow as pa
@@ -41,3 +42,10 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(rows, 1)
         self.assertNotIn("PATIENT_NAME", schema.names)
         self.assertIn("pat_enc_csn_id", schema.names)
+
+    def test_time_only_values_are_staged_as_strings_for_glue(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"
+            pq.write_table(pa.table({"visit_time": pa.array([time(9, 30)], type=pa.time64("us"))}), source)
+            schema, _, _ = _write_prepared_parquet(source, output, b"x" * 32)
+        self.assertEqual(schema.field("visit_time").type, pa.string())

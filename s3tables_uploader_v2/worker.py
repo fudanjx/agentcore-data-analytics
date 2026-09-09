@@ -19,6 +19,7 @@ from typing import Any
 
 import boto3
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .config import WorkerSettings
@@ -139,6 +140,25 @@ def _iceberg_type(field: pa.Field) -> str:
     return "STRING"
 
 
+def _glue_compatible_table(table: pa.Table) -> pa.Table:
+    """Convert Arrow time-only values to V1's STRING storage contract.
+
+    Glue/Spark cannot read Parquet TIME(MICROS), while the v1 preflight
+    explicitly stores time-only fields as strings.  Preserve their textual
+    value before staging rather than emitting an invalid physical Parquet type.
+    """
+    arrays, fields = [], []
+    for field in table.schema:
+        column = table[field.name]
+        if pa.types.is_time(field.type):
+            arrays.append(pc.cast(column, pa.string(), safe=False))
+            fields.append(pa.field(field.name, pa.string(), nullable=True, metadata=field.metadata))
+        else:
+            arrays.append(column)
+            fields.append(field)
+    return pa.Table.from_arrays(arrays, schema=pa.schema(fields, metadata=table.schema.metadata))
+
+
 def _write_prepared_parquet(
     source: Path, destination: Path, key: Any | None = None, manual_encryption_columns: list[str] | None = None,
     filename: str | None = None,
@@ -167,7 +187,7 @@ def _write_prepared_parquet(
             # names used by v1's manifest contract.  Keep the transformation
             # at the bounded-batch boundary so a 300 MB upload is never held
             # in the API process or materialised as one Arrow table.
-            sanitized = sanitized.rename_columns(_normalise_names(sanitized.schema.names))
+            sanitized = _glue_compatible_table(sanitized).rename_columns(_normalise_names(sanitized.schema.names))
             if writer is None:
                 output_schema = sanitized.schema
                 writer = pq.ParquetWriter(destination, output_schema, compression="snappy")
