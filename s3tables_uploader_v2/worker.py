@@ -7,6 +7,7 @@ state. Its temporary filesystem is disposable; S3 is the source of truth.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import re
 import socket
@@ -138,7 +139,9 @@ def _iceberg_type(field: pa.Field) -> str:
     return "STRING"
 
 
-def _write_prepared_parquet(source: Path, destination: Path, key: Any | None = None) -> tuple[pa.Schema, int, dict[str, Any]]:
+def _write_prepared_parquet(
+    source: Path, destination: Path, key: Any | None = None, manual_encryption_columns: list[str] | None = None,
+) -> tuple[pa.Schema, int, dict[str, Any]]:
     """Sanitise bounded Parquet batches; never materialise the entire file."""
     parquet = pq.ParquetFile(source)
     writer: pq.ParquetWriter | None = None
@@ -148,7 +151,10 @@ def _write_prepared_parquet(source: Path, destination: Path, key: Any | None = N
     active_key = key or encryption_key()
     try:
         for batch in parquet.iter_batches(batch_size=50_000):
-            sanitized, audit = sanitise_table(pa.Table.from_batches([batch]), active_key)
+            sanitized, audit = sanitise_table(
+                pa.Table.from_batches([batch]), active_key,
+                manual_encryption_columns=manual_encryption_columns or (),
+            )
             # Generic Glue ingestion receives the same stable, S3 Tables-safe
             # names used by v1's manifest contract.  Keep the transformation
             # at the bounded-batch boundary so a 300 MB upload is never held
@@ -172,6 +178,7 @@ def _write_prepared_parquet(source: Path, destination: Path, key: Any | None = N
         "encrypted_columns": sorted({column for item in audits for column in item["encrypted_columns"]}),
         "postal_columns": sorted({column for item in audits for column in item["postal_columns"]}),
         "age_banded_columns": sorted({column for item in audits for column in item["age_banded_columns"]}),
+        "manual_encryption_columns": sorted({column for item in audits for column in item.get("manual_encryption_columns", [])}),
         "newly_encrypted_values": sum(item["newly_encrypted_values"] for item in audits),
         "already_encrypted_values": sum(item["already_encrypted_values"] for item in audits),
     }
@@ -193,7 +200,9 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         prepared = Path(directory) / "prepared.parquet"
         store.put_status(JobStatus(job_id=job_id, phase="PROFILING", message="Validating and sanitising Parquet in bounded batches."))
         s3.download_file(settings.landing_bucket, request.source_key, str(source), ExtraArgs={"VersionId": request.source_version_id})
-        schema, row_count, audit = _write_prepared_parquet(source, prepared)
+        schema, row_count, audit = _write_prepared_parquet(
+            source, prepared, manual_encryption_columns=request.manual_encryption_columns,
+        )
         store.put_status(JobStatus(job_id=job_id, phase="PREPARING", message="Writing sanitised staging artifact."))
         prepared_key = _prepared_key(settings, job_id)
         s3.upload_file(str(prepared), settings.landing_bucket, prepared_key, ExtraArgs={"ServerSideEncryption": "aws:kms", "ContentType": "application/octet-stream"})
@@ -204,9 +213,9 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             "prepared_contract_types": True,
             "incoming_row_count": row_count,
             "prepared_row_count": row_count,
-            "deduplication_mode": "none",
-            "deduplication_columns": [],
-            "deduplication_policy": "none",
+            "deduplication_mode": request.deduplication_mode,
+            "deduplication_columns": request.deduplication_columns,
+            "deduplication_policy": "keyed-composite-contract" if request.deduplication_mode == "keyed" else "none",
             "local_key_deduplication": False,
             "sanitization": [audit],
         }
@@ -221,7 +230,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
                 "--TABLE": request.destination.table, "--RUN_ID": job_id, "--UPLOAD_ID": job_id,
                 "--UPLOADED_BY": request.owner_user_id, "--QC_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc",
                 "--AUDIT_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/audit",
-                "--REPORTING_MONTH": "", "--FILENAMES_JSON": "[]", "--ROLLBACK_SNAPSHOT_ID": "",
+                "--REPORTING_MONTH": request.reporting_month, "--FILENAMES_JSON": json.dumps([Path(request.source_key).name]), "--ROLLBACK_SNAPSHOT_ID": "",
                 "--ORIGINAL_UPLOADED_BY": "", "--ORIGINAL_UPLOADED_AT": "",
             },
         )
@@ -231,7 +240,17 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
 
 
 def main() -> None:
-    job_id = os.environ["S3_UPLOADER_V2_JOB_ID"]
+    job_id = os.environ["S3_UPLOADER_V2_JOB_ID"].strip()
+    # EventBridge Pipes renders an SQS string body as a JSON string in an ECS
+    # environment override (for example, '"profile:abc"').  Directly launched
+    # tasks receive the raw value.  Accept both forms without changing the
+    # queue message contract used by the unchanged v1 client API.
+    try:
+        decoded = json.loads(job_id)
+    except json.JSONDecodeError:
+        decoded = job_id
+    if isinstance(decoded, str):
+        job_id = decoded
     settings = WorkerSettings.from_environ()
     if job_id.startswith(("profile:", "key:")):
         process_compat_work(job_id, settings)

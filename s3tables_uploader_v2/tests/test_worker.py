@@ -23,3 +23,11 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(_iceberg_type(pa.field("id", pa.int64())), "BIGINT")
         self.assertEqual(_iceberg_type(pa.field("when", pa.timestamp("us"))), "TIMESTAMP")
         self.assertEqual(_iceberg_type(pa.field("text", pa.string())), "STRING")
+
+    def test_manual_encryption_choice_is_applied_in_worker_preparation(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"
+            pq.write_table(pa.table({"free_text_id": ["A-1"]}), source)
+            schema, _, audit = _write_prepared_parquet(source, output, b"x" * 32, ["free_text_id"])
+        self.assertEqual(schema.field("free_text_id").type, pa.string())
+        self.assertEqual(audit["manual_encryption_columns"], ["free_text_id"])
