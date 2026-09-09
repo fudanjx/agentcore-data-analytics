@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import socket
 import tempfile
 from pathlib import Path
@@ -25,6 +26,20 @@ from .sanitization import encryption_key, sanitise_table
 
 class WorkerError(RuntimeError):
     pass
+
+
+def _normalise_names(names: list[str]) -> list[str]:
+    """Apply v1's stable S3 Tables column-name contract without UI imports."""
+    used: set[str] = set(); result: list[str] = []
+    for source in names:
+        base = re.sub(r"_+", "_", re.sub(r"[ /()\-]", "_", source)).strip("_").lower()
+        if not base:
+            raise WorkerError(f"Column name normalises to an empty value: {source!r}")
+        candidate = base; index = 1
+        while candidate in used:
+            candidate = f"{base}_{index:02d}"; index += 1
+        used.add(candidate); result.append(candidate)
+    return result
 
 
 def _prepared_key(settings: WorkerSettings, job_id: str) -> str:
@@ -62,6 +77,11 @@ def _write_prepared_parquet(source: Path, destination: Path, key: Any | None = N
     try:
         for batch in parquet.iter_batches(batch_size=50_000):
             sanitized, audit = sanitise_table(pa.Table.from_batches([batch]), active_key)
+            # Generic Glue ingestion receives the same stable, S3 Tables-safe
+            # names used by v1's manifest contract.  Keep the transformation
+            # at the bounded-batch boundary so a 300 MB upload is never held
+            # in the API process or materialised as one Arrow table.
+            sanitized = sanitized.rename_columns(_normalise_names(sanitized.schema.names))
             if writer is None:
                 output_schema = sanitized.schema
                 writer = pq.ParquetWriter(destination, output_schema, compression="snappy")
@@ -106,13 +126,16 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         prepared_key = _prepared_key(settings, job_id)
         s3.upload_file(str(prepared), settings.landing_bucket, prepared_key, ExtraArgs={"ServerSideEncryption": "aws:kms", "ContentType": "application/octet-stream"})
         manifest = {
-            "schema_version": 1,
+            "manifest_version": 2,
             "files": [f"s3://{settings.landing_bucket}/{prepared_key}"],
             "schema": [{"name": field.name, "type": _iceberg_type(field)} for field in schema],
             "prepared_contract_types": True,
             "incoming_row_count": row_count,
             "prepared_row_count": row_count,
             "deduplication_mode": "none",
+            "deduplication_columns": [],
+            "deduplication_policy": "none",
+            "local_key_deduplication": False,
             "sanitization": [audit],
         }
         manifest_key = _manifest_key(settings, job_id)

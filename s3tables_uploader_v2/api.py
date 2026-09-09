@@ -168,6 +168,7 @@ def _compat_preflight(*, files: list[dict[str, Any]], mode: str, table_bucket_ar
 def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any | None = None) -> FastAPI:
     s3 = s3_client or boto3.client("s3", region_name=settings.region)
     sqs = sqs_client or boto3.client("sqs", region_name=settings.region)
+    glue = boto3.client("glue", region_name=settings.region)
     s3tables = boto3.client("s3tables", region_name=settings.region)
     store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
     app = FastAPI(title="S3 Uploader v2", docs_url=None, redoc_url=None)
@@ -395,6 +396,28 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         store.put_compat_session(session)
         return session
 
+    def _glue_run(job_run_id: str) -> dict[str, Any]:
+        try:
+            run = glue.get_job_run(JobName=settings.glue_job_name, RunId=job_run_id, PredecessorsIncluded=False)["JobRun"]
+        except Exception as error:
+            raise HTTPException(503, "Glue status is temporarily unavailable") from error
+        state = str(run.get("JobRunState", "UNKNOWN"))
+        message = str(run.get("ErrorMessage") or run.get("StateDetail") or f"Glue job is {state.lower()}.")
+        return {"state": state, "message": message, "raw": run}
+
+    def _reconcile_glue_job(job_id: str, status: JobStatus) -> JobStatus:
+        if status.phase != "RUNNING_GLUE" or not status.glue_run_id:
+            return status
+        result = _glue_run(status.glue_run_id)
+        state = result["state"]
+        if state == "SUCCEEDED":
+            status = JobStatus(job_id=job_id, phase="SUCCEEDED", message="Glue ingestion succeeded.", glue_run_id=status.glue_run_id)
+            store.put_status(status)
+        elif state in {"FAILED", "ERROR", "TIMEOUT", "STOPPED"}:
+            status = JobStatus(job_id=job_id, phase="FAILED", message=result["message"], error_code=f"GLUE_{state}", glue_run_id=status.glue_run_id)
+            store.put_status(status)
+        return status
+
     @app.get("/api/v2/upload-sessions/{session_id}")
     def get_compat_session(session_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
         session = _get_compat_session(session_id, user_id)
@@ -404,7 +427,7 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         job_id = (session.get("ingestion") or {}).get("job_id")
         if job_id:
             try:
-                status = store.get_status(job_id).status
+                status = _reconcile_glue_job(job_id, store.get_status(job_id).status)
                 phase_map = {"QUEUED": "QUEUED", "CLAIMED": "QUEUED", "PROFILING": "QUEUED", "PREPARING": "STARTING_GLUE", "STARTING_GLUE": "STARTING_GLUE", "RUNNING_GLUE": "GLUE_RUNNING", "SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED"}
                 ingestion = {**(session.get("ingestion") or {}), "state": status.phase, "job_run_id": status.glue_run_id, "qc_uri": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc/{job_id}.json"}
                 changes: dict[str, Any] = {"phase": phase_map[status.phase], "progress_message": status.message, "ingestion": ingestion}
@@ -414,6 +437,11 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             except MissingRecord:
                 pass
         return _safe_compat_session(session)
+
+    @app.get("/api/ingestions/{job_run_id}")
+    def ingestion_status(job_run_id: str, _: str = Depends(current_user)) -> dict[str, Any]:
+        result = _glue_run(job_run_id)
+        return {"job_run_id": job_run_id, "state": result["state"], "message": result["message"]}
 
     @app.delete("/api/v2/upload-sessions/{session_id}", status_code=204)
     def delete_compat_session(session_id: str, user_id: str = Depends(current_user)) -> Response:

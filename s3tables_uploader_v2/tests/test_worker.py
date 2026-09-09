@@ -16,7 +16,7 @@ class WorkerTests(unittest.TestCase):
             schema, rows, audit = _write_prepared_parquet(source, output, b"x" * 32)
             self.assertEqual(rows, 2)
             self.assertNotIn("PATIENT_NAME", schema.names)
-            self.assertIn("PAT_ENC_CSN_ID", schema.names)
+            self.assertIn("pat_enc_csn_id", schema.names)
             self.assertEqual(audit["age_banded_columns"], ["AGE"])
 
     def test_manifest_types_use_ingestion_contract_names(self):
