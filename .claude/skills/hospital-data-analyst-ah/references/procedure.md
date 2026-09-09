@@ -14,7 +14,7 @@ Use the `procedure` filters and canonical date in `references/data-ontology.yaml
 
 Use the typed `operation_date` field directly for date filtering.
 
-## Critical: episode vs procedure count, and the two case identifiers
+## Critical: episode vs procedure count, and the identifiers
 
 **Clarify which the user wants before writing — they give very different numbers:**
 
@@ -25,38 +25,43 @@ COUNT(DISTINCT "case_no")             -- candidate case count where case_no is p
 
 **Episode-level counting requires an explicit definition.** The live table has no physical `case_identifier` column. Use `COUNT(*)` for procedures; use a validated, period-specific case expression only after checking identifier completeness.
 
+**`Case_No` is populated broadly across both eras here** (~92% of rows, including most NGEMR-era rows) — unlike admission/discharge, where `Case_No` is SAP-only. Don't use `Case_No`'s presence/absence to detect era for this table.
+
+**`Adm_CSN` / `Surgery_CSN` are NGEMR-only and only ~31% populated overall** — they exist only when the procedure has a linked NGEMR encounter (day-surgery/walk-in procedures with no inpatient admission commonly have neither). When both are populated they agree only ~57% of the time: `Adm_CSN` is the admission encounter the procedure is tied to, `Surgery_CSN` is the specific procedure/OT encounter itself (a patient's admission can cover several procedure encounters, or a procedure encounter can stand alone with no admission link). Use `Surgery_CSN` to identify the procedure encounter itself; use `Adm_CSN` to join back to `admission`/`inflight`.
+
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter identifier; see the ontology for candidate joins and completeness cautions. |
+| `Case_No` | TEXT | Broadly-populated case identifier (~92% of rows, both eras) — see caution above. |
+| `Adm_CSN` | TEXT | NGEMR admission-encounter identifier — join key back to `admission`. Populated ~31% of rows. |
+| `Surgery_CSN` | TEXT | NGEMR procedure/OT-encounter identifier — identifies this specific procedure encounter. Populated ~31% of rows; differs from `Adm_CSN` ~43% of the time when both present. |
+| `C` (→ `record_type` in the DB) | TEXT | Same ETL mismatch as admission/inflight: really the SAP case-number suffix letter, not a category — concatenate with `Case_No` for the full SAP case number. |
 | `operation_date` | TIMESTAMP | Date of procedure |
 | `OT_Begin_Date` | TIMESTAMP | OT session start date |
 | `OT_Begin_Time` | TIME | OT session start time |
 | `OT_End_Date` | TIMESTAMP | OT session end date |
 | `OT_End_Time` | TIME | OT session end time |
-| `Adm_Type` | TEXT | Determines OP vs IP segmentation — see below |
+| `Adm_Type` | TEXT | Determines OP vs IP segmentation — see below. ~1% of rows have no value and fall in neither bucket. |
 | `Treatment_OU` | TEXT | Operating theatre location |
 | `Treatment_Rm` | TEXT | Specific room name |
-| `OpTable` | TEXT | Raw OT table number/text — see transform below |
+| `OpTable` | TEXT | Raw OT table code, e.g. `1B`, `2C`, `M1`, `MSP` — see transform below |
+| `Op_Code` | TEXT | Raw procedure/operation code |
+| `Surg_Cd_Description` | TEXT | Description tied to `Op_Code` |
 | `Surgical_Visit_Type` | TEXT | `Elective Oper`, `Emergency Oper`, etc. |
-| `Surgery_Case_Type` | TEXT | `Elective` / `Emergency` |
 | `Sub-Specialty` | TEXT | Surgical sub-specialty (always double-quote — hyphen in name) |
 | `Sub-Specialty_Final` | TEXT (derived) | Harmonized sub-specialty — use instead of raw `Sub-Specialty` |
 | `Clinical_Dept` | TEXT | Department |
 | `Surgeon` | TEXT | Primary surgeon name |
 | `Surgeon_MCR_No` | TEXT | Primary surgeon MCR |
 | `Anaesthetist` | TEXT | Anaesthetist name |
-| `ASA_Score` | TEXT | ASA physical status (1–5) |
-| `Proc_Code` | TEXT | NGEMR procedure code |
-| `Proc_Description` | TEXT | NGEMR procedure description |
-| `TOSP_Level_Grouping` | TEXT | Surgical complexity level |
+| `Anaesthetist_MCR_No` | TEXT | Anaesthetist MCR |
+| `ASA_Score` | TEXT | ASA physical status, raw format `'ASA 1'`–`'ASA 3'` (space-separated, not bare digits). Mostly null (~78% of rows). |
 | `DRG_Code` | TEXT | DRG code |
 | `Cls` | TEXT | Raw patient class code — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`) |
 | `Pat_Class` | TEXT (derived) | `Cls` → `Class_abc` → collapsed to `'Private'`/`'Subsidized'` — see below |
+| `Surgery_Patient_Class` | TEXT | Separate raw NGEMR-only field (`DS`, `Inpatient`, `SDA`, `Outpatient`, `DS 23/AS 23`) — not used by production reporting (which uses `Adm_Type` instead); null whenever `Adm_CSN`/`Surgery_CSN` are null. |
 | `Age` | TEXT | Patient age |
-| `Proc_Row_Num` | TEXT | Row within a multi-procedure case (1 = primary) |
 | `cnt` | INTEGER | Always 1 |
 
 ## OpTable transform
@@ -114,12 +119,6 @@ EXTRACT(EPOCH FROM (
 )) / 60 + 15 AS duration_mins
 ```
 
-## Primary procedure per case
-
-```sql
-WHERE CAST("Proc_Row_Num" AS INT) = 1
-```
-
 ## Example: monthly day surgery procedures
 
 ```sql
@@ -152,4 +151,8 @@ GROUP BY 1, 2 ORDER BY 1, cases_with_case_no DESC;
 
 ## Joins
 
-Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.
+Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period. Prefer `Adm_CSN` over `Case_No` when joining to `admission` for NGEMR-era procedures.
+
+## Open items
+
+See `references/procedure-open-questions.md`.
