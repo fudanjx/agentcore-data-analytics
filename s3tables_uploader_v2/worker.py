@@ -9,7 +9,6 @@ from __future__ import annotations
 import json
 import hashlib
 import os
-import re
 import socket
 import tempfile
 import uuid
@@ -27,25 +26,12 @@ from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
 from .job_store import JobAlreadyClaimed, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
-from .worker_analysis import profile_files, raw_key_impact_metrics, read_upload_table
+from .ingest_contract import normalise_names, temporal_array
+from .worker_analysis import profile_files, raw_key_impact_metrics, raw_key_row_selection, read_upload_table
 
 
 class WorkerError(RuntimeError):
     pass
-
-
-def _normalise_names(names: list[str]) -> list[str]:
-    """Apply v1's stable S3 Tables column-name contract without UI imports."""
-    used: set[str] = set(); result: list[str] = []
-    for source in names:
-        base = re.sub(r"_+", "_", re.sub(r"[ /()\-]", "_", source)).strip("_").lower()
-        if not base:
-            raise WorkerError(f"Column name normalises to an empty value: {source!r}")
-        candidate = base; index = 1
-        while candidate in used:
-            candidate = f"{base}_{index:02d}"; index += 1
-        used.add(candidate); result.append(candidate)
-    return result
 
 
 def _prepared_key(settings: WorkerSettings, job_id: str) -> str:
@@ -54,6 +40,11 @@ def _prepared_key(settings: WorkerSettings, job_id: str) -> str:
 
 def _manifest_key(settings: WorkerSettings, job_id: str) -> str:
     return f"{settings.landing_prefix}/jobs/{job_id}/prepared/manifest.json"
+
+
+def _contract_key(settings: WorkerSettings, table_bucket_arn: str, namespace: str, table: str) -> str:
+    scope = hashlib.sha256(f"{table_bucket_arn}|{namespace}".encode()).hexdigest()[:16]
+    return f"{settings.contract_prefix}/{scope}/{table}.json"
 
 
 def _now() -> str:
@@ -73,8 +64,7 @@ def _load_append_contract(s3: Any, settings: WorkerSettings, table_bucket_arn: s
     """Load the same durable v1 table contract used by the Glue path."""
     if table == "soc":
         return {"contract_version": 1, "schema": [{"name": column, "type": "TIMESTAMP" if column in TIMESTAMP_TARGET_COLUMNS else "BIGINT" if column == "cnt" else "STRING"} for column in TARGET_COLUMNS]}
-    scope = hashlib.sha256(f"{table_bucket_arn}|{namespace}".encode()).hexdigest()[:16]
-    key = f"{settings.contract_prefix}/{scope}/{table}.json"
+    key = _contract_key(settings, table_bucket_arn, namespace, table)
     try:
         return json.loads(s3.get_object(Bucket=settings.contract_bucket, Key=key)["Body"].read())
     except Exception as error:
@@ -140,6 +130,68 @@ def _iceberg_type(field: pa.Field) -> str:
     return "STRING"
 
 
+def _arrow_contract_type(target_type: str) -> pa.DataType:
+    return {
+        "STRING": pa.string(), "BIGINT": pa.int64(), "DOUBLE": pa.float64(),
+        "BOOLEAN": pa.bool_(), "DATE": pa.date32(), "TIMESTAMP": pa.timestamp("us"),
+    }[target_type]
+
+
+def _cast_contract_column(column: pa.ChunkedArray, target_type: str) -> pa.Array | pa.ChunkedArray:
+    """Port of V1's typed staging conversion, before Spark sees Parquet."""
+    if target_type in {"DATE", "TIMESTAMP"}:
+        parsed = temporal_array(column, target_type)
+        invalid_count = int(pc.count(column).as_py()) - (len(parsed) - parsed.null_count)
+        if invalid_count:
+            raise WorkerError(f"{target_type} conversion would discard {invalid_count} value(s)")
+        return parsed
+    if target_type == "BOOLEAN" and not pa.types.is_boolean(column.type):
+        import polars as pl
+        text = pl.from_arrow(column).cast(pl.String, strict=False).str.strip_chars().str.to_lowercase()
+        return pl.DataFrame({"v": text}).select(
+            pl.when(pl.col("v").is_in(["true", "1"])).then(True)
+            .when(pl.col("v").is_in(["false", "0"])).then(False).otherwise(None)
+        ).to_series().to_arrow()
+    return pc.cast(column, _arrow_contract_type(target_type), safe=False)
+
+
+def _project_to_contract(table: pa.Table, target_schema: list[dict[str, str]] | None) -> pa.Table:
+    """Apply V1's reviewed, ordered table contract to a sanitised batch."""
+    if not target_schema:
+        return table.rename_columns(normalise_names(table.schema.names))
+    table = table.rename_columns(normalise_names(table.schema.names))
+    arrays = []
+    for field in target_schema:
+        name, target_type = field["name"], field["type"]
+        if name not in table.schema.names:
+            arrays.append(pa.nulls(len(table), type=_arrow_contract_type(target_type)))
+        else:
+            arrays.append(_cast_contract_column(table[name], target_type))
+    return pa.table(arrays, names=[field["name"] for field in target_schema])
+
+
+def _write_create_contract(s3: Any, settings: WorkerSettings, request: Any, target_schema: list[dict[str, str]], audit: dict[str, Any]) -> None:
+    """Persist the same immutable create contract V1 requires for appends."""
+    automatic = sorted(set(audit["encrypted_columns"] + audit["postal_columns"] + audit["age_banded_columns"] + audit.get("nric_encrypted_columns", [])))
+    payload = {
+        "contract_version": 3,
+        "schema": target_schema,
+        "deduplication_columns": request.deduplication_columns if request.deduplication_mode == "keyed" else [],
+        "deduplication_mode": "keyed" if request.deduplication_mode == "keyed" else "unconfigured",
+        "deduplication_policy": "skip-existing-key-report-conflict-v2",
+        "temporal_invalid_value_policy": {"version": 1, "invalid_values": "NULL", "columns": []},
+        "manual_encryption_columns": request.manual_encryption_columns,
+        "automatic_sanitization_columns": automatic,
+        "created_by": request.owner_user_id,
+        "created_at": _now(),
+    }
+    s3.put_object(
+        Bucket=settings.contract_bucket,
+        Key=_contract_key(settings, request.destination.table_bucket_arn, request.destination.namespace, request.destination.table),
+        Body=json.dumps(payload, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="AES256",
+    )
+
+
 def _glue_compatible_table(table: pa.Table) -> pa.Table:
     """Emit only Parquet physical types accepted by the Glue/Spark reader.
 
@@ -167,7 +219,8 @@ def _glue_compatible_table(table: pa.Table) -> pa.Table:
 
 def _write_prepared_parquet(
     source: Path, destination: Path, key: Any | None = None, manual_encryption_columns: list[str] | None = None,
-    filename: str | None = None,
+    filename: str | None = None, row_indices: list[int] | None = None,
+    target_schema: list[dict[str, str]] | None = None, nric_columns: list[str] | None = None,
 ) -> tuple[pa.Schema, int, dict[str, Any]]:
     """Sanitise supported upload formats inside the disposable large worker."""
     lower = (filename or source.name).lower()
@@ -181,19 +234,31 @@ def _write_prepared_parquet(
     writer: pq.ParquetWriter | None = None
     output_schema: pa.Schema | None = None
     rows = 0
+    source_row_offset = 0
+    selected_rows = sorted(row_indices) if row_indices is not None else None
+    selected_cursor = 0
     audits: list[dict[str, Any]] = []
     active_key = key or encryption_key()
     try:
         for batch in batches:
+            if selected_rows is not None:
+                batch_end = source_row_offset + batch.num_rows
+                while selected_cursor < len(selected_rows) and selected_rows[selected_cursor] < source_row_offset:
+                    selected_cursor += 1
+                next_cursor = selected_cursor
+                while next_cursor < len(selected_rows) and selected_rows[next_cursor] < batch_end:
+                    next_cursor += 1
+                local_indices = [index - source_row_offset for index in selected_rows[selected_cursor:next_cursor]]
+                selected_cursor = next_cursor
+                source_row_offset += batch.num_rows
+                if not local_indices:
+                    continue
+                batch = batch.take(pa.array(sorted(local_indices), type=pa.int64()))
             sanitized, audit = sanitise_table(
                 pa.Table.from_batches([batch]), active_key,
-                manual_encryption_columns=manual_encryption_columns or (),
+                manual_encryption_columns=manual_encryption_columns or (), nric_columns=nric_columns or (),
             )
-            # Generic Glue ingestion receives the same stable, S3 Tables-safe
-            # names used by v1's manifest contract.  Keep the transformation
-            # at the bounded-batch boundary so a 300 MB upload is never held
-            # in the API process or materialised as one Arrow table.
-            sanitized = _glue_compatible_table(sanitized).rename_columns(_normalise_names(sanitized.schema.names))
+            sanitized = _glue_compatible_table(_project_to_contract(sanitized, target_schema))
             if writer is None:
                 output_schema = sanitized.schema
                 writer = pq.ParquetWriter(destination, output_schema, compression="snappy")
@@ -229,15 +294,36 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         return "duplicate"
     store.put_status(JobStatus(job_id=job_id, phase="CLAIMED", message="Worker claimed the job."))
     request = store.get_request(job_id)
+    session = store.get_compat_session(request.session_id)
+    preflight = session.get("preflight") or {}
+    if (preflight.get("table_bucket_arn"), preflight.get("namespace"), preflight.get("table")) != (
+        request.destination.table_bucket_arn, request.destination.namespace, request.destination.table,
+    ):
+        raise WorkerError("Reviewed preflight destination does not match the immutable job request")
+    target_schema = preflight.get("target_schema") or []
+    nric_columns = list((preflight.get("files") or [{}])[0].get("nric_detected_columns") or [])
     with tempfile.TemporaryDirectory(prefix="s3-uploader-v2-") as directory:
         source = Path(directory) / "source.parquet"
         prepared = Path(directory) / "prepared.parquet"
         store.put_status(JobStatus(job_id=job_id, phase="PROFILING", message="Validating and sanitising Parquet in bounded batches."))
         s3.download_file(settings.landing_bucket, request.source_key, str(source), ExtraArgs={"VersionId": request.source_version_id})
+        row_indices: list[int] | None = None
+        local_deduplication_metrics: dict[str, int] = {}
+        if request.deduplication_mode == "keyed":
+            store.put_status(JobStatus(job_id=job_id, phase="PROFILING", message="Selecting raw keyed rows before sanitisation."))
+            selections, local_deduplication_metrics = raw_key_row_selection(
+                [(source, Path(request.source_key).name)], request.deduplication_columns,
+            )
+            row_indices = selections[0]
         schema, row_count, audit = _write_prepared_parquet(
             source, prepared, manual_encryption_columns=request.manual_encryption_columns,
-            filename=Path(request.source_key).name,
+            filename=Path(request.source_key).name, row_indices=row_indices,
+            target_schema=target_schema, nric_columns=nric_columns,
         )
+        if local_deduplication_metrics and row_count != local_deduplication_metrics["rows_retained_after_local_deduplication"]:
+            raise WorkerError("Prepared row count does not match raw local de-duplication result")
+        if request.operation == "create":
+            _write_create_contract(s3, settings, request, target_schema, audit)
         store.put_status(JobStatus(job_id=job_id, phase="PREPARING", message="Writing sanitised staging artifact."))
         prepared_key = _prepared_key(settings, job_id)
         s3.upload_file(str(prepared), settings.landing_bucket, prepared_key, ExtraArgs={"ServerSideEncryption": "aws:kms", "ContentType": "application/octet-stream"})
@@ -246,12 +332,13 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             "files": [f"s3://{settings.landing_bucket}/{prepared_key}"],
             "schema": [{"name": field.name, "type": _iceberg_type(field)} for field in schema],
             "prepared_contract_types": True,
-            "incoming_row_count": row_count,
+            "incoming_row_count": local_deduplication_metrics.get("incoming_rows", row_count),
             "prepared_row_count": row_count,
             "deduplication_mode": request.deduplication_mode,
             "deduplication_columns": request.deduplication_columns,
             "deduplication_policy": "keyed-composite-contract" if request.deduplication_mode == "keyed" else "none",
-            "local_key_deduplication": False,
+            "local_key_deduplication": bool(local_deduplication_metrics),
+            "local_deduplication_metrics": local_deduplication_metrics,
             "sanitization": [audit],
         }
         manifest_key = _manifest_key(settings, job_id)

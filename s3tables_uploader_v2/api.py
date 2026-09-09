@@ -478,6 +478,15 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             impact = session.get("key_impact") or {}
             if payload.key_analysis_token != impact.get("token") or payload.deduplication_columns != impact.get("deduplication_columns"):
                 raise HTTPException(422, "Run and acknowledge composite-key analysis before keyed ingestion")
+            expires_at = impact.get("expires_at")
+            if not expires_at or datetime.fromisoformat(expires_at) <= datetime.now(timezone.utc):
+                raise HTTPException(422, "The composite-key analysis acknowledgement has expired; run it again")
+        allowed_manual = {
+            item["column"] for item in (session.get("preflight") or {}).get("sanitization_review", {}).get("manual_encryption_candidates", [])
+        }
+        invalid_manual = sorted(set(payload.manual_encryption_columns) - allowed_manual)
+        if invalid_manual:
+            raise HTTPException(422, f"Manual encryption is not available for: {', '.join(invalid_manual)}")
         source = session["files"][0]
         if not source.get("source_version_id"):
             head = s3.head_object(Bucket=settings.landing_bucket, Key=source["source_key"])

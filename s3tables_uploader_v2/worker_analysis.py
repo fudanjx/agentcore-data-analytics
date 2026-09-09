@@ -116,6 +116,86 @@ def raw_key_impact_metrics(paths: list[tuple[Path, str]], key_columns: list[str]
     }
 
 
+def raw_key_row_selection(paths: list[tuple[Path, str]], key_columns: list[str]) -> tuple[dict[int, list[int]], dict[str, int]]:
+    """Return retained raw row offsets using the exact V1 keyed contract.
+
+    This is deliberately separate from :func:`raw_key_impact_metrics`: the
+    latter is review-only, whereas this function makes the acknowledged review
+    enforceable.  It runs before sanitisation, so redaction/encryption cannot
+    turn otherwise distinct raw rows into apparent duplicates in Glue.
+    """
+    frames: list[tuple[pl.LazyFrame, dict[str, str]]] = []
+    all_columns: set[str] = set()
+    for path, filename in paths:
+        frame = _raw_analysis_lazy_frame(path, filename)
+        source_names = list(frame.collect_schema().names())
+        lookup = dict(zip(normalise_names(source_names), source_names))
+        frames.append((frame, lookup))
+        all_columns.update(lookup)
+    missing = sorted(set(key_columns) - all_columns)
+    if missing:
+        raise ValueError(f"The selected key columns are not present in the upload: {', '.join(missing)}")
+    if not all_columns:
+        raise ValueError("The selected file has no columns for key analysis")
+
+    columns = sorted(all_columns)
+    projected = []
+    for file_number, (frame, lookup) in enumerate(frames):
+        projected.append(
+            frame.select([
+                pl.col(lookup[name]).cast(pl.String, strict=False).alias(name)
+                if name in lookup else pl.lit(None, dtype=pl.String).alias(name)
+                for name in columns
+            ])
+            .with_row_index("__source_row")
+            .with_columns(pl.lit(file_number, dtype=pl.Int32).alias("__source_file"))
+        )
+    incoming = pl.concat(projected, how="vertical_relaxed")
+    components = [
+        pl.when(pl.col(name).is_null() | (pl.col(name).str.strip_chars() == ""))
+        .then(pl.lit("~"))
+        .otherwise(pl.col(name))
+        .alias(name)
+        for name in key_columns
+    ]
+    classified_source = incoming.with_columns(pl.struct(components).alias("__uploader_composite_key"))
+    grouped = classified_source.group_by("__uploader_composite_key").agg(
+        pl.len().alias("rows"),
+        pl.struct([pl.col(name) for name in columns]).n_unique().alias("variants"),
+    )
+    classified = classified_source.join(grouped, on="__uploader_composite_key", how="left")
+    selected = (
+        classified.filter(pl.col("variants") == 1)
+        .sort("__source_file", "__source_row")
+        .unique(subset=["__uploader_composite_key"], keep="first", maintain_order=True)
+        .select("__source_file", "__source_row")
+    )
+    summary = grouped.select(
+        pl.col("rows").sum().alias("incoming_rows"),
+        pl.len().alias("unique_composite_keys"),
+        pl.when(pl.col("variants") == 1).then(pl.col("rows") - 1).otherwise(0).sum().alias("exact_duplicate_rows"),
+        (pl.col("variants") > 1).sum().alias("conflicting_key_groups"),
+        pl.when(pl.col("variants") > 1).then(pl.col("rows")).otherwise(0).sum().alias("rows_in_conflicting_key_groups"),
+        (pl.col("variants") == 1).sum().alias("expected_retained_rows"),
+    )
+    summary_frame, selected_frame = pl.collect_all([summary, selected])
+    values = summary_frame.row(0, named=True)
+    total = int(values["incoming_rows"] or 0)
+    retained = int(values["expected_retained_rows"] or 0)
+    selections: dict[int, list[int]] = {number: [] for number in range(len(paths))}
+    for file_number, source_row in selected_frame.iter_rows():
+        selections[int(file_number)].append(int(source_row))
+    return selections, {
+        "incoming_rows": total,
+        "unique_composite_keys": int(values["unique_composite_keys"] or 0),
+        "duplicate_rows_within_upload": int(values["exact_duplicate_rows"] or 0),
+        "within_upload_key_conflicts": int(values["rows_in_conflicting_key_groups"] or 0),
+        "within_upload_conflict_keys": int(values["conflicting_key_groups"] or 0),
+        "rows_retained_after_local_deduplication": retained,
+        "expected_skipped_rows": total - retained,
+    }
+
+
 def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_arn: str, namespace: str, table: str, existing_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run v1's raw inspection and sanitisation review in the worker.
 
