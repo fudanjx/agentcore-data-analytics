@@ -239,8 +239,8 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
                 "--TABLE": request.destination.table, "--RUN_ID": job_id, "--UPLOAD_ID": job_id,
                 "--UPLOADED_BY": request.owner_user_id, "--QC_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc",
                 "--AUDIT_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/audit",
-                "--REPORTING_MONTH": request.reporting_month, "--FILENAMES_JSON": json.dumps([Path(request.source_key).name]), "--ROLLBACK_SNAPSHOT_ID": "",
-                "--ORIGINAL_UPLOADED_BY": "", "--ORIGINAL_UPLOADED_AT": "",
+                "--REPORTING_MONTH": request.reporting_month or "not-applicable", "--FILENAMES_JSON": json.dumps([Path(request.source_key).name]), "--ROLLBACK_SNAPSHOT_ID": "not-applicable",
+                "--ORIGINAL_UPLOADED_BY": request.owner_user_id, "--ORIGINAL_UPLOADED_AT": request.created_at.isoformat(),
             },
         )
     glue_run_id = response["JobRunId"]
