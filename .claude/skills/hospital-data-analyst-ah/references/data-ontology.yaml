@@ -9,7 +9,7 @@ source:
 # This is the agent-facing semantic source of truth. The schema guide owns the
 # complete physical schema; table reference files own detailed metric logic.
 global_rules:
-  preliminary_records: "Use prelim_flag = 'N' unless the user explicitly requests provisional data."
+  preliminary_records: "Use prelim_flag = 'N' only when the user explicitly requests provisional data."
   identifiers: "Treat all identifiers as strings; neither case_no nor pat_enc_csn_id is universally complete."
   joins: "Every relationship below is a candidate join, not an enforced key. Check row counts and duplicates for the requested period."
 
@@ -21,7 +21,7 @@ tables:
     filters:
       - "adm_status <> 'P'"
       - "adm_type IN ('EM','EL','SD','DI','TA','RA')"
-      - "derived admitting ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')"
+      - "derived admitting ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')"
   discharge:
     grain: discharged inpatient episode
     date: { field: disch_date, meaning: discharge date }
