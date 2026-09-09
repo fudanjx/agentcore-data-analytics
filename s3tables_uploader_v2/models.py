@@ -37,6 +37,10 @@ class JobRequest(BaseModel):
     source_version_id: str = Field(min_length=1)
     source_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     source_size_bytes: int = Field(gt=0)
+    reporting_month: str = Field(default="", max_length=128)
+    deduplication_mode: Literal["none", "keyed"] = "none"
+    deduplication_columns: list[str] = Field(default_factory=list)
+    manual_encryption_columns: list[str] = Field(default_factory=list)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
     @field_validator("source_key")

@@ -11,6 +11,8 @@ import os
 import re
 import socket
 import tempfile
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,9 +21,11 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from .config import WorkerSettings
+from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
 from .job_store import JobAlreadyClaimed, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
+from .worker_analysis import profile_files, raw_key_impact_metrics
 
 
 class WorkerError(RuntimeError):
@@ -48,6 +52,74 @@ def _prepared_key(settings: WorkerSettings, job_id: str) -> str:
 
 def _manifest_key(settings: WorkerSettings, job_id: str) -> str:
     return f"{settings.landing_prefix}/jobs/{job_id}/prepared/manifest.json"
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _save_compat_session(store: S3JobStore, session: dict[str, Any], **changes: Any) -> dict[str, Any]:
+    now = _now()
+    if "phase" in changes and changes["phase"] != session.get("phase"):
+        changes["phase_started_at"] = now
+    session.update(changes); session["updated_at"] = now
+    store.put_compat_session(session)
+    return session
+
+
+def _load_append_contract(s3: Any, settings: WorkerSettings, table_bucket_arn: str, namespace: str, table: str) -> dict[str, Any]:
+    """Load the same durable v1 table contract used by the Glue path."""
+    if table == "soc":
+        return {"contract_version": 1, "schema": [{"name": column, "type": "TIMESTAMP" if column in TIMESTAMP_TARGET_COLUMNS else "BIGINT" if column == "cnt" else "STRING"} for column in TARGET_COLUMNS]}
+    scope = hashlib.sha256(f"{table_bucket_arn}|{namespace}".encode()).hexdigest()[:16]
+    key = f"{settings.contract_prefix}/{scope}/{table}.json"
+    try:
+        return json.loads(s3.get_object(Bucket=settings.contract_bucket, Key=key)["Body"].read())
+    except Exception as error:
+        raise WorkerError(f"No uploader schema contract is available for table {table!r}") from error
+
+
+def process_compat_work(work_id: str, settings: WorkerSettings, s3_client: Any | None = None) -> str:
+    """Run a profile or key-impact request in the disposable large worker."""
+    action, separator, session_id = work_id.partition(":")
+    if not separator or action not in {"profile", "key"} or not session_id:
+        raise WorkerError("invalid compatibility worker request")
+    s3 = s3_client or boto3.client("s3", region_name=settings.region)
+    store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
+    session = store.get_compat_session(session_id)
+    with tempfile.TemporaryDirectory(prefix="s3-uploader-v2-review-") as directory:
+        paths: list[tuple[Path, str, str]] = []
+        for number, item in enumerate(session.get("files", [])):
+            path = Path(directory) / f"{number:02d}-{Path(item['name']).name}"
+            extra = {"VersionId": item["source_version_id"]} if item.get("source_version_id") else None
+            if extra:
+                s3.download_file(settings.landing_bucket, item["source_key"], str(path), ExtraArgs=extra)
+            else:
+                s3.download_file(settings.landing_bucket, item["source_key"], str(path))
+            paths.append((path, item["name"], item["sha256"]))
+        try:
+            if action == "profile":
+                _save_compat_session(store, session, phase="PROFILING", progress_message="Analysing file structure and proposed schema in the isolated worker.")
+                contract = _load_append_contract(s3, settings, session["table_bucket_arn"], session["namespace"], session["table"]) if session["mode"] == "append" else None
+                preview = profile_files(paths, session["mode"], session["table_bucket_arn"], session["namespace"], session["table"], contract)
+                _save_compat_session(store, session, phase="READY_FOR_REVIEW", progress_message="Data structure analysis is complete.", preflight=preview)
+                return session_id
+            request = session.get("key_analysis_request") or {}
+            columns = request.get("deduplication_columns") or []
+            _save_compat_session(store, session, phase="KEY_ANALYSING", progress_message="Analysing the selected composite key in the isolated worker.")
+            metrics = raw_key_impact_metrics([(path, name) for path, name, _ in paths], columns)
+            expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+            token = uuid.uuid4().hex
+            impact = {
+                "metrics": metrics, "deduplication_columns": columns, "type_overrides": request.get("type_overrides", {}),
+                "acknowledgement_token": token, "token": token, "expires_at": expires_at.isoformat(),
+                "no_storage_or_glue_side_effects": True, "analysis_basis": "raw-s3-object-pre-sanitization",
+            }
+            _save_compat_session(store, session, phase="READY_FOR_ACKNOWLEDGEMENT", progress_message="Composite-key impact analysis is complete; acknowledge it before upload.", key_impact=impact, key_analysis_request=None)
+            return session_id
+        except Exception as error:
+            _save_compat_session(store, session, phase="FAILED", progress_message="Worker review failed.", error={"code": f"{action.upper()}_ANALYSIS_FAILED", "message": str(error)})
+            raise
 
 
 def _iceberg_type(field: pa.Field) -> str:
@@ -160,7 +232,11 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
 
 def main() -> None:
     job_id = os.environ["S3_UPLOADER_V2_JOB_ID"]
-    process_job(job_id, WorkerSettings.from_environ())
+    settings = WorkerSettings.from_environ()
+    if job_id.startswith(("profile:", "key:")):
+        process_compat_work(job_id, settings)
+    else:
+        process_job(job_id, settings)
 
 
 if __name__ == "__main__":

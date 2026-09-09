@@ -68,7 +68,7 @@ class SessionKeyImpactRequest(BaseModel):
     type_overrides: dict[str, str] = Field(default_factory=dict)
 
 
-_SUPPORTED_COMPAT_SUFFIXES = (".parquet", ".parquet.gzip")
+_SUPPORTED_COMPAT_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 _UPLOAD_PART_BYTES = 8 * 1024 * 1024
 
 
@@ -320,19 +320,14 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
             raise HTTPException(400, "Choose at least one Parquet file")
         invalid = [str(upload.filename or "<unnamed>") for upload in uploads if not (upload.filename or "").lower().endswith(_SUPPORTED_COMPAT_SUFFIXES)]
         if invalid:
-            raise HTTPException(400, "The Fargate compatibility path currently accepts Parquet and Parquet GZIP files only")
+            raise HTTPException(400, "Supported files are Parquet, Parquet GZIP, XLSX, XLS, CSV, and TSV")
 
         session_id = uuid.uuid4().hex
         received_at = _now()
         files: list[dict[str, Any]] = []
-        profile_inputs: list[dict[str, Any]] = []
         try:
             for number, upload in enumerate(uploads):
                 name = _safe_upload_name(upload.filename or "")
-                # Parquet footer/schema is read from the spooled upload only;
-                # it does not scan data pages or put file contents in memory.
-                schema = await asyncio.to_thread(lambda source=upload.file: pq.ParquetFile(source).schema_arrow)
-                await asyncio.to_thread(upload.file.seek, 0)
                 key = f"{settings.landing_prefix}/uploads/{session_id}/raw/{number:02d}-{name}"
                 multipart = await asyncio.to_thread(
                     s3.create_multipart_upload, Bucket=settings.landing_bucket, Key=key,
@@ -352,17 +347,16 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
                     await asyncio.to_thread(s3.abort_multipart_upload, Bucket=settings.landing_bucket, Key=key, UploadId=multipart["UploadId"])
                     raise
                 files.append({"name": name, "sha256": digest.hexdigest(), "size_bytes": size, "source_key": key, "source_version_id": completed.get("VersionId")})
-                profile_inputs.append({"name": name, "schema": schema})
-            preflight = _compat_preflight(files=profile_inputs, mode=mode, table_bucket_arn=table_bucket_arn, namespace=namespace, table=table)
             session = {
                 "schema_version": 1, "session_id": session_id, "owner_user_id": user_id, "mode": mode,
                 "table_bucket_arn": table_bucket_arn, "namespace": namespace, "table": table,
                 "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=60)).isoformat(), "files": files,
-                "phase": "READY_FOR_REVIEW", "progress_message": "Schema review is complete.", "error": None,
-                "preflight": preflight, "key_impact": None, "ingestion": None, "phase_timings_ms": {},
+                "phase": "RECEIVED", "progress_message": "Files are stored in S3; waiting for isolated worker profiling.", "error": None,
+                "preflight": None, "key_impact": None, "ingestion": None, "phase_timings_ms": {},
                 "created_at": received_at, "updated_at": _now(), "phase_started_at": _now(),
             }
             store.put_compat_session(session, create_only=True)
+            _dispatch_compat_work("profile", session)
             return _safe_compat_session(session)
         except HTTPException:
             raise
@@ -395,6 +389,11 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         session.update(changes); session["updated_at"] = now
         store.put_compat_session(session)
         return session
+
+    def _dispatch_compat_work(action: Literal["profile", "key"], session: dict[str, Any]) -> None:
+        work_id = f"{action}:{session['session_id']}"
+        group = hashlib.sha256(f"{session['table_bucket_arn']}\x1f{session['namespace']}\x1f{session['table']}".encode()).hexdigest()
+        sqs.send_message(QueueUrl=settings.queue_url, MessageBody=work_id, MessageDeduplicationId=f"{work_id}:{uuid.uuid4()}", MessageGroupId=group)
 
     def _glue_run(job_run_id: str) -> dict[str, Any]:
         try:
@@ -459,15 +458,12 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         unknown = sorted(set(columns) - known)
         if unknown:
             raise HTTPException(422, f"Unknown de-duplication columns: {', '.join(unknown)}")
-        # Exact duplicate metrics require a bounded worker scan.  We never
-        # report invented figures: this explicit review token records the
-        # immutable user selection, and the worker enforces it before Glue.
-        token = uuid.uuid4().hex
-        impact = {"token": token, "acknowledgement_token": token, "deduplication_columns": columns,
-                  "metrics": {"incoming_rows": 0, "unique_composite_keys": 0, "exact_duplicate_rows": 0, "conflicting_composite_keys": 0, "expected_retained_rows": 0, "expected_skipped_rows": 0},
-                  "message": "Key selection recorded; exact row metrics will be calculated by the isolated worker before ingestion."}
-        _save_compat_session(session, phase="READY_FOR_ACKNOWLEDGEMENT", progress_message="Composite-key choice recorded; acknowledge it before upload.", key_impact=impact)
-        return {"session_id": session_id, "phase": "READY_FOR_ACKNOWLEDGEMENT", "key_impact": impact}
+        _save_compat_session(
+            session, phase="KEY_ANALYSING", progress_message="Queued for isolated composite-key analysis.", key_impact=None,
+            key_analysis_request={"deduplication_columns": columns, "type_overrides": payload.type_overrides},
+        )
+        _dispatch_compat_work("key", session)
+        return {"session_id": session_id, "phase": "KEY_ANALYSING", "message": "Composite-key analysis has started in the isolated worker."}
 
     @app.post("/api/v2/upload-sessions/{session_id}/ingestions", status_code=202)
     def start_compat_ingestion(session_id: str, payload: SessionIngestionRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -492,7 +488,10 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
         job = JobRequest(job_id=job_id, session_id=session_id, owner_user_id=user_id, operation=session["mode"],
                          destination=Destination(table_bucket_arn=session["table_bucket_arn"], namespace=session["namespace"], table=session["table"]),
                          source_key=source["source_key"], source_version_id=source["source_version_id"],
-                         source_sha256=source["sha256"], source_size_bytes=source["size_bytes"])
+                         source_sha256=source["sha256"], source_size_bytes=source["size_bytes"],
+                         reporting_month=payload.reporting_month, deduplication_mode=payload.deduplication_mode,
+                         deduplication_columns=payload.deduplication_columns,
+                         manual_encryption_columns=payload.manual_encryption_columns)
         store.put_request(job); store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload queued for the isolated Fargate worker."))
         group = hashlib.sha256(f"{job.destination.table_bucket_arn}\x1f{job.destination.namespace}\x1f{job.destination.table}".encode()).hexdigest()
         sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId=group)

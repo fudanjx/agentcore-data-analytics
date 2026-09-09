@@ -76,6 +76,8 @@ class WorkerSettings:
     landing_bucket: str
     landing_prefix: str
     glue_job_name: str
+    contract_bucket: str
+    contract_prefix: str
 
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> "WorkerSettings":
@@ -85,4 +87,6 @@ class WorkerSettings:
             landing_bucket=_required("S3_UPLOADER_V2_LANDING_BUCKET", env),
             landing_prefix=env.get("S3_UPLOADER_V2_LANDING_PREFIX", "s3-uploader-v2").strip("/"),
             glue_job_name=_required("S3_UPLOADER_V2_GLUE_JOB_NAME", env),
+            contract_bucket=env.get("S3_UPLOADER_V2_CONTRACT_BUCKET", "ah-data-analytics").strip(),
+            contract_prefix=env.get("S3_UPLOADER_V2_CONTRACT_PREFIX", "temp_s3_update/web_ingest/table_contracts").strip("/"),
         )
