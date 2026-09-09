@@ -90,7 +90,7 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     def namespaces(table_bucket_arn: str, _: str = Depends(current_user)) -> dict[str, Any]:
         if table_bucket_arn not in ALLOWED_TABLE_BUCKET_ARNS:
             raise HTTPException(403, "TABLE_BUCKET_FORBIDDEN")
-        return {"table_bucket_arn": table_bucket_arn, "namespaces": [item[0] for item in s3tables.list_namespaces(tableBucketARN=table_bucket_arn).get("namespaces", [])]}
+        return {"table_bucket_arn": table_bucket_arn, "namespaces": [item["namespace"][0] for item in s3tables.list_namespaces(tableBucketARN=table_bucket_arn).get("namespaces", [])]}
 
     @app.get("/api/tables")
     def tables(table_bucket_arn: str, namespace: str, _: str = Depends(current_user)) -> dict[str, Any]:
