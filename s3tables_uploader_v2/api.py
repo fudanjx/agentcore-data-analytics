@@ -18,6 +18,13 @@ from .job_store import MissingRecord, S3JobStore
 from .models import Destination, JobRequest, JobStatus, UploadSession
 
 
+ALLOWED_TABLE_BUCKET_ARNS = {
+    "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-analytics",
+    "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-soc-delta-pilot",
+    "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/nuh-analytics",
+}
+
+
 class LoginRequest(BaseModel):
     password: str
 
@@ -41,6 +48,7 @@ class PartUrlRequest(BaseModel):
 def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any | None = None) -> FastAPI:
     s3 = s3_client or boto3.client("s3", region_name=settings.region)
     sqs = sqs_client or boto3.client("sqs", region_name=settings.region)
+    s3tables = boto3.client("s3tables", region_name=settings.region)
     store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
     app = FastAPI(title="S3 Uploader v2", docs_url=None, redoc_url=None)
     static_root = Path(__file__).parent / "static"
@@ -63,6 +71,33 @@ def create_app(settings: Settings, s3_client: Any | None = None, sqs_client: Any
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/api/dev/identity-profiles")
+    def identity_profiles() -> dict[str, Any]:
+        return {"local_only": True, "header_name": "X-Pilot-User-Id", "profiles": [{"user_id": "shared-operator", "is_admin": True, "can_view_upload_history": True, "can_rollback_uploads": True, "buckets": [], "expected_access": True}]}
+
+    @app.get("/api/identity")
+    def identity(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        return {"user_id": user_id, "is_admin": True, "can_view_upload_history": True, "can_rollback_uploads": True, "scope_mode": "three-approved-table-buckets", "buckets": [{"table_bucket_arn": arn, "namespace": "*", "label": arn.rsplit("/", 1)[-1]} for arn in sorted(ALLOWED_TABLE_BUCKET_ARNS)], "request_context": {"header_name": "X-Pilot-User-Id", "header_value": user_id, "roles_and_grants_sent_by_browser": False}}
+
+    @app.get("/api/buckets")
+    def buckets(user_id: str = Depends(current_user)) -> dict[str, Any]:
+        result = s3tables.list_table_buckets()
+        approved = [{"table_bucket_arn": item["arn"], "label": item["name"]} for item in result.get("tableBuckets", []) if item["arn"] in ALLOWED_TABLE_BUCKET_ARNS]
+        return {"user_id": user_id, "is_admin": True, "can_view_upload_history": True, "can_rollback_uploads": True, "buckets": approved}
+
+    @app.get("/api/namespaces")
+    def namespaces(table_bucket_arn: str, _: str = Depends(current_user)) -> dict[str, Any]:
+        if table_bucket_arn not in ALLOWED_TABLE_BUCKET_ARNS:
+            raise HTTPException(403, "TABLE_BUCKET_FORBIDDEN")
+        return {"table_bucket_arn": table_bucket_arn, "namespaces": [item[0] for item in s3tables.list_namespaces(tableBucketARN=table_bucket_arn).get("namespaces", [])]}
+
+    @app.get("/api/tables")
+    def tables(table_bucket_arn: str, namespace: str, _: str = Depends(current_user)) -> dict[str, Any]:
+        if table_bucket_arn not in ALLOWED_TABLE_BUCKET_ARNS:
+            raise HTTPException(403, "TABLE_BUCKET_FORBIDDEN")
+        rows = [{"name": item["name"], "created_at": str(item.get("createdAt")), "modified_at": str(item.get("modifiedAt")), "row_count": None, "uploader_managed": True} for item in s3tables.list_tables(tableBucketARN=table_bucket_arn, namespace=namespace).get("tables", [])]
+        return {"table_bucket": table_bucket_arn, "namespace": namespace, "is_admin": True, "tables": sorted(rows, key=lambda item: item["name"])}
 
     @app.get("/")
     def landing() -> FileResponse:
