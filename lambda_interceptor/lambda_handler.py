@@ -47,6 +47,7 @@ def lambda_handler(event, context):
         request_body = gateway_request.get("body", {})
         request_headers = gateway_request.get("headers", {})
         mcp_method = request_body.get("method", "unknown")
+        request_id = request_body.get("id", "")
 
         # Log the MCP method
         logger.info(f"Processing REQUEST interceptor - MCP method: {mcp_method}")
@@ -54,7 +55,8 @@ def lambda_handler(event, context):
         if mcp_method == "unknown":
             reject_response = copy.deepcopy(INTERCEPTOR_OUTPUT_FORMAT)
             del reject_response["mcp"]["transformedGatewayRequest"]
-            reject_response["mcp"]["transformedGatewayResponse"]["statusCode"] = 422
+            reject_response["mcp"]["transformedGatewayResponse"]["statusCode"] = 200
+            reject_response["mcp"]["transformedGatewayResponse"]["body"]["id"] = request_id
             reject_response["mcp"]["transformedGatewayResponse"]["body"]["result"] = {
                 "content": [{"type": "text", "text": "No method type passed."}],
                 "isError": True
@@ -71,7 +73,12 @@ def lambda_handler(event, context):
             if "all" not in allowed_sources and target_source not in allowed_sources:
                 reject_response = copy.deepcopy(INTERCEPTOR_OUTPUT_FORMAT)
                 del reject_response["mcp"]["transformedGatewayRequest"]
-                reject_response["mcp"]["transformedGatewayResponse"]["statusCode"] = 401
+                # NOTE: Use status code 200 as python mcp client swallows non 2XX status code responses and does
+                # not propagate back to client. Resulting in client hanging indefinitely waiting for response till timeout.
+                # This seems to be patched in a PR submitted to v2 MCP SDK, keep this for v1 MCP SDK compatibility till further notice.
+                # Reference: https://github.com/modelcontextprotocol/python-sdk/issues/2110
+                reject_response["mcp"]["transformedGatewayResponse"]["statusCode"] = 200
+                reject_response["mcp"]["transformedGatewayResponse"]["body"]["id"] = request_id
                 ACCESS_DENY_TEXT = (
                                     f"Do not try to retrieve any data/tables using {target_source} as source. "
                                     f"The user only has access to the following sources: {', '.join(allowed_sources)}"
@@ -83,7 +90,7 @@ def lambda_handler(event, context):
                         {
                             "type": "text",
                             "text": (
-                                f"[ACCESS DENIED] The user does not have permission to view/list/read any data from the source: {target_source}"
+                                f"[ACCESS DENIED] The user does not have permission to view/list/read any data from the source: {target_source}. "
                                 f"{ACCESS_DENY_TEXT}"
                             )
                         }
