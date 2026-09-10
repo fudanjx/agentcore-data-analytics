@@ -98,6 +98,55 @@ END AS effective_class
 
 Note this differs from the discharge table's override chain (which checks `Nrs_OU` ward prefix `LW9`/`LW8` for ISO instead of `Accom_Category`) — don't reuse discharge's chain for inflight.
 
+## Ward / bed acuity (Trt_Cat → Acuity)
+
+`Trt_Cat` encodes accommodation class *and* acuity level in one code (e.g. `CL3` = Class C, Level 3; `HDC` = High Dependency, Class C — not `<prefix>L<n>`). To get just the acuity level (`L1`/`L2`/`L3`/`EDTU`) for "how acute is this ward" or "acuity mix" questions, resolve `Trt_Cat` through the mapping below (sourced from `Class.xlsx`'s `Acuity` sheet, confirmed to cover every `Trt_Cat` value seen in the real sample data) — don't string-parse the trailing digit, several codes (`CCUC`, `HDC`, `EDTUB2`, `EDTVS`) don't follow that pattern.
+
+**Note:** this mapping is specific to `inflight`'s `Trt_Cat`. The `trt_cat` column in `outpatient` is a different, unrelated code set (treatment category, e.g. `NC`) — don't cross-apply.
+
+| Trt_Cat | Acuity | Trt_Cat | Acuity | Trt_Cat | Acuity |
+|---|---|---|---|---|---|
+| `AL1` | `L1` | `CCUA` | `L3` | `SOB2L3` | `L3` |
+| `AL2` | `L2` | `CCUB1` | `L3` | `SOCL1` | `L1` |
+| `AL3` | `L3` | `CCUB2` | `L3` | `SOCL2` | `L2` |
+| `B1L1` | `L1` | `CCUC` | `L3` | `SOCL3` | `L3` |
+| `B1L2` | `L2` | `CL1` | `L1` | `EDTUB2` | `EDTU` |
+| `B1L3` | `L3` | `CL2` | `L2` | `EDTVS` | `EDTU` |
+| `B2L1` | `L1` | `CL3` | `L3` | `SSBS` | `L3` |
+| `B2L2` | `L2` | `HDA` | `L3` | `SSBP` | `L3` |
+| `B2L3` | `L3` | `HDB1` | `L3` | `SSRPTE` | `L3` |
+| `IACCB2` | `L3` | `HDB2` | `L3` | `EDVA` | `L3` |
+| `IACL1` | `L1` | `HDC` | `L3` | `EDVB1` | `L3` |
+| `IACL2` | `L2` | | | `EDVB2` | `L3` |
+| `IACL3` | `L3` | | | `EDVC` | `L3` |
+
+```sql
+CASE "Trt_Cat"
+  WHEN 'AL1' THEN 'L1' WHEN 'AL2' THEN 'L2' WHEN 'AL3' THEN 'L3'
+  WHEN 'B1L1' THEN 'L1' WHEN 'B1L2' THEN 'L2' WHEN 'B1L3' THEN 'L3'
+  WHEN 'B2L1' THEN 'L1' WHEN 'B2L2' THEN 'L2' WHEN 'B2L3' THEN 'L3'
+  WHEN 'CCUA' THEN 'L3' WHEN 'CCUB1' THEN 'L3' WHEN 'CCUB2' THEN 'L3' WHEN 'CCUC' THEN 'L3'
+  WHEN 'CL1' THEN 'L1' WHEN 'CL2' THEN 'L2' WHEN 'CL3' THEN 'L3'
+  WHEN 'HDA' THEN 'L3' WHEN 'HDB1' THEN 'L3' WHEN 'HDB2' THEN 'L3' WHEN 'HDC' THEN 'L3'
+  WHEN 'SOB2L3' THEN 'L3' WHEN 'SOCL1' THEN 'L1' WHEN 'SOCL2' THEN 'L2' WHEN 'SOCL3' THEN 'L3'
+  WHEN 'EDTUB2' THEN 'EDTU' WHEN 'EDTVS' THEN 'EDTU'
+  WHEN 'SSBS' THEN 'L3' WHEN 'SSBP' THEN 'L3' WHEN 'SSRPTE' THEN 'L3'
+  WHEN 'IACCB2' THEN 'L3' WHEN 'IACL1' THEN 'L1' WHEN 'IACL2' THEN 'L2' WHEN 'IACL3' THEN 'L3'
+  WHEN 'EDVA' THEN 'L3' WHEN 'EDVB1' THEN 'L3' WHEN 'EDVB2' THEN 'L3' WHEN 'EDVC' THEN 'L3'
+  ELSE NULL  -- unmapped Trt_Cat -- investigate before reporting
+END AS acuity
+
+-- Example: acuity mix by ward for a period
+SELECT "Ward",
+       CASE "Trt_Cat" ... END AS acuity,
+       SUM("cnt") AS patient_days
+FROM inflight
+WHERE "prelim_flag" = 'N'
+  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+  AND "Inflight_Date" BETWEEN '2024-01-01' AND '2024-12-31'
+GROUP BY 1, 2 ORDER BY 1, 2;
+```
+
 ## Counting patterns
 
 ```sql
