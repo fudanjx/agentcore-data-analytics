@@ -126,12 +126,13 @@ SELECT
   "Arrival_Mode",
   COUNT(*) AS attendances
 FROM urgentcarecenter
-WHERE "prelim_flag" = 'N'
-  AND "Case_End_Type" != 'Cancelled'
+WHERE "Case_End_Type" != 'Cancelled'
   AND "Att_Phy_Name" != 'CANCELLATION'
   AND "Visit_Date" >= '2024-01-01'
 GROUP BY 1, 2, 3 ORDER BY 1, 4 DESC;
 ```
+
+Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
 ## Join to admission
 

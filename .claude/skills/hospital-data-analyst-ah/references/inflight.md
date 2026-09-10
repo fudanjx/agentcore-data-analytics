@@ -23,7 +23,7 @@ Like admission and discharge, inflight rows come from two eras with different id
 
 ## ⚠️ Read this before answering any patient-days question
 
-The production `pt_days_by_ward` report is **not** built from raw `inflight` alone. Patients admitted and discharged on the **same calendar date** never appear in a daily census snapshot. Production adds a synthetic one-row-per-case top-up sourced from `discharge` (same-day rows only, where `Adm_Date = Disch_Date`), joined to `admission` **on `PAT_ENC_CSN_ID`** for `Disch_Acmd_Cat` (discharge's own copy of that field is blank and must be refilled from admission's), filtered using `discharge`'s own mandatory filters, with `LOS = 1` and `Inflight_Date = Disch_Date`.
+The production `pt_days_by_ward` report is **not** built from raw `inflight` alone. Patients admitted and discharged on the **same calendar date** never appear in a daily census snapshot. Production adds a synthetic one-row-per-case top-up sourced from `discharge` (same-day rows only, where `Adm_Date = Disch_Date`), joined to `admission` **on `PAT_ENC_CSN_ID`** for `Disch_Acmd_Cat` (discharge's own copy of that field is blank and must be refilled from admission's), filtered using `discharge`'s own mandatory filters, with `LOS = 1` and `Inflight_Date = Disch_Date`. **`Trt_Cat` for these rows uses discharge's own copy (`d."Trt_Cat"`), not admission's** — unlike `Disch_Acmd_Cat`, discharge's `Trt_Cat` is populated and needs no backfill from admission.
 
 Because the top-up join key is `PAT_ENC_CSN_ID`, it only reliably picks up **NGEMR-era** same-day cases — legacy SAP-era same-day discharges (`PAT_ENC_CSN_ID` null) won't match and are effectively excluded from the top-up.
 
@@ -33,8 +33,7 @@ Conceptual union to replicate production:
 
 ```sql
 SELECT "Ward", "Inflight_Date", "cnt", "Accom_Category", "Class" FROM inflight
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+WHERE "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 
 UNION ALL
 
@@ -42,14 +41,16 @@ SELECT d."Nrs_OU"        AS "Ward",
        d."Disch_Date"    AS "Inflight_Date",
        d."cnt",
        a."Disch_Acmd_Cat" AS "Accom_Category",
-       d."Disch_Class"   AS "Class"
+       d."Disch_Class"   AS "Class",
+       d."Trt_Cat"       AS "Trt_Cat"
 FROM discharge d
 JOIN admission a ON d."PAT_ENC_CSN_ID" = a."PAT_ENC_CSN_ID"
 WHERE d."Adm_Date" = d."Disch_Date"
-  AND d."prelim_flag" = 'N'
   AND d."Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
   AND d."Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 ```
+
+Add `AND "prelim_flag" = 'N'` (both the `inflight` side and the `d.`/discharge side) only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
 ## Query baseline
 
@@ -80,7 +81,7 @@ Use the `inflight` filters and canonical date in `references/data-ontology.yaml`
 | `Class` | TEXT | Raw patient class code — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`) to get `Class_abc`. |
 | `Accom_Category` | TEXT | Actual accommodation type on this census date. |
 | `Adm_Type` | TEXT | Original admission route. |
-| `prelim_flag` | TEXT | `N` = finalised, `Y` = preliminary. Use `prelim_flag = 'N'` unless the user explicitly requests provisional data (see `data-ontology.yaml` global rule). |
+| `prelim_flag` | TEXT | `N` = finalised, `Y` = preliminary. **Don't filter on this by default** — only add `WHERE "prelim_flag" = 'N'` when the user explicitly asks to exclude provisional records (see `data-ontology.yaml` global rule). |
 | `cnt` | INTEGER | Always 1 — represents one patient-day. |
 
 ## Critical: the ICU/HD/ISO override chain
@@ -106,19 +107,22 @@ Note this differs from the discharge table's override chain (which checks `Nrs_O
 
 | Trt_Cat | Acuity | Trt_Cat | Acuity | Trt_Cat | Acuity |
 |---|---|---|---|---|---|
-| `AL1` | `L1` | `CCUA` | `L3` | `SOB2L3` | `L3` |
-| `AL2` | `L2` | `CCUB1` | `L3` | `SOCL1` | `L1` |
-| `AL3` | `L3` | `CCUB2` | `L3` | `SOCL2` | `L2` |
-| `B1L1` | `L1` | `CCUC` | `L3` | `SOCL3` | `L3` |
-| `B1L2` | `L2` | `CL1` | `L1` | `EDTUB2` | `EDTU` |
-| `B1L3` | `L3` | `CL2` | `L2` | `EDTVS` | `EDTU` |
-| `B2L1` | `L1` | `CL3` | `L3` | `SSBS` | `L3` |
-| `B2L2` | `L2` | `HDA` | `L3` | `SSBP` | `L3` |
-| `B2L3` | `L3` | `HDB1` | `L3` | `SSRPTE` | `L3` |
-| `IACCB2` | `L3` | `HDB2` | `L3` | `EDVA` | `L3` |
-| `IACL1` | `L1` | `HDC` | `L3` | `EDVB1` | `L3` |
-| `IACL2` | `L2` | | | `EDVB2` | `L3` |
-| `IACL3` | `L3` | | | `EDVC` | `L3` |
+| `AL1` | `L1` | `CCUA` | `L3` | `SOAL1` | `L1` |
+| `AL2` | `L2` | `CCUB1` | `L3` | `SOB1L1` | `L1` |
+| `AL3` | `L3` | `CCUB2` | `L3` | `SOB2L3` | `L3` |
+| `B1L1` | `L1` | `CCUC` | `L3` | `SOCL1` | `L1` |
+| `B1L2` | `L2` | `CL1` | `L1` | `SOCL2` | `L2` |
+| `B1L3` | `L3` | `CL2` | `L2` | `SOCL3` | `L3` |
+| `B2L1` | `L1` | `CL3` | `L3` | `EDTUB2` | `EDTU` |
+| `B2L2` | `L2` | `DSBP` | `L3` | `EDTVS` | `EDTU` |
+| `B2L3` | `L3` | `DSBS` | `L3` | `SSBP` | `L3` |
+| `IAAL3` | `L3` | `HDA` | `L3` | `SSBS` | `L3` |
+| `IAB1L3` | `L3` | `HDB1` | `L3` | `SSRPTE` | `L3` |
+| `IAB2L3` | `L3` | `HDB2` | `L3` | `EDVA` | `L3` |
+| `IACCB2` | `L3` | `HDC` | `L3` | `EDVB1` | `L3` |
+| `IACL1` | `L1` | | | `EDVB2` | `L3` |
+| `IACL2` | `L2` | | | `EDVC` | `L3` |
+| `IACL3` | `L3` | | | | |
 
 ```sql
 CASE "Trt_Cat"
@@ -133,6 +137,9 @@ CASE "Trt_Cat"
   WHEN 'SSBS' THEN 'L3' WHEN 'SSBP' THEN 'L3' WHEN 'SSRPTE' THEN 'L3'
   WHEN 'IACCB2' THEN 'L3' WHEN 'IACL1' THEN 'L1' WHEN 'IACL2' THEN 'L2' WHEN 'IACL3' THEN 'L3'
   WHEN 'EDVA' THEN 'L3' WHEN 'EDVB1' THEN 'L3' WHEN 'EDVB2' THEN 'L3' WHEN 'EDVC' THEN 'L3'
+  WHEN 'IAAL3' THEN 'L3' WHEN 'IAB1L3' THEN 'L3' WHEN 'IAB2L3' THEN 'L3'
+  WHEN 'DSBS' THEN 'L3' WHEN 'DSBP' THEN 'L3'
+  WHEN 'SOAL1' THEN 'L1' WHEN 'SOB1L1' THEN 'L1'
   ELSE NULL  -- unmapped Trt_Cat -- investigate before reporting
 END AS acuity
 
@@ -141,8 +148,7 @@ SELECT "Ward",
        CASE "Trt_Cat" ... END AS acuity,
        SUM("cnt") AS patient_days
 FROM inflight
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+WHERE "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
   AND "Inflight_Date" BETWEEN '2024-01-01' AND '2024-12-31'
 GROUP BY 1, 2 ORDER BY 1, 2;
 ```
@@ -153,8 +159,7 @@ GROUP BY 1, 2 ORDER BY 1, 2;
 -- Total patient-days in a period
 SELECT SUM("cnt") AS patient_days
 FROM inflight
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+WHERE "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
   AND "Inflight_Date" BETWEEN '2024-01-01' AND '2024-12-31';
 
 -- Average daily census by month
@@ -162,10 +167,11 @@ SELECT
   DATE_TRUNC('month', "Inflight_Date") AS month,
   ROUND(COUNT(*)::NUMERIC / COUNT(DISTINCT "Inflight_Date"), 1) AS avg_daily_census
 FROM inflight
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+WHERE "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 GROUP BY 1 ORDER BY 1;
 ```
+
+Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
 ## Lodger identification
 
@@ -185,8 +191,7 @@ SELECT
   CASE WHEN "Accom_Category" = 'OTHER' THEN "Class" ELSE "Accom_Category" END AS bed_class,
   SUM("cnt") AS patient_days
 FROM inflight
-WHERE "prelim_flag" = 'N'
-  AND "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
+WHERE "Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
   AND "Inflight_Date" >= '2024-01-01'
 GROUP BY 1, 2 ORDER BY 1, 2;
 ```

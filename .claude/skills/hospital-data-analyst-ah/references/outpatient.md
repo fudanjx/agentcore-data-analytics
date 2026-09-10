@@ -122,13 +122,14 @@ SELECT
   SUM(CASE WHEN "Visit_Type" IN ('FV','FW','DF','FD') THEN 1 ELSE 0 END) AS new_visits,
   SUM(CASE WHEN "Visit_Type" IN ('RV','RW','DR','RD') THEN 1 ELSE 0 END) AS repeat_visits
 FROM outpatient
-WHERE "prelim_flag" = 'N'
-  AND ("Status" != 'P' OR "Status" IS NULL)
+WHERE ("Status" != 'P' OR "Status" IS NULL)
   AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
   AND ("Trt_Cat" != 'NC' OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
   AND "Visit_Date" >= '2024-01-01'
 GROUP BY 1 ORDER BY 1;
 ```
+
+Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
 ## Join to procedure
 
