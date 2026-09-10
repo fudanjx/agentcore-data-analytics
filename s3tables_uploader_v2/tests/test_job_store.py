@@ -23,3 +23,11 @@ class JobStoreTests(unittest.TestCase):
         store.put_status(JobStatus(job_id="job", phase="QUEUED", message="queued"))
         self.assertEqual(store.get_request("job").source_version_id, "version")
         self.assertEqual(store.get_status("job").status.phase, "QUEUED")
+
+    def test_persists_a_worker_lease_separately_from_job_state(self):
+        store = S3JobStore(FakeS3(), "bucket", "prefix")
+        lease = {"lease_id": "lease", "owner_user_id": "owner", "state": "STARTING", "worker_size": "BASE"}
+        store.put_lease(lease, create_only=True)
+        restored = store.get_lease("lease")
+        self.assertEqual(restored["worker_size"], "BASE")
+        self.assertEqual(restored["owner_user_id"], "owner")

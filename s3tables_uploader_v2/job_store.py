@@ -21,6 +21,10 @@ class MissingRecord(KeyError):
     pass
 
 
+class ConcurrentRecordUpdate(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class StoredStatus:
     status: JobStatus
@@ -52,17 +56,66 @@ class S3JobStore:
     def compat_session_key(self, session_id: str) -> str:
         return self._key(f"compat-sessions/{session_id}/session.json")
 
-    def put_compat_session(self, session: dict[str, Any], *, create_only: bool = False) -> None:
+    def lease_key(self, lease_id: str) -> str:
+        return self._key(f"worker-leases/{lease_id}/lease.json")
+
+    def put_lease(self, lease: dict[str, Any], *, create_only: bool = False, expected_etag: str | None = None) -> None:
         options = {"IfNoneMatch": "*"} if create_only else {}
+        if expected_etag is not None:
+            options["IfMatch"] = expected_etag
+        self._put_json(self.lease_key(str(lease["lease_id"])), lease, **options)
+
+    def get_lease(self, lease_id: str) -> dict[str, Any]:
+        return self.get_lease_with_etag(lease_id)[0]
+
+    def get_lease_with_etag(self, lease_id: str) -> tuple[dict[str, Any], str]:
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=self.lease_key(lease_id))
+            return self._read_json(response), response.get("ETag", "").strip('"')
+        except ClientError as error:
+            if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
+                raise MissingRecord(lease_id) from error
+            raise
+
+    def update_lease(self, lease_id: str, changes: dict[str, Any], *, attempts: int = 4) -> dict[str, Any]:
+        return self._update_json_record(self.get_lease_with_etag, self.put_lease, lease_id, changes, attempts)
+
+    def put_compat_session(self, session: dict[str, Any], *, create_only: bool = False, expected_etag: str | None = None) -> None:
+        options = {"IfNoneMatch": "*"} if create_only else {}
+        if expected_etag is not None:
+            options["IfMatch"] = expected_etag
         self._put_json(self.compat_session_key(str(session["session_id"])), session, **options)
 
     def get_compat_session(self, session_id: str) -> dict[str, Any]:
+        return self.get_compat_session_with_etag(session_id)[0]
+
+    def get_compat_session_with_etag(self, session_id: str) -> tuple[dict[str, Any], str]:
         try:
-            return self._read_json(self.s3.get_object(Bucket=self.bucket, Key=self.compat_session_key(session_id)))
+            response = self.s3.get_object(Bucket=self.bucket, Key=self.compat_session_key(session_id))
+            return self._read_json(response), response.get("ETag", "").strip('"')
         except ClientError as error:
             if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
                 raise MissingRecord(session_id) from error
             raise
+
+    def update_compat_session(self, session_id: str, changes: dict[str, Any], *, attempts: int = 4) -> dict[str, Any]:
+        return self._update_json_record(self.get_compat_session_with_etag, self.put_compat_session, session_id, changes, attempts)
+
+    @staticmethod
+    def _is_precondition_failure(error: ClientError) -> bool:
+        return error.response["Error"].get("Code") in {"PreconditionFailed", "ConditionalRequestConflict", "412"}
+
+    def _update_json_record(self, reader: Any, writer: Any, record_id: str, changes: dict[str, Any], attempts: int) -> dict[str, Any]:
+        for _ in range(attempts):
+            current, etag = reader(record_id)
+            updated = {**current, **changes, "state_version": int(current.get("state_version", 0)) + 1}
+            try:
+                writer(updated, expected_etag=etag)
+                return updated
+            except ClientError as error:
+                if not self._is_precondition_failure(error):
+                    raise
+        raise ConcurrentRecordUpdate(f"Concurrent update did not settle for {record_id}")
 
     def _put_json(self, key: str, payload: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
         return self.s3.put_object(

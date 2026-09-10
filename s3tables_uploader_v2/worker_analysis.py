@@ -38,6 +38,35 @@ def normalise_names(names: list[str]) -> list[str]:
     return result
 
 
+def _strict_source_schema(table: pa.Table) -> list[dict[str, str]]:
+    """Return the exact cross-file schema contract before sanitisation."""
+    names = normalise_names(table.schema.names)
+    return [{"name": name, "type": str(field.type)} for name, field in zip(names, table.schema)]
+
+
+def _column_name_difference(expected: list[dict[str, str]], actual: list[dict[str, str]]) -> str | None:
+    expected_names = {field["name"] for field in expected}
+    actual_names = {field["name"] for field in actual}
+    if expected_names == actual_names:
+        return None
+    missing = sorted(expected_names - actual_names)
+    extra = sorted(actual_names - expected_names)
+    details = []
+    if missing:
+        details.append(f"missing {missing}")
+    if extra:
+        details.append(f"unexpected {extra}")
+    return "; ".join(details)
+
+
+def _cross_file_type_mismatches(schemas: list[list[dict[str, str]]]) -> dict[str, list[str]]:
+    observed: dict[str, set[str]] = {}
+    for schema in schemas:
+        for field in schema:
+            observed.setdefault(field["name"], set()).add(field["type"])
+    return {name: sorted(types) for name, types in observed.items() if len(types) > 1}
+
+
 def read_upload_table(path: Path, filename: str) -> pa.Table:
     lower = filename.lower()
     if lower.endswith((".parquet", ".parquet.gzip")):
@@ -206,6 +235,10 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
     if not paths:
         raise ValueError("Choose at least one supported file")
     tables = [read_upload_table(path, name) for path, name, _ in paths]
+    source_schemas = [_strict_source_schema(source) for source in tables]
+    baseline_schema = source_schemas[0]
+    schema_differences = [_column_name_difference(baseline_schema, schema) for schema in source_schemas]
+    type_mismatches = _cross_file_type_mismatches(source_schemas)
     target_schema, plan = sanitised_schema(tables[0].schema)
     forced = set(plan.identifier_columns) | set(plan.postal_columns) | set(plan.age_columns)
     if mode == "append":
@@ -214,13 +247,23 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
         target, warnings = existing_contract["schema"], []
     else:
         target, warnings, _ = profile_table(tables[0], target_schema, forced)
+        if type_mismatches:
+            target = [
+                {**field, "type": "STRING"} if field["name"] in type_mismatches else field
+                for field in target
+            ]
+            warnings.extend(
+                f"{column} has different source types across selected files and will be stored as STRING."
+                for column in sorted(type_mismatches)
+            )
     target_names = {field["name"] for field in target}
     results = []
-    for (path, name, digest), source in zip(paths, tables):
+    for number, ((path, name, digest), source) in enumerate(zip(paths, tables)):
         source_schema, source_plan = sanitised_schema(source.schema)
         comparison = compare_schema(source_schema, target)
         matching = comparison["matching_column_count"]; percent = comparison["matching_percentage"]
-        accepted = mode == "create" or percent >= 50.0
+        schema_error = schema_differences[number]
+        accepted = (mode == "create" or percent >= 50.0) and schema_error is None
         nric_columns, nric_details = detect_nric_columns(source, digest)
         sanitized = sorted(set(source_plan.drop_columns + source_plan.identifier_columns + source_plan.postal_columns + source_plan.age_columns + nric_columns))
         results.append({
@@ -230,9 +273,17 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
             "sanitization": {"dropped_columns": list(source_plan.drop_columns), "encrypted_columns": list(source_plan.identifier_columns), "postal_columns": list(source_plan.postal_columns), "age_banded_columns": list(source_plan.age_columns)},
             "nric_detection": nric_details, "nric_detected_columns": list(nric_columns), "sanitized_columns": sanitized,
             "sanitized_column_count": len(sanitized), "unsafe_casts": [], "temporal_coercions": [], "accepted": accepted,
-            "rejection_reasons": [] if accepted else [f"{name}: only {percent:.1f}% of the initial table schema matches; at least 50.0% is required for an append."],
+            "rejection_reasons": ([] if mode == "create" or percent >= 50.0 else [f"{name}: only {percent:.1f}% of the initial table schema matches; at least 50.0% is required for an append."])
+            + ([] if schema_error is None else [f"{name}: multi-file upload column mismatch: {schema_error}. Submit this file as a separate upload."]),
         })
-    candidates = [{"column": field["name"], "target_type": field["type"], "source_type": field["type"], "sample_values": [], "samples_masked": True, "non_null_count": 0, "deduplication_eligible": True} for field in target]
+    configured_key = list((existing_contract or {}).get("deduplication_columns") or [])
+    source_column_sets = [set(normalise_names(source.schema.names)) for source in tables]
+    available_columns = set.intersection(*source_column_sets) if source_column_sets else set()
+    active_key = [column for column in configured_key if column in available_columns]
+    candidates = [] if configured_key else [
+        {"column": field["name"], "target_type": field["type"], "source_type": field["type"], "sample_values": [], "samples_masked": True, "non_null_count": 0, "deduplication_eligible": True}
+        for field in target
+    ]
     automatic_encrypted = sorted({
         normalise_names([column])[0]
         for result in results
@@ -252,10 +303,16 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
         "mode": mode, "table_bucket_arn": table_bucket_arn, "namespace": namespace, "table": table,
         "target_schema": target, "creation_warnings": warnings, "initial_table_column_count": len(target),
         "minimum_append_schema_match_percent": 50.0, "files": results, "type_selections": [],
-        "deduplication_candidates": candidates, "deduplication_columns": [], "deduplication_policy": "none",
+        "deduplication_candidates": candidates, "deduplication_columns": active_key,
+        "deduplication_locked_columns": configured_key,
+        "deduplication_policy": "derived-locked-key-v3" if configured_key else "none",
         "contract_fingerprint": None, "temporal_policy_adoption": None, "phase_timings_ms": {},
         "incompatible_sensitive_columns": [], "accepted": all(item["accepted"] for item in results),
         "rejection_reasons": [reason for item in results for reason in item["rejection_reasons"]],
+        "multi_file_schema": {
+            "enforced": len(tables) > 1, "reference_file": paths[0][1], "reference_schema": baseline_schema,
+            "type_conflicts_stored_as_string": type_mismatches if mode == "create" else {},
+        },
         "sensitive_column_scan": "Sanitization is enforced in the isolated worker before temporary S3 staging.",
         "sanitization_review": {"automatic_encrypted_columns": automatic_encrypted, "manual_encryption_candidates": manual_candidates, "nric_detection_policy": {"sample_size": 5, "match_threshold": 3, "kind": "sampled-heuristic-v1"}},
     }

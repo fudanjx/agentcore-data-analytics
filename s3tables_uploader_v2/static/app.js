@@ -1,6 +1,6 @@
 const SESSION_STORAGE_KEY = 's3tables-uploader-v2-session-id';
 const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED'];
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, temporalPolicyAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastHttpRequestId: null, currentOperationId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null };
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, tableDeduplicationColumns: [], mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, temporalPolicyAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastHttpRequestId: null, currentOperationId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null, workerLeaseId: null, workerLease: null };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
@@ -40,7 +40,12 @@ function selectedTable() { return state.mode === 'create' ? $('new-table').value
 function bucketQuery() { return new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace }); }
 function userTag() { return $('reporting-month').value.trim(); }
 function escapeHtml(value) { const node = document.createElement('span'); node.textContent = String(value); return node.innerHTML; }
-function formatTime(value) { return value ? new Date(value).toLocaleString() : 'Unavailable'; }
+function formatTime(value) {
+  return value ? new Date(value).toLocaleString('en-SG', {
+    timeZone: 'Asia/Singapore', year: 'numeric', month: 'numeric', day: 'numeric',
+    hour: 'numeric', minute: '2-digit', second: '2-digit', hour12: true,
+  }) : 'Unavailable';
+}
 function clearSessionPoll() {
   state.sessionPollGeneration += 1;
   if (state.sessionPollTimer) clearTimeout(state.sessionPollTimer);
@@ -49,7 +54,7 @@ function clearSessionPoll() {
   state.sessionPollResolve = null;
 }
 function clearGluePoll() { if (state.gluePollTimer) { clearTimeout(state.gluePollTimer); state.gluePollTimer = null; } state.activeJobRunId = null; }
-function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; state.temporalPolicyAcknowledged = false; state.currentOperationId = null; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; }
+function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; state.temporalPolicyAcknowledged = false; state.currentOperationId = null; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; $('retry-large').hidden = true; }
 function identityRequestPayload() {
   return {
     headers: { 'X-Pilot-User-Id': state.emulatedUserId },
@@ -336,8 +341,8 @@ async function loadTables() {
   setChildren($('tables'), ...data.tables.map(table => {
     const card = document.createElement('article'); card.className = 'table'; card.dataset.table = table.name;
     const select = document.createElement('button'); select.className = 'table-select'; select.type = 'button';
-    select.innerHTML = `<strong>${table.name}</strong><small>Created: ${table.created_at || 'Unavailable'}</small><small>Modified: ${table.modified_at || 'Unavailable'}</small><small>Rows: ${table.row_count?.toLocaleString() ?? 'Unavailable'}</small>${table.uploader_managed ? '' : '<small class="browse-only">Browse only: no uploader schema/recovery contract.</small>'}`;
-    select.onclick = () => { clearPreflight(); state.table = table.name; state.tableManaged = Boolean(table.uploader_managed); state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; selectTable(); valid(); loadHistory(); };
+    select.innerHTML = `<strong>${table.name}</strong><small>Created: ${formatTime(table.created_at)}</small><small>Modified: ${formatTime(table.modified_at)}</small><small>Rows: ${table.row_count?.toLocaleString() ?? 'Unavailable'}</small>${table.uploader_managed ? '' : '<small class="browse-only">Browse only: no uploader schema/recovery contract.</small>'}`;
+    select.onclick = () => { clearPreflight(); state.table = table.name; state.tableManaged = Boolean(table.uploader_managed); state.tableDeduplicationColumns = table.deduplication_columns || []; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; updateDeduplicationModeVisibility(); selectTable(); valid(); loadHistory(); };
     card.append(select);
     if (state.isAdmin && table.uploader_managed) {
       const remove = document.createElement('button'); remove.className = 'danger'; remove.type = 'button'; remove.textContent = 'Delete table';
@@ -345,12 +350,12 @@ async function loadTables() {
     }
     return card;
   }));
-  if (!data.tables.some(table => table.name === state.table)) { state.table = null; state.tableManaged = false; }
+  if (!data.tables.some(table => table.name === state.table)) { state.table = null; state.tableManaged = false; state.tableDeduplicationColumns = []; }
   if (data.tables.length === 0) {
     state.mode = 'create'; state.tableManaged = true;
     $('create').checked = true; $('new-table-wrap').hidden = false;
   }
-  selectTable(); valid(); await loadHistory();
+  updateDeduplicationModeVisibility(); selectTable(); valid(); await loadHistory();
 }
 
 async function deleteTable(table) {
@@ -391,11 +396,86 @@ function valid() {
 function formData() {
   const data = new FormData(); data.append('mode', state.mode); data.append('table', selectedTable());
   data.append('table_bucket_arn', state.bucket.table_bucket_arn); data.append('namespace', state.namespace);
+  if (state.workerLeaseId) data.append('worker_lease_id', state.workerLeaseId);
   [...$('files').files].forEach(file => data.append('files', file)); return data;
+}
+
+async function cancelUnattachedWorkerLease() {
+  if (!state.workerLeaseId || state.sessionId) return;
+  const leaseId = state.workerLeaseId;
+  state.workerLeaseId = null; state.workerLease = null;
+  try { await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(leaseId)}`, { method: 'DELETE' }); } catch (_) { /* expiry also cleans up */ }
+}
+
+async function warmSelectedFiles() {
+  const files = [...$('files').files];
+  if (!files.length) { await cancelUnattachedWorkerLease(); return; }
+  const filePayload = { files: files.map(file => ({ name: file.name, size_bytes: file.size })) };
+  if (state.workerLeaseId && !state.sessionId) {
+    try {
+      const response = await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(state.workerLeaseId)}`, {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(filePayload),
+      });
+      const lease = await response.json();
+      if (response.ok) {
+        state.workerLeaseId = lease.lease_id; state.workerLease = lease;
+        $('activity').textContent = lease.reused
+          ? `File selection updated; reusing the ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker.`
+          : `File selection needs a ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker; replacing the idle worker.`;
+        return;
+      }
+    } catch (_) { /* Fall back to a new lease below. */ }
+    await cancelUnattachedWorkerLease();
+  }
+  try {
+    const response = await apiFetch('/api/v3/worker-leases', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(filePayload),
+    });
+    const lease = await response.json();
+    if (!response.ok) return; // Feature flag disabled or temporary failure: Review keeps its v2 fallback.
+    state.workerLeaseId = lease.lease_id; state.workerLease = lease;
+    $('activity').textContent = `Starting a ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker while the upload is reviewed…`;
+  } catch (_) { /* Review creates a worker lease if the warm-up request was unavailable. */ }
+}
+
+async function retryLargeWorker() {
+  if (!state.workerLeaseId) return;
+  const response = await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(state.workerLeaseId)}/retry-large`, { method: 'POST' });
+  const result = await response.json();
+  if (!response.ok) {
+    $('upload-status').className = 'operation-status failed';
+    $('upload-status').textContent = responseDetail(result, 'Large-worker retry could not start.');
+    return;
+  }
+  state.workerLease = result;
+  $('retry-large').hidden = true;
+  $('review-status').className = 'operation-status';
+  $('review-status').textContent = 'Large worker retry is starting…';
+  if (state.sessionId) await pollUploadSession(state.sessionId);
 }
 
 function selectedDeduplicationMode() {
   return document.querySelector('input[name="deduplication-mode"]:checked')?.value || 'keyed';
+}
+
+function immutableDeduplicationColumns() {
+  return state.mode === 'append' && hasLockedDeduplicationKey()
+    ? (state.review?.deduplication_columns || [])
+    : [];
+}
+
+function hasLockedDeduplicationKey() {
+  return state.mode === 'append' && (state.tableDeduplicationColumns || []).length > 0;
+}
+
+function updateDeduplicationModeVisibility() {
+  const locked = hasLockedDeduplicationKey();
+  $('deduplication-mode').hidden = locked;
+  if (locked) {
+    document.querySelector('input[name="deduplication-mode"][value="keyed"]').checked = true;
+    state.deduplicationMode = 'keyed';
+  }
 }
 
 function selectedManualEncryptionColumns() {
@@ -435,6 +515,10 @@ function renderSessionProgress(session) {
 function applySessionState(session) {
   state.sessionId = session.session_id;
   sessionStorage.setItem(SESSION_STORAGE_KEY, session.session_id);
+  if (session.worker_lease) {
+    state.workerLease = session.worker_lease;
+    state.workerLeaseId = session.worker_lease.lease_id;
+  }
   if (session.phase === 'FAILED' && session.error) sessionFailure(session);
   // Render preflight once. Polling must preserve selections, search text and
   // focus; a refreshed page restores choices from the acknowledged analysis.
@@ -503,6 +587,7 @@ function sessionFailure(session) {
   $('status').className = 'failed';
   $('status').textContent = 'Upload was not started.';
   $('status-body').textContent = JSON.stringify(session.error || session, null, 2);
+  $('retry-large').hidden = !(session.worker_lease?.can_retry_large && state.workerLeaseId);
 }
 
 async function pollUploadSession(sessionId, { until = [] } = {}) {
@@ -642,17 +727,16 @@ function updateCreateUploadEligibility() {
   if (!state.review) return;
   if (keyAnalysisBusy() || (state.sessionPhase && !['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT'].includes(state.sessionPhase))) { $('upload').disabled = true; return; }
   if (state.review.temporal_policy_adoption?.required && !state.temporalPolicyAcknowledged) { $('upload').disabled = true; return; }
+  if (hasLockedDeduplicationKey()) {
+    $('upload').disabled = !state.review.accepted;
+    return;
+  }
   const mode = selectedDeduplicationMode();
   if (mode === 'none') {
     $('upload').disabled = !state.review.accepted;
     return;
   }
   if (state.review.mode !== 'create') {
-    const configured = state.review.deduplication_columns || [];
-    if (configured.length) {
-      $('upload').disabled = !state.review.accepted;
-      return;
-    }
     // A legacy/no-dedup table may adopt its first key on this append. It uses
     // the same analysis and acknowledgement safeguards as a first upload.
     const selected = selectedDeduplicationColumns();
@@ -753,6 +837,7 @@ async function analyseSelectedKey() {
 
 function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTypeOverrides = {} } = {}) {
   const holder = $('review-body'); setChildren(holder);
+  updateDeduplicationModeVisibility();
   const decision = document.createElement('p');
   const needsTemporalPolicyAcknowledgement = Boolean(result.temporal_policy_adoption?.required);
   decision.className = needsTemporalPolicyAcknowledgement ? 'preflight-action' : result.accepted ? 'preflight-pass' : 'preflight-reject';
@@ -807,7 +892,9 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
     holder.append(section);
     $('acknowledge-temporal-policy').onchange = () => { state.temporalPolicyAcknowledged = $('acknowledge-temporal-policy').checked; updateCreateUploadEligibility(); };
   }
-  const needsFirstKey = result.mode === 'create' || !(result.deduplication_columns || []).length;
+  const lockedKey = result.deduplication_locked_columns || state.tableDeduplicationColumns || [];
+  const hasLockedKey = result.mode === 'append' && lockedKey.length > 0;
+  const needsFirstKey = result.mode === 'create' || !hasLockedKey;
   if (selectedDeduplicationMode() === 'keyed' && needsFirstKey && result.deduplication_candidates?.length) {
     const typeColumns = new Set((result.type_selections || []).map(choice => choice.column));
     const candidates = [...result.deduplication_candidates].sort((left, right) => {
@@ -829,7 +916,7 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
       return `<label class="deduplication-candidate ${unavailable ? 'ineligible' : ''}"><input type="checkbox" data-deduplication-column="${escapeHtml(choice.column)}" ${checked} ${unavailable ? 'disabled' : ''}><span><strong>${escapeHtml(choice.column)}</strong><small>Stored type: ${escapeHtml(choice.target_type)}; detected: ${escapeHtml(choice.source_type)}.</small>${quality}${examples}${reason}</span></label>`;
     }).join('');
     const activationNote = result.mode === 'append'
-      ? 'This older table has no composite key yet. Your first acknowledged key will be saved prospectively for this and later keyed appends; existing table rows are not rewritten.'
+      ? 'This older table has no composite key yet. Your first acknowledged key will be saved for later uploads; existing table rows are not rewritten.'
       : 'This selection becomes the table’s immutable de-duplication contract.';
     section.innerHTML = `<h3>Choose de-duplication columns</h3><p>Select one stable identifier, or multiple fields for a composite key. CSN, case, HRN, MRN, and other encrypted identifiers may be selected; their examples remain masked. ${activationNote} Before upload, analyse the full incoming dataset to see the duplicate/conflict impact. Per-column non-empty and distinct counts help assess a single-column key.</p><p class="deduplication-notice" id="deduplication-selection-notice">Choose at least one de-duplication column before uploading.</p><div class="deduplication-actions"><button type="button" id="select-all-deduplication" class="secondary" aria-pressed="false">Select all columns</button><span id="deduplication-selection-count" class="hint"></span></div><label class="deduplication-search-label" for="deduplication-search">Find a column<input id="deduplication-search" type="search" placeholder="Filter column names…" aria-controls="deduplication-candidate-list"></label><p id="deduplication-filter-count" class="hint" aria-live="polite"></p><div id="deduplication-candidate-list" class="deduplication-candidates">${rows}</div><button type="button" id="analyse-key" class="key-analysis-action" disabled>Analyse selected key impact</button><p id="key-analysis-status" class="operation-status" aria-live="polite"></p><div id="key-analysis-result"></div>`;
     holder.append(section);
@@ -840,12 +927,15 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
     filterDeduplicationColumns();
     updateDeduplicationSelectionControls();
   }
-  if (selectedDeduplicationMode() === 'keyed' && result.mode === 'append' && result.deduplication_columns?.length) {
+  if (hasLockedKey) {
     const section = document.createElement('section'); section.className = 'deduplication-selection';
-    section.innerHTML = `<h3>Existing de-duplication contract</h3><p><strong>Current composite key:</strong> <code>${result.deduplication_columns.map(escapeHtml).join(' + ')}</code></p><p class="hint">This table’s composite key is immutable. New rows that share a key with existing rows are handled by the configured de-duplication policy.</p>`;
+    const active = result.deduplication_columns || [];
+    section.innerHTML = active.length
+      ? `<h3>Automatic de-duplication key</h3><p><strong>Saved table key:</strong> <code>${lockedKey.map(escapeHtml).join(' + ')}</code></p><p><strong>This upload uses:</strong> <code>${active.map(escapeHtml).join(' + ')}</code></p><p class="hint">Only saved key columns present in this upload are used. This upload is de-duplicated locally using that derived key.</p>`
+      : `<h3>Automatic de-duplication key</h3><p><strong>Saved table key:</strong> <code>${lockedKey.map(escapeHtml).join(' + ')}</code></p><p class="hint">None of the saved key columns are present in this upload. It will be appended without de-duplication.</p>`;
     holder.append(section);
   }
-  if (selectedDeduplicationMode() === 'none') {
+  if (!hasLockedKey && selectedDeduplicationMode() === 'none') {
     const section = document.createElement('section'); section.className = 'deduplication-selection';
     section.innerHTML = '<h3>Clean-data append selected</h3><p>No de-duplication analysis or target-table comparison will run. Every validated incoming row is appended.</p>';
     holder.append(section);
@@ -952,6 +1042,7 @@ $('create-bucket').onclick = createTableBucket;
 $('create-namespace').onclick = createSelectedNamespace;
 $('upload-skill-bundle').onclick = uploadSkillBundle;
 $('refresh-skill-files').onclick = loadSkillFiles;
+$('retry-large').onclick = retryLargeWorker;
 $('skill-bundle-files').onchange = updateSkillControls;
 $('emulated-user').onchange = async () => {
   clearSkillBundle();
@@ -959,11 +1050,11 @@ $('emulated-user').onchange = async () => {
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;
   await loadBuckets();
 };
-$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); clearSkillBundle(); state.namespace = null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadSkillFiles(); await loadNamespaces(); };
-$('namespace').onchange = async () => { clearPreflight(); state.namespace = $('namespace').value || null; state.table = null; state.tableManaged = false; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; await loadTables(); };
-$('create').onchange = () => { clearPreflight(); state.mode = $('create').checked ? 'create' : 'append'; if (state.mode === 'create') { state.table = null; state.tableManaged = true; } $('new-table-wrap').hidden = state.mode !== 'create'; selectTable(); valid(); loadHistory(); };
+$('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse($('bucket').value); clearSkillBundle(); state.namespace = null; state.table = null; state.tableManaged = false; state.tableDeduplicationColumns = []; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; updateDeduplicationModeVisibility(); await loadSkillFiles(); await loadNamespaces(); };
+$('namespace').onchange = async () => { clearPreflight(); state.namespace = $('namespace').value || null; state.table = null; state.tableManaged = false; state.tableDeduplicationColumns = []; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; updateDeduplicationModeVisibility(); await loadTables(); };
+$('create').onchange = () => { clearPreflight(); state.mode = $('create').checked ? 'create' : 'append'; if (state.mode === 'create') { state.table = null; state.tableManaged = true; state.tableDeduplicationColumns = []; } $('new-table-wrap').hidden = state.mode !== 'create'; updateDeduplicationModeVisibility(); selectTable(); valid(); loadHistory(); };
 $('new-table').oninput = () => { clearPreflight(); valid(); };
-$('files').onchange = () => { clearPreflight(); valid(); };
+$('files').onchange = async () => { clearPreflight(); valid(); await warmSelectedFiles(); };
 $('reporting-month').oninput = () => { clearPreflight(); valid(); };
 $('deduplication-mode').onchange = () => { state.deduplicationMode = selectedDeduplicationMode(); clearPreflight(); valid(); };
 $('preflight').onclick = async () => {
@@ -1007,7 +1098,7 @@ $('upload').onclick = async () => {
     state.currentOperationId = createOperationRequestId();
     const response = await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(state.sessionId)}/ingestions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ request_id: state.currentOperationId, reporting_month: userTag(), type_overrides: selectedTypeOverrides(), deduplication_mode: selectedDeduplicationMode(), deduplication_columns: selectedDeduplicationMode() === 'keyed' ? selectedDeduplicationColumns() : [], key_analysis_token: state.keyAnalysis?.token || null, temporal_policy_acknowledgement_token: state.temporalPolicyAcknowledged ? state.review?.temporal_policy_adoption?.acknowledgement_token || null : null, manual_encryption_columns: selectedManualEncryptionColumns() }),
+      body: JSON.stringify({ request_id: state.currentOperationId, reporting_month: userTag(), type_overrides: selectedTypeOverrides(), deduplication_mode: hasLockedDeduplicationKey() ? (immutableDeduplicationColumns().length ? 'keyed' : 'none') : selectedDeduplicationMode(), deduplication_columns: hasLockedDeduplicationKey() ? immutableDeduplicationColumns() : (selectedDeduplicationMode() === 'keyed' ? selectedDeduplicationColumns() : []), key_analysis_token: state.keyAnalysis?.token || null, temporal_policy_acknowledgement_token: state.temporalPolicyAcknowledged ? state.review?.temporal_policy_adoption?.acknowledgement_token || null : null, manual_encryption_columns: selectedManualEncryptionColumns() }),
     }); const result = await response.json();
     if (!response.ok) {
       const reason = responseDetail(result, 'Upload could not be started.');

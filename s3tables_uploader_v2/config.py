@@ -34,6 +34,9 @@ class Settings:
     landing_bucket: str
     landing_prefix: str
     queue_url: str
+    base_worker_queue_url: str
+    large_worker_queue_url: str
+    leases_enabled: bool
     login_password: str
     login_secret: str
     cookie_secure: bool
@@ -55,11 +58,15 @@ class Settings:
         raw_retention_days = int(env.get("S3_UPLOADER_V2_RAW_RETENTION_DAYS", "1"))
         if not 1 <= raw_retention_days <= 30:
             raise ConfigurationError("S3_UPLOADER_V2_RAW_RETENTION_DAYS must be 1 through 30")
+        queue_url = _required("S3_UPLOADER_V2_QUEUE_URL", env)
         return cls(
             region=_required("AWS_REGION", env),
             landing_bucket=_required("S3_UPLOADER_V2_LANDING_BUCKET", env),
             landing_prefix=env.get("S3_UPLOADER_V2_LANDING_PREFIX", "s3-uploader-v2").strip("/"),
-            queue_url=_required("S3_UPLOADER_V2_QUEUE_URL", env),
+            queue_url=queue_url,
+            base_worker_queue_url=env.get("S3_UPLOADER_V3_BASE_QUEUE_URL", queue_url),
+            large_worker_queue_url=env.get("S3_UPLOADER_V3_LARGE_QUEUE_URL", queue_url),
+            leases_enabled=_boolean("S3_UPLOADER_V3_LEASES_ENABLED", env, False),
             login_password=_required("S3_UPLOADER_V2_LOGIN_PASSWORD", env),
             login_secret=secret,
             cookie_secure=cookie_secure,

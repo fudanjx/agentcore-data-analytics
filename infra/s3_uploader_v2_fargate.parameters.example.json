@@ -12,5 +12,6 @@
   "LoginPasswordSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
   "LoginSigningSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
   "EncryptionSecretArn": "arn:aws:secretsmanager:ap-southeast-1:964340114883:secret:REPLACE_ME",
-  "ExistingAlbSecurityGroupId": "sg-REPLACE_ME"
+  "ExistingAlbSecurityGroupId": "sg-REPLACE_ME",
+  "EnableV3Leases": "false"
 }

@@ -30,7 +30,7 @@ ARGS = getResolvedOptions(
         "JOB_NAME", "MODE", "MANIFEST_URI", "TABLE_BUCKET_ARN", "NAMESPACE", "TABLE",
         "QC_PREFIX", "RUN_ID", "UPLOAD_ID", "UPLOADED_BY", "REPORTING_MONTH",
         "FILENAMES_JSON", "AUDIT_PREFIX", "ROLLBACK_SNAPSHOT_ID",
-        "ORIGINAL_UPLOADED_BY", "ORIGINAL_UPLOADED_AT",
+        "ORIGINAL_UPLOADED_BY", "ORIGINAL_UPLOADED_AT", "LOCK_BUCKET", "LOCK_KEY", "LOCK_ETAG",
     ],
 )
 MODE = ARGS["MODE"].lower()
@@ -92,6 +92,19 @@ def _write_audit_projection(event: dict) -> str:
     bucket, key = _audit_projection_uri().removeprefix("s3://").split("/", 1)
     s3.put_object(Bucket=bucket, Key=key, Body=json.dumps(event, indent=2, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="AES256")
     return f"s3://{bucket}/{key}"
+
+
+def _release_table_lock() -> None:
+    """Release the worker/API lock after this Glue run reaches a terminal result."""
+    if not ARGS["LOCK_BUCKET"] or not ARGS["LOCK_KEY"] or not ARGS["LOCK_ETAG"]:
+        return
+    try:
+        s3.delete_object(Bucket=ARGS["LOCK_BUCKET"], Key=ARGS["LOCK_KEY"], IfMatch=ARGS["LOCK_ETAG"])
+    except Exception as error:
+        # Never hide the actual ingestion/rollback result, but leave evidence
+        # in Glue logs for operators. The bounded S3 lease will eventually
+        # expire if a release cannot be completed.
+        print(json.dumps({"table_lock_release": "failed", "error": str(error)}))
 
 
 def _exists(target: str = TARGET) -> bool:
@@ -158,6 +171,26 @@ def _snapshot_row_count(snapshot_id: str) -> int:
     if total is None:
         raise ValueError(f"Snapshot {snapshot_id} has no total-records metric")
     return int(total)
+
+
+def _fresh_snapshot_state() -> tuple[str | None, int]:
+    """Reload Iceberg table metadata after a catalog-side rollback.
+
+    ``REFRESH TABLE`` refreshes Spark's relation but Glue can retain the old
+    Iceberg snapshot in its catalog cache.  Loading the Iceberg table directly
+    and calling ``refresh`` verifies the committed metadata pointer instead.
+    """
+    table = spark._jvm.org.apache.iceberg.spark.Spark3Util.loadIcebergTable(
+        spark._jsparkSession, TARGET
+    )
+    table.refresh()
+    snapshot = table.currentSnapshot()
+    if snapshot is None:
+        return None, 0
+    total_records = snapshot.summary().get("total-records")
+    if total_records is None:
+        raise ValueError("Fresh Iceberg snapshot has no total-records metric")
+    return str(snapshot.snapshotId()), int(total_records)
 
 
 def _create(schema: list[dict[str, str]]) -> None:
@@ -501,9 +534,12 @@ def _run_rollback() -> dict:
         spark.sql(f"CALL s3_rest_catalog.system.rollback_to_snapshot(table => '{table_arg}', snapshot_id => {int(snapshot_id)})")
         spark.catalog.clearCache()
         spark.catalog.refreshTable(TARGET)
-        after_snapshot, after_rows = _snapshot_state()
-        if after_rows != expected_rows:
-            raise ValueError(f"Rollback verification failed: expected_rows={expected_rows}, actual_rows={after_rows}")
+        after_snapshot, after_rows = _fresh_snapshot_state()
+        if after_snapshot != snapshot_id or after_rows != expected_rows:
+            raise ValueError(
+                f"Rollback verification failed: expected_snapshot={snapshot_id}, actual_snapshot={after_snapshot}, "
+                f"expected_rows={expected_rows}, actual_rows={after_rows}"
+            )
         _record_event(
             previous_snapshot_id=snapshot_id, new_snapshot_id=after_snapshot, rows_before=before_rows,
             rows_uploaded=0, rows_after=after_rows, status="ROLLED_BACK", rollback_at=_now(), rollback_by=ARGS["UPLOADED_BY"],
@@ -526,3 +562,5 @@ except Exception as error:
     raise
 else:
     print(json.dumps({"status": report["status"], "qc_uri": _write_qc(report), **report}))
+finally:
+    _release_table_lock()
