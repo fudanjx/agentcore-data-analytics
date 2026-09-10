@@ -45,7 +45,7 @@ class SigV4HTTPXAuth(httpx.Auth):
         yield request
 
 
-def mcp_transport(gateway: GatewayConfig):
+def mcp_transport(gateway: GatewayConfig, custom_headers: dict[str, str]):
     """Build a directly signed MCP Streamable HTTP transport."""
     session = boto3.Session(region_name=gateway.region)
     credentials = session.get_credentials()
@@ -56,6 +56,7 @@ def mcp_transport(gateway: GatewayConfig):
         timeout=120,
         sse_read_timeout=600,
         auth=SigV4HTTPXAuth(credentials, SERVICE, gateway.region),
+        headers=custom_headers
     )
 
 

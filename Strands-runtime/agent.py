@@ -300,14 +300,14 @@ def _log_model_usage(
     return payload
 
 
-def _make_gateway_clients() -> list[MCPClient]:
+def _make_gateway_clients(custom_headers: dict[str, str]) -> list[MCPClient]:
     if not ENABLE_GATEWAYS:
         return []
     clients = []
     for slug, gateway in gateway_proxy.GATEWAY_CONFIGS.items():
         clients.append(
             MCPClient(
-                lambda target=gateway: gateway_proxy.mcp_transport(target),
+                lambda target=gateway: gateway_proxy.mcp_transport(target, custom_headers=custom_headers),
                 startup_timeout=30,
                 prefix=slug,
             )
@@ -376,7 +376,10 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                     ),
                 )
             )
-        tools.extend(_make_gateway_clients())
+        custom_gateway_headers = {
+            "allowed-access": ",".join(request.user_gateway_permissions)
+        }
+        tools.extend(_make_gateway_clients(custom_headers=custom_gateway_headers))
 
         model = BedrockModel(
             model_id=MODEL_ID,
