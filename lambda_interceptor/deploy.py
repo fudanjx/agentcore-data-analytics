@@ -1,6 +1,8 @@
+import argparse
 import io
 import json
 import logging
+import sys
 import zipfile
 from pathlib import Path
 
@@ -165,6 +167,23 @@ def _update_lambda_function(
     return response
 
 
+def _delete_lambda_function(lambda_client, function_name: str) -> None:
+    logger.info("Deleting Lambda function %s", function_name)
+    lambda_client.delete_function(FunctionName=function_name)
+
+
+def _prompt_delete_confirmation(function_name: str) -> bool:
+    prompt = (
+        f"You are about to permanently delete Lambda function '{function_name}' in {REGION}.\n"
+        f"Type the function name exactly to confirm deletion: "
+    )
+    try:
+        user_input = input(prompt).strip()
+    except EOFError:
+        return False
+    return user_input == function_name
+
+
 def deploy() -> dict:
     session = boto3.Session(region_name=REGION)
     iam_client = session.client("iam")
@@ -182,5 +201,37 @@ def deploy() -> dict:
     return result
 
 
+def destroy() -> None:
+    session = boto3.Session(region_name=REGION)
+    lambda_client = session.client("lambda")
+
+    if not _function_exists(lambda_client, FUNCTION_NAME):
+        logger.info("Lambda function %s does not exist in %s. Nothing to destroy.", FUNCTION_NAME, REGION)
+        return
+
+    if not _prompt_delete_confirmation(FUNCTION_NAME):
+        logger.warning("Confirmation did not match. Aborting deletion of %s.", FUNCTION_NAME)
+        return
+
+    _delete_lambda_function(lambda_client, FUNCTION_NAME)
+    logger.info("Lambda function %s deleted successfully from %s.", FUNCTION_NAME, REGION)
+
+
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Deploy or destroy the S3 tables gateway interceptor Lambda.",
+    )
+    parser.add_argument(
+        "--destroy",
+        action="store_true",
+        help="Delete the Lambda function instead of deploying it.",
+    )
+    return parser.parse_args(argv)
+
+
 if __name__ == "__main__":
-    deploy()
+    args = _parse_args(sys.argv[1:])
+    if args.destroy:
+        destroy()
+    else:
+        deploy()
