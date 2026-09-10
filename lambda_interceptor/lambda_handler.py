@@ -61,7 +61,7 @@ def lambda_handler(event, context):
             }
             return reject_response
         
-        elif mcp_method == "tools/call" and (target_source := request_body.get("params", {}).get("arguments", {}).get("source")):
+        elif mcp_method == "tools/call" and (target_source := request_body.get("params", {}).get("arguments", {}).get("source", [])):
             allowed_sources = request_headers.get("allowed-access", "")
             if isinstance(allowed_sources, list):
                 pass
