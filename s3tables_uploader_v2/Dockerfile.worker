@@ -1,10 +1,31 @@
-FROM python:3.12-slim
+# Build dependencies outside the runtime image. The final Azure Linux image has
+# no shell, package manager, pip, or build tooling.
+FROM python:3.12-slim AS builder
 
-ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
 WORKDIR /app
+
 COPY s3tables_uploader_v2/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt \
-    && useradd --create-home --uid 1000 appuser
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir --target /app/dependencies -r requirements.txt
+
 COPY s3tables_uploader_v2 ./s3tables_uploader_v2
-USER appuser
-CMD ["python", "-m", "s3tables_uploader_v2.worker"]
+
+
+FROM mcr.microsoft.com/azurelinux/distroless/python:3.12
+
+WORKDIR /app
+
+COPY --from=builder /app/dependencies /app/dependencies
+COPY --from=builder /app/s3tables_uploader_v2 /app/s3tables_uploader_v2
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/app/dependencies:/app
+
+USER 65532
+
+# Distroless images have no shell; keep the command in exec form.
+CMD ["python3", "-m", "s3tables_uploader_v2.worker"]
