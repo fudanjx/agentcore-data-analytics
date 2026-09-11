@@ -9,7 +9,9 @@ source:
 # This is the agent-facing semantic source of truth. The schema guide owns the
 # complete physical schema; table reference files own detailed metric logic.
 global_rules:
-  preliminary_records: "Use prelim_flag = 'N' only when the user explicitly requests provisional data."
+  preliminary_records: "Use prelim_flag = 'N' in filter only when the user explicitly requests to exclude provisional data."
+  preliminary_disclosure: "When prelim_flag = 'N' is not applied, check whether the output actually contains prelim_flag = 'Y' rows. If it does, mark the affected values with an asterisk (*) and add a footnote noting they include provisional/unfinalised records. If every queried record turns out to be prelim_flag = 'N' anyway, no asterisk or footnote is needed."
+  category_completeness: "When grouping or aggregating output by any categorical or derived field (e.g. acuity, case_end_type, effective_class, ward), include a row/bucket for blank or NULL values of that field rather than filtering or dropping them -- label it clearly (e.g. 'Unspecified' or 'NULL'), don't just omit it. The sum of every category's subtotal must equal the ungrouped grand total for the same filters and date range, so it reconciles against any locked benchmark total."
   identifiers: "Treat all identifiers as strings; neither case_no nor pat_enc_csn_id is universally complete."
   joins: "Every relationship below is a candidate join, not an enforced key. Check row counts and duplicates for the requested period."
 
@@ -44,7 +46,7 @@ tables:
     filters:
       - "status <> 'P' OR status IS NULL"
       - "visit_type IN ('FV','RV','FW','RW','DF','DR','FD','RD')"
-      - "trt_cat <> 'NC' OR sub_specialty_id IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD')"
+      - "trt_cat <> 'NC' OR trt_cat IS NULL OR sub_specialty_id IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD')"
   procedure:
     grain: one procedure; a case can have multiple rows
     date: { field: operation_date, meaning: procedure date, type: timestamp }

@@ -13,7 +13,7 @@ Use the `urgentcarecenter` filters and canonical date in `references/data-ontolo
 
 ## Identifiers
 
-`Case_No` is populated broadly across both eras (~93% of rows, including most NGEMR-era rows) — don't use its presence/absence to detect era. `PAT_ENC_CSN_ID` is the clean era switch: populated only for NGEMR-era rows, always null for SAP-era rows — use it as the primary identifier for NGEMR-era attendances and for the admission join. `SAP_IP_CASE_NO`, despite the name, is **not** a legacy-era field — it's null for every SAP-era row and populated for only ~19% of NGEMR-era rows (attendances that resulted in an inpatient admission). Per `data-ontology.yaml`'s `do_not_join`, it does not match `admission.case_no` on live data — don't join on it.
+`Case_No` is populated broadly across both eras, including most NGEMR-era rows — don't use its presence/absence to detect era. `PAT_ENC_CSN_ID` is the clean era switch: populated only for NGEMR-era rows, always null for SAP-era rows — use it as the primary identifier for NGEMR-era attendances and for the admission join. `SAP_IP_CASE_NO`, despite the name, is **not** a legacy-era field — it's null for every SAP-era row and populated only for NGEMR-era rows that resulted in an inpatient admission. Per `data-ontology.yaml`'s `do_not_join`, it does not match `admission.case_no` on live data — don't join on it.
 
 ## Key columns
 
@@ -24,8 +24,8 @@ Use the `urgentcarecenter` filters and canonical date in `references/data-ontolo
 | `Case_End_Type` | TEXT | Discharge disposition — see full mapping below |
 | `CONSULT_ACUITY` | TEXT | Current production acuity field (see below) |
 | `TRIAGE_ACUITY` | TEXT | Triage-stage acuity — still populated but no longer the primary reporting field, see below |
-| `PACS` | TEXT | Most complete acuity field (~99.8% populated) — the ultimate fallback for both of the above |
-| `Arrival_Mode` | TEXT | `Walk In` (~97% of rows), `Police Vehicle`, `Private Ambulance`, `993 Ambulance`, `SCDF Ambulance`, `Ambulance (Others)` |
+| `PACS` | TEXT | Most complete acuity field — the ultimate fallback for both of the above |
+| `Arrival_Mode` | TEXT | `Walk In` (most common), `Police Vehicle`, `Private Ambulance`, `993 Ambulance`, `SCDF Ambulance`, `Ambulance (Others)` |
 | `Att_Phy_Name` | TEXT | Attending physician name |
 | `Att_Phy_MCR_No` | TEXT | Attending physician MCR |
 | `Pri_Diag_Code` | TEXT | Primary diagnosis ICD code |
@@ -47,12 +47,13 @@ Use the `urgentcarecenter` filters and canonical date in `references/data-ontolo
 
 ## Acuity — resolve in priority order
 
-### ⚠️ Production changed its primary acuity field on 2026-07-01
+**Default: when a user asks for "acuity" without specifying which, use Consult Acuity (derived) below — never a raw `CONSULT_ACUITY`, `TRIAGE_ACUITY`, or `PACS` column alone.**
 
-Production pivots now use **`CONSULT_ACUITY`**, not `TRIAGE_ACUITY` (changed from `TRIAGE_ACUITY` on 2026-07-01). `CONSULT_ACUITY` is only backfilled from `PACS` (never from `TRIAGE_ACUITY`), so the current production-consistent acuity is:
+Production pivots now use **`CONSULT_ACUITY`** as the primary field, not `TRIAGE_ACUITY` (changed from `TRIAGE_ACUITY`). The current production-consistent acuity — **Consult Acuity (derived)**, the default field described above — falls back to `TRIAGE_ACUITY`, then `PACS`, when `CONSULT_ACUITY` is blank:
 
 ```sql
-COALESCE(NULLIF("CONSULT_ACUITY", ''), "PACS") AS acuity
+-- Consult Acuity (derived) -- default acuity field
+COALESCE(NULLIF("CONSULT_ACUITY", ''), NULLIF("TRIAGE_ACUITY", ''), "PACS") AS acuity
 ```
 
 `TRIAGE_ACUITY` is a separate field, still real and still filled with its own fallback chain (`TRIAGE_ACUITY` → `CONSULT_ACUITY` → `PACS`) if you specifically need the triage-stage acuity rather than the consult-stage one used in current reports:
@@ -61,7 +62,7 @@ COALESCE(NULLIF("CONSULT_ACUITY", ''), "PACS") AS acuity
 COALESCE(NULLIF("TRIAGE_ACUITY", ''), NULLIF("CONSULT_ACUITY", ''), "PACS") AS triage_acuity
 ```
 
-Both `TRIAGE_ACUITY` and `CONSULT_ACUITY` are null for roughly half of rows before this fallback; `PACS` alone is populated for ~99.8% of rows.
+Both `TRIAGE_ACUITY` and `CONSULT_ACUITY` can be null before this fallback; `PACS` alone is the most consistently populated of the three.
 
 ## Case_End_Type — full mapping
 
@@ -78,6 +79,11 @@ Production only relabels these specific raw values; **everything else passes thr
 | `Dis to Community Hosp` | `Discharge to Community Hosp` |
 | `Death Non-Coroner` | `Death Non-Coroners` |
 | `Death Coroner` | `Death Coroners` |
+
+**Machine-readable copy:** `case-end-type-lookup.json` in this same folder mirrors this
+table 1:1 (all 36 confirmed raw values -- the 9 relabeled, the 9 that already equal their
+target, and the 18 pure passthroughs below) and is what validation scripts parse -- if you
+edit the table above, update the json too.
 
 ```sql
 CASE "Case_End_Type"
@@ -122,7 +128,7 @@ EXTRACT(EPOCH FROM ("IP_ADMIT_TIME" - "IP_BED_REQUEST_TIME")) / 60 AS bed_wait_m
 ```sql
 SELECT
   DATE_TRUNC('month', "Visit_Date") AS month,
-  COALESCE(NULLIF("CONSULT_ACUITY",''), "PACS") AS acuity,
+  COALESCE(NULLIF("CONSULT_ACUITY",''), "TRIAGE_ACUITY", "PACS") AS acuity,
   "Arrival_Mode",
   COUNT(*) AS attendances
 FROM urgentcarecenter

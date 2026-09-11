@@ -124,7 +124,7 @@ SELECT
 FROM outpatient
 WHERE ("Status" != 'P' OR "Status" IS NULL)
   AND "Visit_Type" IN ('FV','RV','FW','RW','DF','DR','FD','RD')
-  AND ("Trt_Cat" != 'NC' OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
+  AND ("Trt_Cat" != 'NC' OR "Trt_Cat" IS NULL OR "Sub-Specialty_ID" IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD'))
   AND "Visit_Date" >= '2024-01-01'
 GROUP BY 1 ORDER BY 1;
 ```
