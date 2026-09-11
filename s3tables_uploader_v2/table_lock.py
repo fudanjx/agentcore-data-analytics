@@ -26,11 +26,22 @@ class TableLockedError(TableLockError):
         self.details = details
 
 
+class TableQueueError(RuntimeError):
+    pass
+
+
 @dataclass
 class TableLease:
     key: str
     etag: str
     owner_token: str
+    payload: dict[str, Any]
+
+
+@dataclass
+class TableQueueEntry:
+    key: str
+    etag: str
     payload: dict[str, Any]
 
 
@@ -156,3 +167,107 @@ class S3TableLockManager:
         except (ClientError, BotoCoreError) as error:
             raise TableLockError("Unable to list table mutation locks") from error
         return leases
+
+
+class S3TableMutationQueue:
+    """Durable, per-table FIFO queue held until Glue releases the mutation."""
+
+    def __init__(self, s3_client: Any, bucket: str, prefix: str, expiry_minutes: int = 90):
+        self.s3 = s3_client
+        self.bucket = bucket
+        self.prefix = prefix.strip("/")
+        self.expiry_minutes = expiry_minutes
+
+    def _prefix(self, table_bucket_arn: str, namespace: str, table: str) -> str:
+        return f"{self.prefix}/{target_id(table_bucket_arn, namespace, table)}"
+
+    @staticmethod
+    def _body(payload: dict[str, Any]) -> bytes:
+        return json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+
+    @staticmethod
+    def _expired(payload: dict[str, Any]) -> bool:
+        try:
+            return datetime.fromisoformat(payload["expires_at"]).astimezone(timezone.utc) <= datetime.now(timezone.utc)
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _read(self, key: str) -> TableQueueEntry:
+        response = self.s3.get_object(Bucket=self.bucket, Key=key)
+        return TableQueueEntry(key, response.get("ETag", "").strip('"'), json.loads(response["Body"].read()))
+
+    def enqueue(self, *, table_bucket_arn: str, namespace: str, table: str, job_id: str,
+                user_id: str, session_id: str | None, operation: str, created_at: str) -> TableQueueEntry:
+        prefix = self._prefix(table_bucket_arn, namespace, table)
+        sequence = created_at.replace("-", "").replace(":", "").replace("+", "").replace(".", "").replace("T", "-")
+        key = f"{prefix}/{sequence}-{job_id}.json"
+        payload = {
+            "job_id": job_id, "user_id": user_id, "session_id": session_id,
+            "operation": operation, "created_at": created_at, "state": "PENDING",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=self.expiry_minutes)).isoformat(),
+        }
+        try:
+            response = self.s3.put_object(
+                Bucket=self.bucket, Key=key, Body=self._body(payload), ContentType="application/json",
+                ServerSideEncryption="AES256", IfNoneMatch="*",
+            )
+            return TableQueueEntry(key, response.get("ETag", "").strip('"'), payload)
+        except ClientError as error:
+            if not is_precondition_failure(error):
+                raise TableQueueError("Unable to queue the table mutation") from error
+            try:
+                return self._read(key)
+            except (ClientError, BotoCoreError) as read_error:
+                raise TableQueueError("Unable to read the queued table mutation") from read_error
+        except BotoCoreError as error:
+            raise TableQueueError("Unable to queue the table mutation") from error
+
+    def mark_ready(self, entry: TableQueueEntry) -> TableQueueEntry:
+        payload = {**entry.payload, "state": "READY"}
+        return self._write(entry, payload)
+
+    def mark_running(self, entry: TableQueueEntry) -> TableQueueEntry:
+        payload = {
+            **entry.payload, "state": "RUNNING_GLUE",
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=120)).isoformat(),
+        }
+        return self._write(entry, payload)
+
+    def _write(self, entry: TableQueueEntry, payload: dict[str, Any]) -> TableQueueEntry:
+        try:
+            response = self.s3.put_object(
+                Bucket=self.bucket, Key=entry.key, Body=self._body(payload), ContentType="application/json",
+                ServerSideEncryption="AES256", IfMatch=entry.etag,
+            )
+            return TableQueueEntry(entry.key, response.get("ETag", "").strip('"'), payload)
+        except (ClientError, BotoCoreError) as error:
+            raise TableQueueError("Unable to update the table mutation queue") from error
+
+    def position(self, entry: TableQueueEntry) -> int:
+        entries: list[TableQueueEntry] = []
+        try:
+            paginator = self.s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(Bucket=self.bucket, Prefix=entry.key.rsplit("/", 1)[0] + "/"):
+                for item in page.get("Contents", []):
+                    candidate = self._read(item["Key"])
+                    if self._expired(candidate.payload):
+                        self.release(candidate, ignore_changed=True)
+                    else:
+                        entries.append(candidate)
+        except (ClientError, BotoCoreError) as error:
+            raise TableQueueError("Unable to inspect the table mutation queue") from error
+        entries.sort(key=lambda candidate: candidate.key)
+        for index, candidate in enumerate(entries, start=1):
+            if candidate.key == entry.key:
+                return index
+        raise TableQueueError("The queued table mutation no longer exists")
+
+    def release(self, entry: TableQueueEntry, *, ignore_changed: bool = False) -> None:
+        try:
+            self.s3.delete_object(Bucket=self.bucket, Key=entry.key, IfMatch=entry.etag)
+        except ClientError as error:
+            if ignore_changed and is_precondition_failure(error):
+                return
+            raise TableQueueError("Unable to release the table mutation queue entry") from error
+        except BotoCoreError as error:
+            raise TableQueueError("Unable to release the table mutation queue entry") from error

@@ -50,6 +50,13 @@ class WorkerTests(unittest.TestCase):
                 return {"Body": io.BytesIO(self.items[Key]), "ETag": "etag"}
             def download_file(self, Bucket, Key, Filename, ExtraArgs=None): Path(Filename).write_bytes(self.items[Key])
             def upload_file(self, Filename, Bucket, Key, ExtraArgs=None): self.items[Key] = Path(Filename).read_bytes()
+            def get_paginator(self, operation):
+                assert operation == "list_objects_v2"
+                items = self.items
+                class Paginator:
+                    def paginate(self, Bucket, Prefix):
+                        return [{"Contents": [{"Key": key} for key in sorted(items) if key.startswith(Prefix)]}]
+                return Paginator()
         class FakeGlue:
             def __init__(self): self.calls = []
             def start_job_run(self, **kwargs): self.calls.append(kwargs); return {"JobRunId": "jr-multiple"}
@@ -86,6 +93,44 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(glue.calls[0]["Arguments"]["--FILENAMES_JSON"], '["first.parquet", "second.parquet"]')
         self.assertEqual(glue.calls[0]["Arguments"]["--LOCK_BUCKET"], "landing")
         self.assertTrue(glue.calls[0]["Arguments"]["--LOCK_KEY"].startswith("prefix/table-locks/"))
+        self.assertTrue(glue.calls[0]["Arguments"]["--QUEUE_KEY"].startswith("prefix/table-queues/"))
+
+    def test_worker_skips_only_a_fully_excluded_source_file(self):
+        class FakeS3:
+            def __init__(self): self.items = {}
+            def put_object(self, Bucket, Key, Body, **kwargs): self.items[Key] = bytes(Body); return {"ETag": "etag"}
+            def get_object(self, Bucket, Key):
+                import io
+                return {"Body": io.BytesIO(self.items[Key]), "ETag": "etag"}
+            def download_file(self, Bucket, Key, Filename, ExtraArgs=None): Path(Filename).write_bytes(self.items[Key])
+            def upload_file(self, Filename, Bucket, Key, ExtraArgs=None): self.items[Key] = Path(Filename).read_bytes()
+            def get_paginator(self, operation):
+                items = self.items
+                class Paginator:
+                    def paginate(self, Bucket, Prefix): return [{"Contents": [{"Key": key} for key in sorted(items) if key.startswith(Prefix)]}]
+                return Paginator()
+        class FakeGlue:
+            def start_job_run(self, **kwargs): return {"JobRunId": "jr-keyed"}
+
+        with tempfile.TemporaryDirectory() as directory:
+            first, second = Path(directory) / "first.parquet", Path(directory) / "second.parquet"
+            pq.write_table(pa.table({"id": ["1", "2"], "value": ["keep", "first"]}), first)
+            # The id=2 conflict excludes both matching raw-key rows, but the
+            # id=1 row remains. The second source contributes zero rows.
+            pq.write_table(pa.table({"id": ["2"], "value": ["conflict"]}), second)
+            s3 = FakeS3()
+            s3.items["prefix/uploads/session/raw/first.parquet"] = first.read_bytes()
+            s3.items["prefix/uploads/session/raw/second.parquet"] = second.read_bytes()
+            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts")
+            store = S3JobStore(s3, "landing", "prefix")
+            store.put_compat_session({"session_id": "session", "table_bucket_arn": "arn", "namespace": "ah", "table": "target", "preflight": {"table_bucket_arn": "arn", "namespace": "ah", "table": "target", "target_schema": [{"name": "id", "type": "STRING"}, {"name": "value", "type": "STRING"}], "files": [{}, {}]}})
+            store.put_request(JobRequest(job_id="job", session_id="session", owner_user_id="owner", operation="create", destination=Destination(table_bucket_arn="arn", namespace="ah", table="target"), source_key="prefix/uploads/session/raw/first.parquet", source_version_id="one", source_size_bytes=1, source_files=[JobSource(name="first.parquet", source_key="prefix/uploads/session/raw/first.parquet", source_version_id="one", source_size_bytes=1), JobSource(name="second.parquet", source_key="prefix/uploads/session/raw/second.parquet", source_version_id="two", source_size_bytes=1)], deduplication_mode="keyed", deduplication_columns=["id"]))
+            with patch("s3tables_uploader_v2.worker.encryption_key", return_value=b"x" * 32):
+                process_job("job", settings, s3, FakeGlue())
+            import json
+            manifest = json.loads(s3.items["prefix/jobs/job/prepared/manifest.json"])
+        self.assertEqual(len(manifest["files"]), 1)
+        self.assertEqual(manifest["prepared_row_count"], 1)
 
     def test_worker_uses_v1_per_table_history_prefix(self):
         arn = "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-soc-delta-pilot"

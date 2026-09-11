@@ -1045,6 +1045,10 @@ $('refresh-skill-files').onclick = loadSkillFiles;
 $('retry-large').onclick = retryLargeWorker;
 $('skill-bundle-files').onchange = updateSkillControls;
 $('emulated-user').onchange = async () => {
+  // A selected-file lease is owner scoped. Do not submit it after changing
+  // the local identity emulation profile.
+  state.workerLeaseId = null; state.workerLease = null;
+  clearPreflight();
   clearSkillBundle();
   state.emulatedUserId = $('emulated-user').value || null;
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;

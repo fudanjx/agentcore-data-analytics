@@ -329,6 +329,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(session.status_code, 201, session.text)
         self.assertEqual(session.json()["worker_lease"]["lease_id"], lease.json()["lease_id"])
 
+    def test_stale_lease_from_another_emulated_user_is_replaced(self):
+        import io
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET":"landing", "S3_UPLOADER_V2_QUEUE_URL":"legacy", "S3_UPLOADER_V3_BASE_QUEUE_URL":"base", "S3_UPLOADER_V3_LARGE_QUEUE_URL":"large", "S3_UPLOADER_V3_LEASES_ENABLED":"true", "S3_UPLOADER_V2_LOGIN_PASSWORD":"password", "S3_UPLOADER_V2_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_V2_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_GLUE_JOB_NAME":"job", "S3_UPLOADER_V2_ENV":"development", "S3_UPLOADER_V2_COOKIE_SECURE":"false"}
+        s3, sqs = FakeS3(), FakeSqs()
+        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client.post("/login", json={"password":"password"})
+        buffer = io.BytesIO(); pq.write_table(pa.table({"id": ["1"]}), buffer)
+        payload = buffer.getvalue()
+        editor_headers = {"X-Pilot-User-Id": "local-editor"}
+        stale = client.post("/api/v3/worker-leases", headers=editor_headers, json={"files": [{"name": "source.parquet", "size_bytes": len(payload)}]}).json()
+        response = client.post(
+            "/api/v2/upload-sessions", headers={"X-Pilot-User-Id": "local-admin"},
+            data={"mode":"create", "table_bucket_arn":"arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-soc-delta-pilot", "namespace":"pilot", "table":"admin_table", "worker_lease_id": stale["lease_id"]},
+            files={"files": ("source.parquet", payload, "application/octet-stream")},
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertNotEqual(response.json()["worker_lease"]["lease_id"], stale["lease_id"])
+        store = S3JobStore(s3, "landing", "s3-uploader-v2")
+        self.assertEqual(store.get_lease(response.json()["worker_lease"]["lease_id"])["owner_user_id"], "local-admin")
+
     def test_unattached_same_size_lease_is_reused_when_file_selection_changes(self):
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET":"landing", "S3_UPLOADER_V2_QUEUE_URL":"legacy", "S3_UPLOADER_V3_BASE_QUEUE_URL":"base", "S3_UPLOADER_V3_LARGE_QUEUE_URL":"large", "S3_UPLOADER_V3_LEASES_ENABLED":"true", "S3_UPLOADER_V2_LOGIN_PASSWORD":"password", "S3_UPLOADER_V2_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_V2_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_GLUE_JOB_NAME":"job", "S3_UPLOADER_V2_ENV":"development", "S3_UPLOADER_V2_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()

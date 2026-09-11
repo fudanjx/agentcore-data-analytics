@@ -3,7 +3,7 @@ import unittest
 
 from botocore.exceptions import ClientError
 
-from s3tables_uploader_v2.table_lock import S3TableLockManager, TableLockedError
+from s3tables_uploader_v2.table_lock import S3TableLockManager, S3TableMutationQueue, TableLockedError
 
 
 class FakeS3:
@@ -33,6 +33,16 @@ class FakeS3:
             raise self._error("PreconditionFailed")
         del self.items[Key]
 
+    def get_paginator(self, operation):
+        assert operation == "list_objects_v2"
+        items = self.items
+
+        class Paginator:
+            def paginate(self, Bucket, Prefix):
+                return [{"Contents": [{"Key": key} for key in sorted(items) if key.startswith(Prefix)]}]
+
+        return Paginator()
+
 
 class TableLockTests(unittest.TestCase):
     def test_same_table_blocks_second_mutation_until_owner_releases(self):
@@ -58,3 +68,12 @@ class TableLockTests(unittest.TestCase):
         first = manager.acquire(table_bucket_arn="arn", namespace="ns", table="one", owner_token="one", user_id="user", request_id="one", session_id=None, operation="append", phase="STARTING_GLUE")
         second = manager.acquire(table_bucket_arn="arn", namespace="ns", table="two", owner_token="two", user_id="user", request_id="two", session_id=None, operation="append", phase="STARTING_GLUE")
         self.assertNotEqual(first.key, second.key)
+
+    def test_per_table_queue_preserves_submission_order_until_release(self):
+        queue = S3TableMutationQueue(FakeS3(), "landing", "prefix/table-queues")
+        first = queue.enqueue(table_bucket_arn="arn", namespace="ns", table="target", job_id="job-1", user_id="one", session_id="one", operation="append", created_at="2026-09-11T01:00:00+00:00")
+        second = queue.enqueue(table_bucket_arn="arn", namespace="ns", table="target", job_id="job-2", user_id="two", session_id="two", operation="append", created_at="2026-09-11T01:00:01+00:00")
+        self.assertEqual(queue.position(first), 1)
+        self.assertEqual(queue.position(second), 2)
+        queue.release(first)
+        self.assertEqual(queue.position(second), 1)

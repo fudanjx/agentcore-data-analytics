@@ -31,6 +31,7 @@ ARGS = getResolvedOptions(
         "QC_PREFIX", "RUN_ID", "UPLOAD_ID", "UPLOADED_BY", "REPORTING_MONTH",
         "FILENAMES_JSON", "AUDIT_PREFIX", "ROLLBACK_SNAPSHOT_ID",
         "ORIGINAL_UPLOADED_BY", "ORIGINAL_UPLOADED_AT", "LOCK_BUCKET", "LOCK_KEY", "LOCK_ETAG",
+        "QUEUE_BUCKET", "QUEUE_KEY", "QUEUE_ETAG",
     ],
 )
 MODE = ARGS["MODE"].lower()
@@ -105,6 +106,16 @@ def _release_table_lock() -> None:
         # in Glue logs for operators. The bounded S3 lease will eventually
         # expire if a release cannot be completed.
         print(json.dumps({"table_lock_release": "failed", "error": str(error)}))
+
+
+def _release_table_queue() -> None:
+    """Release the durable per-table FIFO entry after the Glue terminal state."""
+    if not ARGS["QUEUE_BUCKET"] or not ARGS["QUEUE_KEY"] or not ARGS["QUEUE_ETAG"]:
+        return
+    try:
+        s3.delete_object(Bucket=ARGS["QUEUE_BUCKET"], Key=ARGS["QUEUE_KEY"], IfMatch=ARGS["QUEUE_ETAG"])
+    except Exception as error:
+        print(json.dumps({"table_queue_release": "failed", "error": str(error)}))
 
 
 def _exists(target: str = TARGET) -> bool:
@@ -564,3 +575,4 @@ else:
     print(json.dumps({"status": report["status"], "qc_uri": _write_qc(report), **report}))
 finally:
     _release_table_lock()
+    _release_table_queue()

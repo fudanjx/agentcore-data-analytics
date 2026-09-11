@@ -30,7 +30,7 @@ from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
 from .job_store import JobAlreadyClaimed, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
-from .table_lock import S3TableLockManager, TableLockedError
+from .table_lock import S3TableLockManager, S3TableMutationQueue, TableLockedError
 from .ingest_contract import normalise_names, temporal_array
 from .worker_analysis import profile_files, raw_key_impact_metrics, raw_key_row_selection, read_upload_table
 
@@ -380,6 +380,11 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         prepared_keys: list[str] = []
         profiles = preflight.get("files") or []
         for number, (source, filename) in enumerate(local_sources):
+            # A V1 raw-key conflict may correctly exclude every row from one
+            # source in a multi-file submission. Skip that source; fail only
+            # if the complete submission has no retained rows.
+            if request.deduplication_mode == "keyed" and not selections.get(number):
+                continue
             prepared = Path(directory) / f"prepared-{number:02d}.parquet"
             file_schema, file_rows, audit = _write_prepared_parquet(
                 source, prepared, manual_encryption_columns=request.manual_encryption_columns,
@@ -419,16 +424,33 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         }
         manifest_key = _manifest_key(settings, job_id)
         s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="aws:kms")
-        store.put_status(JobStatus(job_id=job_id, phase="STARTING_GLUE", message="Waiting to start the S3 Tables ingestion job."))
+        queue = S3TableMutationQueue(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-queues")
+        queue_entry = queue.enqueue(
+            table_bucket_arn=request.destination.table_bucket_arn, namespace=request.destination.namespace,
+            table=request.destination.table, job_id=job_id, user_id=request.owner_user_id,
+            session_id=request.session_id, operation=request.operation, created_at=request.created_at.isoformat(),
+        )
+        queue_entry = queue.mark_ready(queue_entry)
+        while True:
+            position = queue.position(queue_entry)
+            if position == 1:
+                break
+            store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message=f"Waiting in the per-table FIFO queue (position {position})."))
+            time.sleep(5)
+        store.put_status(JobStatus(job_id=job_id, phase="STARTING_GLUE", message="Starting the S3 Tables ingestion job."))
         lock_manager = S3TableLockManager(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-locks")
-        try:
-            table_lock = lock_manager.acquire(
-                table_bucket_arn=request.destination.table_bucket_arn, namespace=request.destination.namespace,
-                table=request.destination.table, owner_token=job_id, user_id=request.owner_user_id,
-                request_id=job_id, session_id=request.session_id, operation=request.operation, phase="STARTING_GLUE",
-            )
-        except TableLockedError as error:
-            raise WorkerError("The selected table is busy with another uploader operation; retry after it completes.") from error
+        while True:
+            try:
+                table_lock = lock_manager.acquire(
+                    table_bucket_arn=request.destination.table_bucket_arn, namespace=request.destination.namespace,
+                    table=request.destination.table, owner_token=job_id, user_id=request.owner_user_id,
+                    request_id=job_id, session_id=request.session_id, operation=request.operation, phase="STARTING_GLUE",
+                )
+                break
+            except TableLockedError:
+                store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Waiting for the active table mutation to finish."))
+                time.sleep(5)
+        queue_entry = queue.mark_running(queue_entry)
         try:
             response = glue.start_job_run(
                 JobName=settings.glue_job_name,
@@ -443,10 +465,12 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
                 "--REPORTING_MONTH": request.reporting_month or "not-applicable", "--FILENAMES_JSON": json.dumps([source["name"] for source in sources]), "--ROLLBACK_SNAPSHOT_ID": "not-applicable",
                 "--ORIGINAL_UPLOADED_BY": request.owner_user_id, "--ORIGINAL_UPLOADED_AT": request.created_at.isoformat(),
                 "--LOCK_BUCKET": settings.landing_bucket, "--LOCK_KEY": table_lock.key, "--LOCK_ETAG": table_lock.etag,
+                "--QUEUE_BUCKET": settings.landing_bucket, "--QUEUE_KEY": queue_entry.key, "--QUEUE_ETAG": queue_entry.etag,
             },
             )
         except Exception:
             lock_manager.release(table_lock)
+            queue.release(queue_entry)
             raise
     glue_run_id = response["JobRunId"]
     store.put_status(JobStatus(job_id=job_id, phase="RUNNING_GLUE", message="Glue ingestion is running.", glue_run_id=glue_run_id))

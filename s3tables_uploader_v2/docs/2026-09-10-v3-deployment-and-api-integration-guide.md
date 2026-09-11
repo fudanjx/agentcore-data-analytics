@@ -397,8 +397,43 @@ revisions and /healthz, then use a disposable test table for a real smoke test.
 | Health | `GET /healthz` returned `{"status":"ok"}` |
 | Glue script | `generic_glue_job.py`, ETag `96eafa899ec674accc9aad8d396e8a4f` |
 
-The release passed 48 containerised automated tests, infrastructure-template
+The 2026-09-10 release passed 48 containerised automated tests, infrastructure-template
 validation, Python compilation, and `git diff --check`. It did not write test
 data to a live production S3 Table. Before a high-volume release, exercise two
 disposable tables in parallel and confirm a second mutation of one table is
 rejected while the first lock remains active.
+
+## 2026-09-11 FIFO corrective deployment
+
+For this release, all ingestion submissions create a durable S3 queue record
+under `s3-uploader-v2/table-queues/<destination-hash>/` before their worker is
+allowed to start the Glue mutation. This is intentionally separate from the
+SQS FIFO message group: SQS only orders ECS task dispatch, whereas the durable
+table queue remains present until Glue reaches a terminal result. A second
+same-table upload therefore reports a queued position rather than failing with
+"table busy"; uploads targeting different tables remain independent.
+
+The worker must have `s3:ListBucket` constrained to the queue, lock, job,
+compatibility-session and lease prefixes. The V3 Glue role must be permitted
+to delete only landing-bucket lock and queue objects. The worker passes
+`QUEUE_BUCKET`, `QUEUE_KEY` and `QUEUE_ETAG` to Glue; rollback passes empty
+values because it continues to use its existing direct mutation lock.
+
+Build explicitly for the Fargate platform. A local Apple Silicon image is not
+deployable to this ECS service:
+
+~~~bash
+docker buildx build --platform linux/amd64 --load \
+  -f s3tables_uploader_v2/Dockerfile.api -t local/s3-uploader-v3-api:$TAG .
+docker buildx build --platform linux/amd64 --load \
+  -f s3tables_uploader_v2/Dockerfile.worker -t local/s3-uploader-v3-worker:$TAG .
+~~~
+
+The `20260911-table-fifo-amd64-1` production deployment used API task
+definition `s3-uploader-v2-api:27`, base worker `:36`, and large worker `:37`.
+The API ECR digest is
+`sha256:16fb49725f31987c9afc3759f79800f1bfcbb1a3cbd4446910c0bb10f600444d`;
+the worker digest is
+`sha256:9394ca0b34155c1f4b2a000ebe332ca8ff50d7aa989299b479e4be4a0759f2e2`.
+All three Pipes were `RUNNING`, the stack was `UPDATE_COMPLETE`, and
+`GET /healthz` returned `{"status":"ok"}` after rollout.

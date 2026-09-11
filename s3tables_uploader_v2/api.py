@@ -25,7 +25,7 @@ from .config import Settings
 from .job_store import MissingRecord, S3JobStore
 from .models import Destination, JobRequest, JobSource, JobStatus, UploadSession
 from .sanitization import sanitised_schema
-from .table_lock import S3TableLockManager, TableLockedError
+from .table_lock import S3TableLockManager, S3TableMutationQueue, TableLockedError
 from .worker_routing import RoutingError, SelectedFile, route_files
 from . import skill_bundle
 
@@ -644,6 +644,7 @@ def create_app(
                     "--AUDIT_PREFIX": f"s3://{_HISTORY_BUCKET}/{_history_prefix(payload.table_bucket_arn, payload.namespace, payload.table)}",
                     "--ROLLBACK_SNAPSHOT_ID": str(snapshot_id),
                     "--LOCK_BUCKET": settings.landing_bucket, "--LOCK_KEY": table_lock.key, "--LOCK_ETAG": table_lock.etag,
+                    "--QUEUE_BUCKET": "", "--QUEUE_KEY": "", "--QUEUE_ETAG": "",
                 },
             )
         except ClientError as error:
@@ -960,7 +961,10 @@ def create_app(
                     except MissingRecord as error:
                         lease = _new_lease(files, user_id)
                     if lease.get("owner_user_id") != user_id:
-                        raise HTTPException(403, "WORKER_LEASE_FORBIDDEN")
+                        # A browser identity can change while its previous
+                        # file-selection lease remains in memory. Never bind
+                        # another user's lease; start a new owner-scoped one.
+                        lease = _new_lease(files, user_id)
                     expected = [(item["name"], int(item["size_bytes"])) for item in lease.get("files", [])]
                     received = [(item["name"], int(item["size_bytes"])) for item in files]
                     if lease.get("state") in {"CANCELLED", "EXPIRED", "COMPLETED", "RESOURCE_LIMIT_EXCEEDED"} or expected != received:
@@ -1159,7 +1163,13 @@ def create_app(
                          reporting_month=payload.reporting_month, deduplication_mode=effective_deduplication_mode,
                          deduplication_columns=effective_deduplication_columns,
                          manual_encryption_columns=payload.manual_encryption_columns)
-        store.put_request(job); store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload queued for the isolated Fargate worker."))
+        store.put_request(job)
+        S3TableMutationQueue(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-queues").enqueue(
+            table_bucket_arn=job.destination.table_bucket_arn, namespace=job.destination.namespace,
+            table=job.destination.table, job_id=job.job_id, user_id=user_id,
+            session_id=session_id, operation=job.operation, created_at=job.created_at.isoformat(),
+        )
+        store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload queued for the isolated Fargate worker."))
         group = hashlib.sha256(f"{job.destination.table_bucket_arn}\x1f{job.destination.namespace}\x1f{job.destination.table}".encode()).hexdigest()
         if not (settings.leases_enabled and session.get("worker_lease_id")):
             sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId=group)
