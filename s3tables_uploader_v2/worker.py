@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 
 from .config import WorkerSettings
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
-from .job_store import JobAlreadyClaimed, S3JobStore
+from .job_store import JobAlreadyClaimed, RecordStateConflict, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
 from .ingest_contract import normalise_names, temporal_array
@@ -74,7 +74,13 @@ def _save_compat_session(store: S3JobStore, session: dict[str, Any], **changes: 
     now = _now()
     if "phase" in changes and changes["phase"] != session.get("phase"):
         changes["phase_started_at"] = now
-    updated = store.update_compat_session(str(session["session_id"]), {**changes, "updated_at": now})
+    try:
+        updated = store.update_compat_session(
+            str(session["session_id"]), {**changes, "updated_at": now},
+            guard=lambda current: current.get("phase") != "DELETED",
+        )
+    except RecordStateConflict:
+        updated = store.get_compat_session(str(session["session_id"]))
     session.clear(); session.update(updated)
     return session
 
@@ -450,10 +456,28 @@ def _lease_expired(lease: dict[str, Any]) -> bool:
 
 
 def _save_lease(store: S3JobStore, lease: dict[str, Any], *, state: str, message: str, **changes: Any) -> dict[str, Any]:
-    updated = store.update_lease(
-        str(lease["lease_id"]),
-        {**changes, "state": state, "message": message, "updated_at": _now(), "heartbeat_at": _now()},
-    )
+    try:
+        updated = store.update_lease(
+            str(lease["lease_id"]),
+            {**changes, "state": state, "message": message, "updated_at": _now(), "heartbeat_at": _now()},
+            guard=lambda current: current.get("state") != "CANCELLED",
+        )
+    except RecordStateConflict:
+        updated = store.get_lease(str(lease["lease_id"]))
+    lease.clear(); lease.update(updated)
+    return lease
+
+
+def _heartbeat_lease(store: S3JobStore, lease: dict[str, Any]) -> dict[str, Any]:
+    """Refresh liveness without replaying a stale worker state."""
+    try:
+        updated = store.update_lease(
+            str(lease["lease_id"]),
+            {"heartbeat_at": _now(), "updated_at": _now()},
+            guard=lambda current: current.get("state") != "CANCELLED",
+        )
+    except RecordStateConflict:
+        updated = store.get_lease(str(lease["lease_id"]))
     lease.clear(); lease.update(updated)
     return lease
 
@@ -492,7 +516,17 @@ def _lease_phase_entry(action: str, lease_id: str, settings: WorkerSettings, cac
         result_queue.put({"ok": False, "error_type": type(error).__name__, "error": str(error)})
 
 
-def _run_leased_phase(action: str, lease_id: str, settings: WorkerSettings, cache_directory: Path, store: S3JobStore, lease: dict[str, Any]) -> tuple[bool, str]:
+def _stop_child(child: Any) -> None:
+    if not child.is_alive():
+        return
+    child.terminate()
+    child.join(timeout=10)
+    if child.is_alive():
+        child.kill()
+        child.join(timeout=10)
+
+
+def _run_leased_phase(action: str, lease_id: str, settings: WorkerSettings, cache_directory: Path, store: S3JobStore, lease: dict[str, Any]) -> tuple[str, str]:
     context = multiprocessing.get_context("spawn")
     results = context.Queue()
     child = context.Process(target=_lease_phase_entry, args=(action, lease_id, settings, str(cache_directory), results))
@@ -500,33 +534,37 @@ def _run_leased_phase(action: str, lease_id: str, settings: WorkerSettings, cach
     last_heartbeat = time.monotonic()
     try:
         while child.is_alive():
+            latest_lease = store.get_lease(lease_id)
+            lease.clear(); lease.update(latest_lease)
+            if lease.get("state") == "CANCELLED":
+                _stop_child(child)
+                return "cancelled", ""
             if lease.get("worker_size") == "BASE":
                 if _rss_bytes(child.pid) >= _BASE_RSS_LIMIT_BYTES:
-                    child.terminate(); child.join(timeout=10)
-                    return False, "Child process reached the 12 GiB base-worker memory safety limit."
+                    _stop_child(child)
+                    return "resource_limit", "Child process reached the 12 GiB base-worker memory safety limit."
                 disk = shutil.disk_usage(cache_directory)
                 if disk.total and (disk.used * 100 / disk.total) >= _BASE_STORAGE_PERCENT:
-                    child.terminate(); child.join(timeout=10)
-                    return False, "Worker ephemeral storage reached the 70% base-worker safety limit."
+                    _stop_child(child)
+                    return "resource_limit", "Worker ephemeral storage reached the 70% base-worker safety limit."
             if time.monotonic() - last_heartbeat >= _LEASE_HEARTBEAT_SECONDS:
-                _save_lease(store, lease, state=str(lease["state"]), message=str(lease.get("message", "Worker is running.")))
+                _heartbeat_lease(store, lease)
                 last_heartbeat = time.monotonic()
             time.sleep(1)
         child.join(timeout=10)
         try:
             result = results.get(timeout=2)
         except queue.Empty:
-            return False, "Worker child exited without a result."
+            return "resource_limit", "Worker child exited without a result."
         if result.get("ok"):
-            return True, ""
+            return "completed", ""
         error = str(result.get("error", "Worker phase failed."))
         resource_words = ("memory", "allocation", "out of space", "no space")
         if lease.get("worker_size") == "BASE" and any(word in error.lower() for word in resource_words):
-            return False, error
+            return "resource_limit", error
         raise WorkerError(error)
     finally:
-        if child.is_alive():
-            child.terminate(); child.join(timeout=10)
+        _stop_child(child)
 
 
 def run_leased_worker(lease_id: str, settings: WorkerSettings, s3_client: Any | None = None) -> str:
@@ -575,25 +613,33 @@ def run_leased_worker(lease_id: str, settings: WorkerSettings, s3_client: Any | 
             try:
                 if phase == "RECEIVED":
                     _save_lease(store, lease, state="PROFILING", message="Analysing uploaded file structure.")
-                    ok, reason = _run_leased_phase("profile", lease_id, settings, cache_directory, store, lease)
-                    if not ok:
+                    phase_result, reason = _run_leased_phase("profile", lease_id, settings, cache_directory, store, lease)
+                    if phase_result == "cancelled":
+                        return "cancelled"
+                    if phase_result != "completed":
                         _mark_resource_limit(store, lease, session, "RECEIVED", reason)
                         return "resource-limit"
                     continue
                 if phase == "KEY_ANALYSING":
                     _save_lease(store, lease, state="ANALYSING_KEY", message="Analysing selected composite key.")
-                    ok, reason = _run_leased_phase("key", lease_id, settings, cache_directory, store, lease)
-                    if not ok:
+                    phase_result, reason = _run_leased_phase("key", lease_id, settings, cache_directory, store, lease)
+                    if phase_result == "cancelled":
+                        return "cancelled"
+                    if phase_result != "completed":
                         _mark_resource_limit(store, lease, session, "KEY_ANALYSING", reason)
                         return "resource-limit"
                     continue
                 if phase == "QUEUED":
                     _save_lease(store, lease, state="PREPARING", message="Preparing sanitised staging data.")
-                    ok, reason = _run_leased_phase("ingestion", lease_id, settings, cache_directory, store, lease)
-                    if not ok:
+                    phase_result, reason = _run_leased_phase("ingestion", lease_id, settings, cache_directory, store, lease)
+                    if phase_result == "cancelled":
+                        return "cancelled"
+                    if phase_result != "completed":
                         _mark_resource_limit(store, lease, session, "QUEUED", reason)
                         return "resource-limit"
                     _save_lease(store, lease, state="COMPLETED", message="Sanitised staging is ready for the FIFO Glue dispatcher.")
+                    if lease.get("state") == "CANCELLED":
+                        return "cancelled"
                     return "completed"
             except Exception as error:
                 job_id = str((session.get("ingestion") or {}).get("job_id") or "")

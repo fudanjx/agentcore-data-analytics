@@ -1,6 +1,6 @@
 const SESSION_STORAGE_KEY = 's3tables-uploader-v2-session-id';
-const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED'];
-const state = { bucket: null, namespace: null, table: null, tableManaged: false, tableDeduplicationColumns: [], mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, temporalPolicyAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastHttpRequestId: null, currentOperationId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null, workerLeaseId: null, workerLease: null };
+const sessionTerminalPhases = ['READY_FOR_REVIEW', 'READY_FOR_ACKNOWLEDGEMENT', 'GLUE_RUNNING', 'SUCCEEDED', 'FAILED', 'DELETED'];
+const state = { bucket: null, namespace: null, table: null, tableManaged: false, tableDeduplicationColumns: [], mode: 'append', review: null, keyAnalysis: null, keyAnalysisAcknowledged: false, temporalPolicyAcknowledged: false, isAdmin: false, userId: null, canViewHistory: false, canRollbackUploads: false, emulatedUserId: null, identityProfiles: [], sessionId: null, sessionPollTimer: null, gluePollTimer: null, activeJobRunId: null, deduplicationMode: 'keyed', lastHttpRequestId: null, currentOperationId: null, sessionPhase: null, keyAnalysisPending: false, appliedKeyToken: null, sessionPollGeneration: 0, sessionPollResolve: null, workerLeaseId: null, workerLease: null, reviewAbortController: null, fileSelectionGeneration: 0, cancelPending: false, etlAcceptancePending: false };
 const $ = (id) => document.getElementById(id);
 const terminalStates = ['SUCCEEDED', 'FAILED', 'ERROR', 'TIMEOUT', 'STOPPED'];
 
@@ -54,7 +54,7 @@ function clearSessionPoll() {
   state.sessionPollResolve = null;
 }
 function clearGluePoll() { if (state.gluePollTimer) { clearTimeout(state.gluePollTimer); state.gluePollTimer = null; } state.activeJobRunId = null; }
-function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; state.temporalPolicyAcknowledged = false; state.currentOperationId = null; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; $('retry-large').hidden = true; }
+function clearPreflight({ forgetSession = true } = {}) { clearSessionPoll(); clearGluePoll(); state.sessionPhase = null; state.keyAnalysisPending = false; state.appliedKeyToken = null; state.review = null; state.keyAnalysis = null; state.keyAnalysisAcknowledged = false; state.temporalPolicyAcknowledged = false; state.currentOperationId = null; if (forgetSession) { state.sessionId = null; sessionStorage.removeItem(SESSION_STORAGE_KEY); } $('review').hidden = true; $('upload-actions').hidden = true; $('upload').disabled = true; $('upload-status').textContent = ''; $('upload-status').className = 'operation-status'; $('review-status').textContent = ''; $('review-status').className = 'operation-status'; $('retry-large').hidden = true; renderCancelStartOver(); }
 function identityRequestPayload() {
   return {
     headers: { 'X-Pilot-User-Id': state.emulatedUserId },
@@ -400,6 +400,61 @@ function formData() {
   [...$('files').files].forEach(file => data.append('files', file)); return data;
 }
 
+function canCancelAndStartOver() {
+  if (state.cancelPending || state.etlAcceptancePending) return false;
+  if (state.workerLease?.can_cancel_and_start_over === false) return false;
+  return Boolean(state.workerLeaseId || (!state.sessionId && $('files').files.length));
+}
+
+function renderCancelStartOver() {
+  const button = $('cancel-start-over');
+  if (!button) return;
+  button.hidden = !canCancelAndStartOver();
+  button.disabled = state.cancelPending || state.etlAcceptancePending;
+  button.textContent = state.cancelPending ? 'Cancelling upload…' : 'Cancel & Start Over';
+}
+
+function resetUploadStateAfterCancellation() {
+  state.fileSelectionGeneration += 1;
+  clearPreflight();
+  state.workerLeaseId = null; state.workerLease = null;
+  state.etlAcceptancePending = false; state.cancelPending = false;
+  $('files').value = '';
+  $('reporting-month').value = '';
+  $('outcome').hidden = true;
+  $('status').textContent = ''; $('status').className = '';
+  $('status-body').textContent = '';
+  $('activity').textContent = 'Upload cancelled. Choose files to start a new upload.';
+  valid(); renderCancelStartOver();
+}
+
+async function cancelAndStartOver() {
+  if (!canCancelAndStartOver()) return;
+  if (!confirm('Cancel this upload and delete its staged source files? The selected destination will not change.')) return;
+  state.cancelPending = true;
+  state.fileSelectionGeneration += 1;
+  if (state.reviewAbortController) state.reviewAbortController.abort();
+  clearSessionPoll(); clearGluePoll(); renderCancelStartOver();
+  const leaseId = state.workerLeaseId;
+  if (!leaseId) {
+    resetUploadStateAfterCancellation();
+    return;
+  }
+  try {
+    const response = await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(leaseId)}`, { method: 'DELETE' });
+    if (!response.ok) {
+      const result = await response.json();
+      throw new Error(responseDetail(result, 'The upload could not be cancelled.'));
+    }
+    resetUploadStateAfterCancellation();
+  } catch (error) {
+    state.cancelPending = false;
+    $('review-status').className = 'operation-status failed';
+    $('review-status').textContent = `Cancellation could not complete: ${error.message || 'network request failed'}${requestDiagnostic()}`;
+    renderCancelStartOver();
+  }
+}
+
 async function cancelUnattachedWorkerLease() {
   if (!state.workerLeaseId || state.sessionId) return;
   const leaseId = state.workerLeaseId;
@@ -409,6 +464,7 @@ async function cancelUnattachedWorkerLease() {
 
 async function warmSelectedFiles() {
   const files = [...$('files').files];
+  const selectionGeneration = state.fileSelectionGeneration;
   if (!files.length) { await cancelUnattachedWorkerLease(); return; }
   const filePayload = { files: files.map(file => ({ name: file.name, size_bytes: file.size })) };
   if (state.workerLeaseId && !state.sessionId) {
@@ -418,10 +474,15 @@ async function warmSelectedFiles() {
       });
       const lease = await response.json();
       if (response.ok) {
+        if (selectionGeneration !== state.fileSelectionGeneration) {
+          await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(lease.lease_id)}`, { method: 'DELETE' });
+          return;
+        }
         state.workerLeaseId = lease.lease_id; state.workerLease = lease;
         $('activity').textContent = lease.reused
           ? `File selection updated; reusing the ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker.`
           : `File selection needs a ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker; replacing the idle worker.`;
+        renderCancelStartOver();
         return;
       }
     } catch (_) { /* Fall back to a new lease below. */ }
@@ -434,8 +495,13 @@ async function warmSelectedFiles() {
     });
     const lease = await response.json();
     if (!response.ok) return; // Feature flag disabled or temporary failure: Review keeps its v2 fallback.
+    if (selectionGeneration !== state.fileSelectionGeneration) {
+      await apiFetch(`/api/v3/worker-leases/${encodeURIComponent(lease.lease_id)}`, { method: 'DELETE' });
+      return;
+    }
     state.workerLeaseId = lease.lease_id; state.workerLease = lease;
     $('activity').textContent = `Starting a ${lease.worker_size === 'LARGE' ? 'large' : 'base'} worker while the upload is reviewed…`;
+    renderCancelStartOver();
   } catch (_) { /* Review creates a worker lease if the warm-up request was unavailable. */ }
 }
 
@@ -571,6 +637,7 @@ function applySessionState(session) {
   updateCreateUploadEligibility();
   updateDeduplicationSelectionControls();
   valid();
+  renderCancelStartOver();
 }
 
 function sessionFailure(session) {
@@ -1044,6 +1111,7 @@ $('create-namespace').onclick = createSelectedNamespace;
 $('upload-skill-bundle').onclick = uploadSkillBundle;
 $('refresh-skill-files').onclick = loadSkillFiles;
 $('retry-large').onclick = retryLargeWorker;
+$('cancel-start-over').onclick = cancelAndStartOver;
 $('skill-bundle-files').onchange = updateSkillControls;
 $('emulated-user').onchange = async () => {
   // A selected-file lease is owner scoped. Do not submit it after changing
@@ -1059,16 +1127,18 @@ $('bucket').onchange = async () => { clearPreflight(); state.bucket = JSON.parse
 $('namespace').onchange = async () => { clearPreflight(); state.namespace = $('namespace').value || null; state.table = null; state.tableManaged = false; state.tableDeduplicationColumns = []; state.mode = 'append'; $('create').checked = false; $('new-table-wrap').hidden = true; updateDeduplicationModeVisibility(); await loadTables(); };
 $('create').onchange = () => { clearPreflight(); state.mode = $('create').checked ? 'create' : 'append'; if (state.mode === 'create') { state.table = null; state.tableManaged = true; state.tableDeduplicationColumns = []; } $('new-table-wrap').hidden = state.mode !== 'create'; updateDeduplicationModeVisibility(); selectTable(); valid(); loadHistory(); };
 $('new-table').oninput = () => { clearPreflight(); valid(); };
-$('files').onchange = async () => { clearPreflight(); valid(); await warmSelectedFiles(); };
+$('files').onchange = async () => { state.fileSelectionGeneration += 1; clearPreflight(); valid(); await warmSelectedFiles(); renderCancelStartOver(); };
 $('reporting-month').oninput = () => { clearPreflight(); valid(); };
 $('deduplication-mode').onchange = () => { state.deduplicationMode = selectedDeduplicationMode(); clearPreflight(); valid(); };
 $('preflight').onclick = async () => {
   const button = $('preflight'); const status = $('review-status');
+  const controller = new AbortController();
+  state.reviewAbortController = controller;
   button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Reviewing upload…';
   status.className = 'operation-status'; status.textContent = 'Sending files to the server. File analysis starts after receipt…';
   $('activity').textContent = 'Scanning selected file schemas…';
   try {
-    const response = await apiFetch('/api/v2/upload-sessions', { method: 'POST', body: formData() });
+    const response = await apiFetch('/api/v2/upload-sessions', { method: 'POST', body: formData(), signal: controller.signal });
     const result = await response.json();
     if (!response.ok) {
       const reason = responseDetail(result, 'Data structure analysis could not start.');
@@ -1087,14 +1157,17 @@ $('preflight').onclick = async () => {
       status.textContent = preview.accepted ? 'Upload review completed. Review the schema and processing choices below.' : 'Upload review completed with validation issues. See the rejection reasons below.';
     }
   } catch (error) {
+    if (error?.name === 'AbortError' && state.cancelPending) return;
     $('activity').textContent = 'Preflight failed.';
     status.className = 'operation-status failed'; status.textContent = `Upload review failed: ${error.message || 'network request failed'}${requestDiagnostic()}`;
   } finally {
+    if (state.reviewAbortController === controller) state.reviewAbortController = null;
     button.classList.remove('is-busy'); button.textContent = 'Review upload'; valid();
   }
 };
 $('upload').onclick = async () => {
   const button = $('upload'); const status = $('upload-status'); let started = false;
+  state.etlAcceptancePending = true; renderCancelStartOver();
   button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Starting upload…';
   status.className = 'operation-status'; status.textContent = 'Preparing the sanitized upload, recovery point, and ETL job…';
   $('outcome').hidden = false; $('activity').textContent = 'Preparing the session files for sanitization and AWS Glue…'; $('status').textContent = 'Upload preparation is in process…'; $('status').className = 'running';
@@ -1112,6 +1185,7 @@ $('upload').onclick = async () => {
       return;
     }
     started = true;
+    if (state.workerLease) state.workerLease.can_cancel_and_start_over = false;
     button.textContent = 'Preparing ETL…';
     status.textContent = 'The session is preparing sanitized Parquet, a recovery point, and AWS Glue.';
     $('status-body').textContent = JSON.stringify(result, null, 2);
@@ -1125,7 +1199,17 @@ $('upload').onclick = async () => {
     status.className = 'operation-status failed'; status.textContent = `Upload could not start: ${error.message || 'network request failed'}${requestDiagnostic()}`;
   } finally {
     button.classList.remove('is-busy');
-    if (!started) { state.currentOperationId = null; button.textContent = 'Upload and run ETL'; updateCreateUploadEligibility(); }
+    if (!started) {
+      state.currentOperationId = null; button.textContent = 'Upload and run ETL'; updateCreateUploadEligibility();
+      try {
+        if (state.sessionId) {
+          const response = await apiFetch(`/api/v2/upload-sessions/${encodeURIComponent(state.sessionId)}`);
+          if (response.ok) applySessionState(await response.json());
+        }
+      } catch (_) { /* The next status poll will reconcile cancellation availability. */ }
+    }
+    state.etlAcceptancePending = false;
+    renderCancelStartOver();
   }
 };
 async function poll(id, qcUri, operation, retryCount = 0) {

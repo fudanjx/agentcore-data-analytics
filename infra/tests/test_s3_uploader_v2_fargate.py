@@ -35,6 +35,10 @@ class FargateTemplateTests(unittest.TestCase):
         self.assertEqual(glue_actions, {"glue:GetJobRun", "glue:StartJobRun"})
         landing_access = next(statement for statement in statements if {"s3:GetObject", "s3:PutObject"}.issubset(set(statement["Action"])))
         self.assertIn("s3:DeleteObject", landing_access["Action"])
+        self.assertIn("s3:DeleteObjectVersion", landing_access["Action"])
+        lifecycle = resources["LandingBucket"]["Properties"]["LifecycleConfiguration"]["Rules"]
+        raw_lifecycle = next(rule for rule in lifecycle if rule["Id"] == "expire-raw")
+        self.assertEqual(raw_lifecycle["NoncurrentVersionExpiration"], {"NoncurrentDays": 1})
         worker_statements = resources["WorkerTaskRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
         worker_landing_access = next(statement for statement in worker_statements if "s3:GetObjectVersion" in statement["Action"])
         self.assertIn("s3:DeleteObject", worker_landing_access["Action"])

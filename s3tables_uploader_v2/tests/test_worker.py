@@ -41,6 +41,30 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(restored["expires_at"], "2026-09-10T00:30:00+00:00")
         self.assertEqual(restored["state_version"], 2)
 
+    def test_stale_worker_save_does_not_resurrect_cancelled_lease(self):
+        class FakeS3:
+            def __init__(self): self.items = {}
+            def put_object(self, Bucket, Key, Body, **kwargs):
+                self.items[Key] = bytes(Body)
+                return {"ETag": "etag"}
+            def get_object(self, Bucket, Key):
+                import io
+                return {"Body": io.BytesIO(self.items[Key]), "ETag": "etag"}
+
+        store = S3JobStore(FakeS3(), "landing", "prefix")
+        lease = {
+            "lease_id": "lease", "owner_user_id": "owner", "state": "AWAITING_UPLOAD",
+            "worker_size": "BASE", "session_id": None, "expires_at": "2026-09-10T00:10:00+00:00",
+        }
+        store.put_lease(lease, create_only=True)
+        stale_worker_copy = store.get_lease("lease")
+        store.update_lease("lease", {"state": "CANCELLED", "message": "Cancelled by owner."})
+
+        _save_lease(store, stale_worker_copy, state="AWAITING_UPLOAD", message="Stale heartbeat")
+
+        self.assertEqual(store.get_lease("lease")["state"], "CANCELLED")
+        self.assertEqual(stale_worker_copy["state"], "CANCELLED")
+
     def test_worker_prepares_matching_multi_file_session_into_one_manifest(self):
         class FakeS3:
             def __init__(self): self.items = {}

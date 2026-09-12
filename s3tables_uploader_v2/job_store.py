@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from botocore.exceptions import ClientError
 
@@ -22,6 +22,12 @@ class MissingRecord(KeyError):
 
 
 class ConcurrentRecordUpdate(RuntimeError):
+    pass
+
+
+class RecordStateConflict(RuntimeError):
+    """A conditional state transition lost to a newer durable record."""
+
     pass
 
 
@@ -84,8 +90,15 @@ class S3JobStore:
                 raise MissingRecord(lease_id) from error
             raise
 
-    def update_lease(self, lease_id: str, changes: dict[str, Any], *, attempts: int = 4) -> dict[str, Any]:
-        return self._update_json_record(self.get_lease_with_etag, self.put_lease, lease_id, changes, attempts)
+    def update_lease(
+        self,
+        lease_id: str,
+        changes: dict[str, Any],
+        *,
+        attempts: int = 4,
+        guard: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any]:
+        return self._update_json_record(self.get_lease_with_etag, self.put_lease, lease_id, changes, attempts, guard)
 
     def put_compat_session(self, session: dict[str, Any], *, create_only: bool = False, expected_etag: str | None = None) -> None:
         options = {"IfNoneMatch": "*"} if create_only else {}
@@ -105,16 +118,33 @@ class S3JobStore:
                 raise MissingRecord(session_id) from error
             raise
 
-    def update_compat_session(self, session_id: str, changes: dict[str, Any], *, attempts: int = 4) -> dict[str, Any]:
-        return self._update_json_record(self.get_compat_session_with_etag, self.put_compat_session, session_id, changes, attempts)
+    def update_compat_session(
+        self,
+        session_id: str,
+        changes: dict[str, Any],
+        *,
+        attempts: int = 4,
+        guard: Callable[[dict[str, Any]], bool] | None = None,
+    ) -> dict[str, Any]:
+        return self._update_json_record(self.get_compat_session_with_etag, self.put_compat_session, session_id, changes, attempts, guard)
 
     @staticmethod
     def _is_precondition_failure(error: ClientError) -> bool:
         return error.response["Error"].get("Code") in {"PreconditionFailed", "ConditionalRequestConflict", "412"}
 
-    def _update_json_record(self, reader: Any, writer: Any, record_id: str, changes: dict[str, Any], attempts: int) -> dict[str, Any]:
+    def _update_json_record(
+        self,
+        reader: Any,
+        writer: Any,
+        record_id: str,
+        changes: dict[str, Any],
+        attempts: int,
+        guard: Callable[[dict[str, Any]], bool] | None,
+    ) -> dict[str, Any]:
         for _ in range(attempts):
             current, etag = reader(record_id)
+            if guard is not None and not guard(current):
+                raise RecordStateConflict(record_id)
             updated = {**current, **changes, "state_version": int(current.get("state_version", 0)) + 1}
             try:
                 writer(updated, expected_etag=etag)

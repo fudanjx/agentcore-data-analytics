@@ -12,7 +12,7 @@ from s3tables_uploader_v2.models import JobStatus
 
 
 class FakeS3:
-    def __init__(self): self.items = {}; self.parts = {}
+    def __init__(self): self.items = {}; self.parts = {}; self.deleted_objects = []
     @staticmethod
     def _precondition_error():
         return ClientError({"Error": {"Code": "PreconditionFailed"}}, "S3")
@@ -34,8 +34,9 @@ class FakeS3:
         if Key not in self.items:
             raise KeyError(Key)
         return {"ETag": "etag"}
-    def delete_object(self, Bucket, Key):
-        del self.items[Key]
+    def delete_object(self, Bucket, Key, VersionId=None):
+        self.deleted_objects.append({"Bucket": Bucket, "Key": Key, "VersionId": VersionId})
+        self.items.pop(Key, None)
         return {}
     def generate_presigned_url(self, *args, **kwargs): return "https://s3.example/part"
     def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):
@@ -421,6 +422,81 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(sqs.messages), 2)
         record = __import__("json").loads(s3.items[f"s3-uploader-v2/worker-leases/{first['lease_id']}/lease.json"])
         self.assertEqual(record["state"], "CANCELLED")
+
+    def test_cancel_and_start_over_cancels_attached_lease_and_deletes_exact_raw_version(self):
+        self.client.post("/login", json={"password":"password"})
+        store = S3JobStore(self.s3, "landing", "s3-uploader-v2")
+        raw_key = "s3-uploader-v2/uploads/session/raw/source.parquet"
+        self.s3.items[raw_key] = b"raw"
+        store.put_compat_session({
+            "session_id": "session", "owner_user_id": "local-admin", "expires_at": "2100-01-01T00:00:00+00:00",
+            "phase": "READY_FOR_REVIEW", "files": [{"name": "source.parquet", "source_key": raw_key, "source_version_id": "version-123"}],
+        })
+        store.put_lease({
+            "lease_id": "lease", "owner_user_id": "local-admin", "session_id": "session", "state": "AWAITING_KEY",
+            "worker_size": "BASE", "expires_at": "2100-01-01T00:00:00+00:00", "cancellation_locked_at": None,
+        })
+
+        cancelled = self.client.delete("/api/v3/worker-leases/lease")
+
+        self.assertEqual(cancelled.status_code, 204, cancelled.text)
+        self.assertEqual(store.get_lease("lease")["state"], "CANCELLED")
+        session = store.get_compat_session("session")
+        self.assertEqual(session["phase"], "DELETED")
+        self.assertFalse(session["cleanup_pending"])
+        self.assertNotIn(raw_key, self.s3.items)
+        self.assertEqual(self.s3.deleted_objects, [{"Bucket": "landing", "Key": raw_key, "VersionId": "version-123"}])
+        self.assertEqual(self.client.delete("/api/v3/worker-leases/lease").status_code, 204)
+
+    def test_cancel_and_start_over_is_refused_after_ingestion_acceptance(self):
+        self.client.post("/login", json={"password":"password"})
+        store = S3JobStore(self.s3, "landing", "s3-uploader-v2")
+        store.put_compat_session({
+            "session_id": "session", "owner_user_id": "local-admin", "expires_at": "2100-01-01T00:00:00+00:00",
+            "phase": "READY_FOR_REVIEW", "ingestion": {"job_id": "job"}, "files": [],
+        })
+        store.put_lease({
+            "lease_id": "lease", "owner_user_id": "local-admin", "session_id": "session", "state": "AWAITING_CONFIRMATION",
+            "worker_size": "BASE", "expires_at": "2100-01-01T00:00:00+00:00", "cancellation_locked_at": "2026-09-12T00:00:00+00:00",
+        })
+
+        refused = self.client.delete("/api/v3/worker-leases/lease")
+
+        self.assertEqual(refused.status_code, 409, refused.text)
+        self.assertEqual(refused.json()["detail"], "CANCEL_AND_START_OVER_UNAVAILABLE")
+        self.assertEqual(store.get_lease("lease")["state"], "AWAITING_CONFIRMATION")
+
+    def test_ingestion_acceptance_locks_the_attached_lease_before_creating_work(self):
+        env = {
+            "AWS_REGION": "ap-southeast-1", "S3_UPLOADER_V2_LANDING_BUCKET": "landing", "S3_UPLOADER_V2_QUEUE_URL": "legacy",
+            "S3_UPLOADER_V3_BASE_QUEUE_URL": "base", "S3_UPLOADER_V3_LARGE_QUEUE_URL": "large", "S3_UPLOADER_V3_LEASES_ENABLED": "true",
+            "S3_UPLOADER_V2_LOGIN_PASSWORD": "password", "S3_UPLOADER_V2_LOGIN_SECRET": "x" * 32,
+            "S3_UPLOADER_V2_API_BASE_URL": "https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_V2_GLUE_JOB_NAME": "job",
+            "S3_UPLOADER_V2_ENV": "development", "S3_UPLOADER_V2_COOKIE_SECURE": "false",
+        }
+        s3, sqs, tables = FakeS3(), FakeSqs(), FakeS3Tables()
+        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, tables))
+        client.post("/login", json={"password": "password"})
+        store = S3JobStore(s3, "landing", "s3-uploader-v2")
+        store.put_compat_session({
+            "session_id": "session", "owner_user_id": "local-admin", "expires_at": "2100-01-01T00:00:00+00:00",
+            "mode": "create", "table_bucket_arn": tables.bucket_arn, "namespace": "pilot", "table": "new_table",
+            "phase": "READY_FOR_REVIEW", "worker_lease_id": "lease",
+            "files": [{"name": "source.parquet", "sha256": "a" * 64, "source_key": "s3-uploader-v2/uploads/session/raw/source.parquet", "source_version_id": "version", "size_bytes": 1}],
+            "preflight": {"accepted": True, "sanitization_review": {"manual_encryption_candidates": []}},
+        })
+        store.put_lease({
+            "lease_id": "lease", "owner_user_id": "local-admin", "session_id": "session", "state": "AWAITING_CONFIRMATION",
+            "worker_size": "BASE", "expires_at": "2100-01-01T00:00:00+00:00", "cancellation_locked_at": None,
+        })
+
+        accepted = client.post("/api/v2/upload-sessions/session/ingestions", json={
+            "request_id": "request", "deduplication_mode": "none", "deduplication_columns": [],
+        })
+
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        self.assertIsNotNone(store.get_lease("lease")["cancellation_locked_at"])
+        self.assertEqual(client.delete("/api/v3/worker-leases/lease").status_code, 409)
 
     def test_resource_limited_base_lease_can_be_manually_retried_as_large(self):
         import json

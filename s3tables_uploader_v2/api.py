@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 
 from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
 from .config import Settings
-from .job_store import MissingRecord, S3JobStore
+from .job_store import MissingRecord, RecordStateConflict, S3JobStore
 from .models import Destination, JobRequest, JobSource, JobStatus, MutationCommand, UploadSession
 from .sanitization import sanitised_schema
 from .table_lock import S3TableLockManager
@@ -399,10 +399,18 @@ def create_app(
         return sorted(latest_by_upload.values(), key=lambda item: item.get("uploaded_at") or "", reverse=True)
 
     def _lease_response(lease: dict[str, Any]) -> dict[str, Any]:
+        cancellable_states = {
+            "STARTING", "AWAITING_UPLOAD", "PROFILING", "AWAITING_KEY",
+            "ANALYSING_KEY", "AWAITING_CONFIRMATION", "FAILED",
+        }
         return {
             "lease_id": lease["lease_id"], "worker_state": lease["state"], "worker_size": lease["worker_size"],
             "routing_score": lease["routing_score"], "routing_reason": lease["routing_reason"],
             "expires_at": lease["expires_at"], "can_retry_large": bool(lease.get("can_retry_large")),
+            "can_cancel_and_start_over": bool(
+                lease.get("state") in cancellable_states
+                and not lease.get("cancellation_locked_at")
+            ),
         }
 
     def _lease_queue(worker_size: str) -> str:
@@ -440,7 +448,8 @@ def create_app(
             "files": [{"name": str(item["name"]), "size_bytes": int(item["size_bytes"])} for item in files],
             "worker_size": route.worker_size, "routing_score": route.routing_score, "routing_reason": route.routing_reason,
             "state": "STARTING", "message": "Starting a leased worker for the selected file.", "session_id": None,
-            "attempt": 1, "can_retry_large": False, "created_at": now.isoformat(), "updated_at": now.isoformat(),
+            "attempt": 1, "can_retry_large": False, "cancellation_locked_at": None,
+            "created_at": now.isoformat(), "updated_at": now.isoformat(),
             "expires_at": (now + timedelta(minutes=_PREUPLOAD_LEASE_MINUTES)).isoformat(),
         }
         store.put_lease(lease, create_only=True)
@@ -460,10 +469,46 @@ def create_app(
         received = [(item["name"], int(item["size_bytes"])) for item in session.get("files", [])]
         if expected != received:
             raise HTTPException(409, "WORKER_LEASE_FILES_CHANGED")
-        return store.update_lease(lease_id, {
-            "session_id": session["session_id"], "state": "AWAITING_UPLOAD", "message": "Waiting for the upload to become available.",
-            "updated_at": _now(), "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=_ACTIVE_LEASE_MINUTES)).isoformat(),
-        })
+        try:
+            return store.update_lease(
+                lease_id,
+                {
+                    "session_id": session["session_id"], "state": "AWAITING_UPLOAD", "message": "Waiting for the upload to become available.",
+                    "updated_at": _now(), "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=_ACTIVE_LEASE_MINUTES)).isoformat(),
+                },
+                guard=lambda current: current.get("owner_user_id") == user_id
+                and current.get("state") not in {"CANCELLED", "EXPIRED", "COMPLETED", "RESOURCE_LIMIT_EXCEEDED"}
+                and not current.get("cancellation_locked_at"),
+            )
+        except RecordStateConflict as error:
+            raise HTTPException(409, "WORKER_LEASE_UNAVAILABLE") from error
+
+    def _delete_raw_source_versions(session: dict[str, Any]) -> None:
+        """Delete only the immutable versions received for a cancelled session."""
+        for source in session.get("files", []):
+            key = str(source.get("source_key") or "")
+            version_id = str(source.get("source_version_id") or "")
+            if not key or not version_id:
+                continue
+            try:
+                s3.delete_object(Bucket=settings.landing_bucket, Key=key, VersionId=version_id)
+            except ClientError as error:
+                raise HTTPException(503, "CANCEL_CLEANUP_INCOMPLETE") from error
+
+    def _lock_lease_for_ingestion(session: dict[str, Any], user_id: str) -> None:
+        if not (settings.leases_enabled and session.get("worker_lease_id")):
+            return
+        try:
+            store.update_lease(
+                str(session["worker_lease_id"]),
+                {"cancellation_locked_at": _now(), "updated_at": _now()},
+                guard=lambda lease: lease.get("owner_user_id") == user_id
+                and str(lease.get("session_id") or "") == str(session["session_id"])
+                and lease.get("state") not in {"CANCELLED", "EXPIRED", "FAILED", "RESOURCE_LIMIT_EXCEEDED"}
+                and not lease.get("cancellation_locked_at"),
+            )
+        except RecordStateConflict as error:
+            raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE") from error
 
     @app.middleware("http")
     async def browser_login_gate(request: Request, call_next: Any) -> Response:
@@ -851,9 +896,58 @@ def create_app(
             raise HTTPException(404, "WORKER_LEASE_NOT_FOUND") from error
         if lease.get("owner_user_id") != user_id:
             raise HTTPException(403, "WORKER_LEASE_FORBIDDEN")
-        if lease.get("session_id"):
-            raise HTTPException(409, "WORKER_LEASE_ALREADY_ATTACHED")
-        store.update_lease(lease_id, {"state": "CANCELLED", "message": "File selection changed.", "updated_at": _now()})
+        session: dict[str, Any] | None = None
+        session_id = str(lease.get("session_id") or "")
+        if session_id:
+            try:
+                session = store.get_compat_session(session_id)
+            except MissingRecord as error:
+                raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE") from error
+            if session.get("owner_user_id") != user_id:
+                raise HTTPException(403, "UPLOAD_SESSION_FORBIDDEN")
+
+        if lease.get("state") != "CANCELLED":
+            if lease.get("cancellation_locked_at") or (session and session.get("ingestion")):
+                raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE")
+            allowed_lease_states = {
+                "STARTING", "AWAITING_UPLOAD", "PROFILING", "AWAITING_KEY",
+                "ANALYSING_KEY", "AWAITING_CONFIRMATION", "FAILED",
+            }
+            allowed_session_phases = {
+                "RECEIVED", "PROFILING", "READY_FOR_REVIEW", "KEY_ANALYSING",
+                "READY_FOR_ACKNOWLEDGEMENT", "FAILED", "DELETED",
+            }
+            if lease.get("state") not in allowed_lease_states or (session and session.get("phase") not in allowed_session_phases):
+                raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE")
+            try:
+                lease = store.update_lease(
+                    lease_id,
+                    {"state": "CANCELLED", "message": "Cancelled by the upload owner.", "updated_at": _now()},
+                    guard=lambda current: current.get("owner_user_id") == user_id
+                    and not current.get("cancellation_locked_at")
+                    and current.get("state") in allowed_lease_states,
+                )
+            except RecordStateConflict as error:
+                raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE") from error
+
+        if session and session.get("phase") != "DELETED":
+            try:
+                session = store.update_compat_session(
+                    session_id,
+                    {
+                        "phase": "DELETED", "phase_started_at": _now(), "updated_at": _now(),
+                        "progress_message": "Upload cancelled before ETL acceptance.",
+                        "error": None, "cleanup_pending": True,
+                    },
+                    guard=lambda current: current.get("owner_user_id") == user_id
+                    and not current.get("ingestion")
+                    and current.get("phase") != "DELETED",
+                )
+            except RecordStateConflict as error:
+                raise HTTPException(409, "CANCEL_AND_START_OVER_UNAVAILABLE") from error
+        if session:
+            _delete_raw_source_versions(session)
+            store.update_compat_session(session_id, {"cleanup_pending": False, "updated_at": _now()})
         return Response(status_code=204)
 
     @app.post("/api/v3/worker-leases/{lease_id}/retry-large", status_code=202)
@@ -952,6 +1046,7 @@ def create_app(
         session_id = uuid.uuid4().hex
         received_at = _now()
         files: list[dict[str, Any]] = []
+        session_recorded = False
         try:
             for number, upload in enumerate(uploads):
                 name = _safe_upload_name(upload.filename or "")
@@ -970,7 +1065,7 @@ def create_app(
                     if not parts:
                         raise HTTPException(400, f"{name} is empty")
                     completed = await asyncio.to_thread(s3.complete_multipart_upload, Bucket=settings.landing_bucket, Key=key, UploadId=multipart["UploadId"], MultipartUpload={"Parts": parts})
-                except Exception:
+                except (Exception, asyncio.CancelledError):
                     await asyncio.to_thread(s3.abort_multipart_upload, Bucket=settings.landing_bucket, Key=key, UploadId=multipart["UploadId"])
                     raise
                 files.append({"name": name, "sha256": digest.hexdigest(), "size_bytes": size, "source_key": key, "source_version_id": completed.get("VersionId")})
@@ -997,17 +1092,20 @@ def create_app(
                         lease = _new_lease(files, user_id)
                     expected = [(item["name"], int(item["size_bytes"])) for item in lease.get("files", [])]
                     received = [(item["name"], int(item["size_bytes"])) for item in files]
-                    if lease.get("state") in {"CANCELLED", "EXPIRED", "COMPLETED", "RESOURCE_LIMIT_EXCEEDED"} or expected != received:
+                    if lease.get("state") == "CANCELLED":
+                        raise HTTPException(409, "WORKER_LEASE_UNAVAILABLE")
+                    if lease.get("state") in {"EXPIRED", "COMPLETED", "RESOURCE_LIMIT_EXCEEDED"} or expected != received:
                         lease = _new_lease(files, user_id)
                 session["worker_lease_id"] = lease["lease_id"]
             store.put_compat_session(session, create_only=True)
+            session_recorded = True
             if settings.leases_enabled:
                 # The leased task is already starting, or was just started as
                 # the backwards-compatible fallback for a missed warm-up.
                 try:
                     lease = _bind_lease(str(session["worker_lease_id"]), user_id, session)
                 except HTTPException as error:
-                    if error.status_code != 409:
+                    if error.status_code != 409 or error.detail == "WORKER_LEASE_UNAVAILABLE":
                         raise
                     lease = _new_lease(files, user_id)
                     session["worker_lease_id"] = lease["lease_id"]
@@ -1016,9 +1114,23 @@ def create_app(
             else:
                 _dispatch_compat_work("profile", session)
             return _safe_compat_session(session)
-        except HTTPException:
-            raise
-        except Exception as error:
+        except BaseException as error:
+            if files:
+                if session_recorded:
+                    try:
+                        store.update_compat_session(
+                            session_id,
+                            {"phase": "DELETED", "phase_started_at": _now(), "updated_at": _now(),
+                             "progress_message": "Upload receipt cancelled before worker attachment.", "cleanup_pending": True},
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await asyncio.to_thread(_delete_raw_source_versions, {"files": files})
+                except Exception:
+                    pass
+            if isinstance(error, HTTPException):
+                raise
             raise HTTPException(422, f"Unable to read the uploaded Parquet file: {error}") from error
         finally:
             for upload in uploads:
@@ -1032,7 +1144,10 @@ def create_app(
             try:
                 value["worker_lease"] = _lease_response(store.get_lease(str(lease_id)))
             except MissingRecord:
-                value["worker_lease"] = {"lease_id": lease_id, "worker_state": "FAILED", "can_retry_large": False}
+                value["worker_lease"] = {
+                    "lease_id": lease_id, "worker_state": "FAILED", "can_retry_large": False,
+                    "can_cancel_and_start_over": False,
+                }
         return value
 
     def _get_compat_session(session_id: str, user_id: str) -> dict[str, Any]:
@@ -1155,11 +1270,6 @@ def create_app(
             expires_at = impact.get("expires_at")
             if not expires_at or datetime.fromisoformat(expires_at) <= datetime.now(timezone.utc):
                 raise HTTPException(422, "The composite-key analysis acknowledgement has expired; run it again")
-        if late_key_activation:
-            _activate_late_deduplication_contract(
-                session["table_bucket_arn"], session["namespace"], session["table"], contract,
-                effective_deduplication_columns, user_id,
-            )
         allowed_manual = {
             item["column"] for item in (session.get("preflight") or {}).get("sanitization_review", {}).get("manual_encryption_candidates", [])
         }
@@ -1175,6 +1285,15 @@ def create_app(
                 raise HTTPException(500, "LANDING_BUCKET_VERSIONING_REQUIRED")
             sources.append(JobSource(name=source["name"], source_key=source["source_key"], source_version_id=source["source_version_id"], source_sha256=source["sha256"], source_size_bytes=source["size_bytes"]))
         source = sources[0]
+        # This is the irreversible browser-reset boundary. It is deliberately
+        # acquired after validation but before a contract mutation, durable job
+        # record, queue message, or Glue-side effect can be created.
+        _lock_lease_for_ingestion(session, user_id)
+        if late_key_activation:
+            _activate_late_deduplication_contract(
+                session["table_bucket_arn"], session["namespace"], session["table"], contract,
+                effective_deduplication_columns, user_id,
+            )
         job_id = str(uuid.uuid4())
         upload_id = _upload_id()
         job = JobRequest(job_id=job_id, session_id=session_id, owner_user_id=user_id, operation=session["mode"],
