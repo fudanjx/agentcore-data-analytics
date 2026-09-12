@@ -90,10 +90,9 @@ class WorkerTests(unittest.TestCase):
             manifest = json.loads(s3.items["prefix/jobs/job/prepared/manifest.json"])
         self.assertEqual(len(manifest["files"]), 2)
         self.assertEqual(manifest["prepared_row_count"], 2)
-        self.assertEqual(glue.calls[0]["Arguments"]["--FILENAMES_JSON"], '["first.parquet", "second.parquet"]')
-        self.assertEqual(glue.calls[0]["Arguments"]["--LOCK_BUCKET"], "landing")
-        self.assertTrue(glue.calls[0]["Arguments"]["--LOCK_KEY"].startswith("prefix/table-locks/"))
-        self.assertTrue(glue.calls[0]["Arguments"]["--QUEUE_KEY"].startswith("prefix/table-queues/"))
+        self.assertEqual(manifest["files"], ["s3://landing/prefix/jobs/job/prepared/input-00.parquet", "s3://landing/prefix/jobs/job/prepared/input-01.parquet"])
+        self.assertEqual(glue.calls, [])
+        self.assertEqual(store.get_status("job").status.phase, "READY_FOR_MUTATION")
 
     def test_worker_skips_only_a_fully_excluded_source_file(self):
         class FakeS3:
@@ -143,6 +142,14 @@ class WorkerTests(unittest.TestCase):
         self.assertIn("def _fresh_snapshot_state", source)
         self.assertIn("Spark3Util.loadIcebergTable", source)
         self.assertIn("after_snapshot != snapshot_id", source)
+
+    def test_glue_terminal_release_uses_ownership_validation_not_unsupported_delete_ifmatch(self):
+        source = (Path(__file__).parents[1] / "glue_job.py").read_text()
+        self.assertIn("def _release_owned_object", source)
+        self.assertIn('expected={"owner_token": ARGS["RUN_ID"], "request_id": ARGS["RUN_ID"]}', source)
+        self.assertIn('expected={"job_id": ARGS["RUN_ID"]}', source)
+        self.assertNotIn('s3.delete_object(Bucket=ARGS["LOCK_BUCKET"], Key=ARGS["LOCK_KEY"], IfMatch=', source)
+        self.assertNotIn('s3.delete_object(Bucket=ARGS["QUEUE_BUCKET"], Key=ARGS["QUEUE_KEY"], IfMatch=', source)
     def test_parquet_is_processed_in_bounded_batches_and_sanitised(self):
         with tempfile.TemporaryDirectory() as directory:
             source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"

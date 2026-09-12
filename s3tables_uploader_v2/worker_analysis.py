@@ -1,14 +1,18 @@
-"""Bounded, value-free review work run only inside the large Fargate worker.
+"""Bounded review work run only inside the large Fargate worker.
 
 The functions in this module intentionally mirror the v1 raw key semantics:
 null/blank key components use a sentinel, exact duplicates retain one row, and
 same-key/different-row groups are excluded.  They never write raw values to
-logs or session records.
+logs, staging manifests, QC reports, or Glue arguments.  The preflight result
+contains at most five short examples for a non-protected review field, matching
+the V1 UI contract.  Protected healthcare fields are always represented by a
+masked notice instead of source values.
 """
 
 from __future__ import annotations
 
 import csv
+import random
 import re
 from pathlib import Path
 from typing import Any
@@ -16,6 +20,7 @@ from typing import Any
 import pandas as pd
 import polars as pl
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
 from .ingest_contract import compare_schema, profile_table
@@ -225,6 +230,47 @@ def raw_key_row_selection(paths: list[tuple[Path, str]], key_columns: list[str])
     }
 
 
+def _deduplication_candidates(
+    source: pa.Table,
+    target: list[dict[str, str]],
+    protected_columns: set[str],
+) -> list[dict[str, Any]]:
+    """Return V1-style, bounded examples for first-upload key selection.
+
+    Values are sampled only from the first source file, just as V1 did.  They
+    are intended for the review response only; automatically protected fields
+    never expose source values or quality counts.
+    """
+    source_by_canonical = dict(zip(normalise_names(source.schema.names), source.schema.names))
+    candidates: list[dict[str, Any]] = []
+    for field in target:
+        source_name = source_by_canonical.get(field["name"])
+        masked = source_name in protected_columns
+        values: list[str] = []
+        non_null_count = 0
+        if source_name and not masked:
+            column = source[source_name]
+            non_null_count = int(pc.count(column).as_py())
+            for index in random.SystemRandom().sample(range(len(column)), min(1024, len(column))):
+                value = column[index].as_py()
+                if value is not None and str(value).strip().lower() not in {"", "nan", "none", "nat"}:
+                    values.append(str(value)[:160])
+                    if len(values) == 5:
+                        break
+        candidates.append({
+            "column": field["name"],
+            "target_type": field["type"],
+            "source_type": str(source.schema.field(source_name).type) if source_name else "MISSING",
+            "sample_values": values,
+            "samples_masked": bool(masked),
+            "deduplication_eligible": True,
+            "deduplication_ineligible_reason": None,
+            "non_null_count": non_null_count if not masked else None,
+            "distinct_non_null_count": None,
+        })
+    return candidates
+
+
 def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_arn: str, namespace: str, table: str, existing_contract: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run v1's raw inspection and sanitisation review in the worker.
 
@@ -280,10 +326,18 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
     source_column_sets = [set(normalise_names(source.schema.names)) for source in tables]
     available_columns = set.intersection(*source_column_sets) if source_column_sets else set()
     active_key = [column for column in configured_key if column in available_columns]
-    candidates = [] if configured_key else [
-        {"column": field["name"], "target_type": field["type"], "source_type": field["type"], "sample_values": [], "samples_masked": True, "non_null_count": 0, "deduplication_eligible": True}
-        for field in target
-    ]
+    protected_columns = {
+        column
+        for result in results
+        for column in (
+            result["sanitization"]["dropped_columns"]
+            + result["sanitization"]["encrypted_columns"]
+            + result["sanitization"]["postal_columns"]
+            + result["sanitization"]["age_banded_columns"]
+            + result["nric_detected_columns"]
+        )
+    }
+    candidates = [] if configured_key else _deduplication_candidates(tables[0], target, protected_columns)
     automatic_encrypted = sorted({
         normalise_names([column])[0]
         for result in results
@@ -296,7 +350,7 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
         + result["sanitization"]["postal_columns"] + result["sanitization"]["age_banded_columns"] + result["nric_detected_columns"]
     }
     manual_candidates = [
-        {"column": item["column"], "sample_values": [], "samples_masked": True}
+        {"column": item["column"], "sample_values": item["sample_values"], "samples_masked": item["samples_masked"]}
         for item in candidates if item["column"] not in transformed
     ]
     return {

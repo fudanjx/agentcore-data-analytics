@@ -23,3 +23,7 @@ class SettingsTests(unittest.TestCase):
 
     def test_defaults_to_short_raw_retention(self):
         self.assertEqual(Settings.from_environ(self.valid()).raw_retention_days, 1)
+
+    def test_mutation_queue_defaults_to_legacy_queue_until_the_fifo_dispatcher_is_configured(self):
+        settings = Settings.from_environ(self.valid())
+        self.assertEqual(settings.mutation_queue_url, settings.queue_url)

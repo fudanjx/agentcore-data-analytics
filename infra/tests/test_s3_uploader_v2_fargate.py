@@ -13,6 +13,15 @@ class FargateTemplateTests(unittest.TestCase):
         self.assertEqual(resources["WorkerTaskDefinition"]["Properties"]["Memory"], "32768")
         self.assertIn("BaseWorkerPipe", resources)
         self.assertIn("LargeWorkerPipe", resources)
+        self.assertIn("MutationQueue", resources)
+        self.assertEqual(resources["MutationDispatcherService"]["Properties"]["DesiredCount"], 1)
+        self.assertEqual(resources["MutationQueue"]["Properties"]["VisibilityTimeout"], 120)
+        self.assertEqual(resources["MutationQueue"]["Properties"]["RedrivePolicy"]["maxReceiveCount"], 5)
+        self.assertIn("MutationQueueDlqAlarm", resources)
+        dispatcher_environment = resources["MutationDispatcherTaskDefinition"]["Properties"]["ContainerDefinitions"][0]["Environment"]
+        self.assertIn({"Name": "S3_UPLOADER_V3_MUTATION_QUEUE_URL", "Value": {"Ref": "MutationQueue"}}, dispatcher_environment)
+        self.assertIn({"Name": "S3_UPLOADER_V2_GLUE_JOB_NAME", "Value": {"Ref": "V3GlueJob"}}, dispatcher_environment)
+        self.assertIn({"Name": "S3_UPLOADER_V3_MUTATION_POLL_SECONDS", "Value": "10"}, dispatcher_environment)
         self.assertEqual(template["Parameters"]["EnableV3Leases"]["Default"], "false")
         self.assertEqual(resources["DnsRecord"]["Properties"]["Name"], DOMAIN + ".")
         self.assertEqual(resources["DnsRecord"]["Properties"]["AliasTarget"]["DNSName"], {"Ref": "AlbDnsName"})
@@ -29,6 +38,8 @@ class FargateTemplateTests(unittest.TestCase):
         worker_statements = resources["WorkerTaskRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
         worker_landing_access = next(statement for statement in worker_statements if "s3:GetObjectVersion" in statement["Action"])
         self.assertIn("s3:DeleteObject", worker_landing_access["Action"])
+        dispatcher_lock_list = next(statement for statement in worker_statements if statement["Action"] == "s3:ListBucket" and statement["Condition"]["StringLike"]["s3:prefix"] == ["s3-uploader-v2/table-locks", "s3-uploader-v2/table-locks/*"])
+        self.assertEqual(dispatcher_lock_list["Resource"], {"Fn::GetAtt": ["LandingBucket", "Arn"]})
         history_list = next(statement for statement in statements if statement["Action"] == "s3:ListBucket" and statement["Resource"] == "arn:aws:s3:::ah-data-analytics")
         self.assertEqual(history_list["Condition"]["StringLike"]["s3:prefix"], ["temp_s3_update/web_ingest/upload_history/*"])
         metadata_read = next(statement for statement in statements if statement["Action"] == "s3:GetObject" and statement["Resource"] == "arn:aws:s3:::*--table-s3/metadata/*")
@@ -41,5 +52,7 @@ class FargateTemplateTests(unittest.TestCase):
         contract_write = next(statement for statement in statements if statement["Action"] == "s3:PutObject" and "table_contracts/*" in statement["Resource"])
         self.assertEqual(contract_write["Resource"], "arn:aws:s3:::ah-data-analytics/temp_s3_update/web_ingest/table_contracts/*")
         self.assertEqual(resources["V3GlueJob"]["Properties"]["Name"], "s3-uploader-v3-ingest")
-        self.assertEqual(resources["ApiTaskDefinition"]["Properties"]["ContainerDefinitions"][0]["Environment"][-1]["Value"], {"Ref": "V3GlueJob"})
+        api_environment = resources["ApiTaskDefinition"]["Properties"]["ContainerDefinitions"][0]["Environment"]
+        self.assertIn({"Name": "S3_UPLOADER_V2_GLUE_JOB_NAME", "Value": {"Ref": "V3GlueJob"}}, api_environment)
+        self.assertIn({"Name": "S3_UPLOADER_V3_MUTATION_QUEUE_URL", "Value": {"Ref": "MutationQueue"}}, api_environment)
         json.dumps(template)

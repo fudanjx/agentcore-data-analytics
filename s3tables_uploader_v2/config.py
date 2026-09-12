@@ -36,6 +36,7 @@ class Settings:
     queue_url: str
     base_worker_queue_url: str
     large_worker_queue_url: str
+    mutation_queue_url: str
     leases_enabled: bool
     login_password: str
     login_secret: str
@@ -66,6 +67,7 @@ class Settings:
             queue_url=queue_url,
             base_worker_queue_url=env.get("S3_UPLOADER_V3_BASE_QUEUE_URL", queue_url),
             large_worker_queue_url=env.get("S3_UPLOADER_V3_LARGE_QUEUE_URL", queue_url),
+            mutation_queue_url=env.get("S3_UPLOADER_V3_MUTATION_QUEUE_URL", queue_url),
             leases_enabled=_boolean("S3_UPLOADER_V3_LEASES_ENABLED", env, False),
             login_password=_required("S3_UPLOADER_V2_LOGIN_PASSWORD", env),
             login_secret=secret,

@@ -30,10 +30,25 @@ ARGS = getResolvedOptions(
         "JOB_NAME", "MODE", "MANIFEST_URI", "TABLE_BUCKET_ARN", "NAMESPACE", "TABLE",
         "QC_PREFIX", "RUN_ID", "UPLOAD_ID", "UPLOADED_BY", "REPORTING_MONTH",
         "FILENAMES_JSON", "AUDIT_PREFIX", "ROLLBACK_SNAPSHOT_ID",
-        "ORIGINAL_UPLOADED_BY", "ORIGINAL_UPLOADED_AT", "LOCK_BUCKET", "LOCK_KEY", "LOCK_ETAG",
-        "QUEUE_BUCKET", "QUEUE_KEY", "QUEUE_ETAG",
+        "ORIGINAL_UPLOADED_BY", "ORIGINAL_UPLOADED_AT",
     ],
 )
+
+
+def _legacy_optional_argument(name: str) -> str:
+    """Read an optional legacy release argument without Glue parsing it."""
+    flag = f"--{name}"
+    try:
+        index = sys.argv.index(flag)
+    except ValueError:
+        return ""
+    return sys.argv[index + 1] if index + 1 < len(sys.argv) else ""
+
+
+LEGACY_RELEASE_ARGS = {
+    name: _legacy_optional_argument(name)
+    for name in ("LOCK_BUCKET", "LOCK_KEY", "LOCK_ETAG", "QUEUE_BUCKET", "QUEUE_KEY", "QUEUE_ETAG")
+}
 MODE = ARGS["MODE"].lower()
 if MODE not in {"create", "append", "rollback"}:
     raise ValueError("MODE must be create, append, or rollback")
@@ -95,27 +110,47 @@ def _write_audit_projection(event: dict) -> str:
     return f"s3://{bucket}/{key}"
 
 
-def _release_table_lock() -> None:
-    """Release the worker/API lock after this Glue run reaches a terminal result."""
-    if not ARGS["LOCK_BUCKET"] or not ARGS["LOCK_KEY"] or not ARGS["LOCK_ETAG"]:
+def _release_owned_object(*, label: str, bucket: str, key: str, expected_etag: str,
+                          expected: dict[str, str]) -> None:
+    """Release an object only when this Glue run still demonstrably owns it.
+
+    Glue's bundled boto3 does not support the S3 DeleteObject ``IfMatch``
+    parameter.  Read and validate the ETag plus immutable owner fields before
+    deleting instead.  A queue key is unique per job; a table lock remains in
+    place until its owning run releases it, so neither can be replaced by a
+    normal uploader while this terminal handler is running.
+    """
+    if not bucket or not key or not expected_etag:
         return
     try:
-        s3.delete_object(Bucket=ARGS["LOCK_BUCKET"], Key=ARGS["LOCK_KEY"], IfMatch=ARGS["LOCK_ETAG"])
+        response = s3.get_object(Bucket=bucket, Key=key)
+        actual_etag = response.get("ETag", "").strip('"')
+        payload = json.loads(response["Body"].read())
+        if actual_etag != expected_etag or any(payload.get(name) != value for name, value in expected.items()):
+            print(json.dumps({f"{label}_release": "skipped", "reason": "ownership_changed"}))
+            return
+        s3.delete_object(Bucket=bucket, Key=key)
     except Exception as error:
         # Never hide the actual ingestion/rollback result, but leave evidence
-        # in Glue logs for operators. The bounded S3 lease will eventually
-        # expire if a release cannot be completed.
-        print(json.dumps({"table_lock_release": "failed", "error": str(error)}))
+        # in Glue logs for operators. The bounded S3 lease remains the final
+        # recovery guard if a terminal release cannot be completed.
+        print(json.dumps({f"{label}_release": "failed", "error": str(error)}))
+
+
+def _release_table_lock() -> None:
+    """Release the worker/API lock after this Glue run reaches a terminal result."""
+    _release_owned_object(
+        label="table_lock", bucket=LEGACY_RELEASE_ARGS["LOCK_BUCKET"], key=LEGACY_RELEASE_ARGS["LOCK_KEY"], expected_etag=LEGACY_RELEASE_ARGS["LOCK_ETAG"],
+        expected={"owner_token": ARGS["RUN_ID"], "request_id": ARGS["RUN_ID"]},
+    )
 
 
 def _release_table_queue() -> None:
     """Release the durable per-table FIFO entry after the Glue terminal state."""
-    if not ARGS["QUEUE_BUCKET"] or not ARGS["QUEUE_KEY"] or not ARGS["QUEUE_ETAG"]:
-        return
-    try:
-        s3.delete_object(Bucket=ARGS["QUEUE_BUCKET"], Key=ARGS["QUEUE_KEY"], IfMatch=ARGS["QUEUE_ETAG"])
-    except Exception as error:
-        print(json.dumps({"table_queue_release": "failed", "error": str(error)}))
+    _release_owned_object(
+        label="table_queue", bucket=LEGACY_RELEASE_ARGS["QUEUE_BUCKET"], key=LEGACY_RELEASE_ARGS["QUEUE_KEY"], expected_etag=LEGACY_RELEASE_ARGS["QUEUE_ETAG"],
+        expected={"job_id": ARGS["RUN_ID"]},
+    )
 
 
 def _exists(target: str = TARGET) -> bool:

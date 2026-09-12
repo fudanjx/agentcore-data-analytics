@@ -2,6 +2,7 @@ import hashlib
 import unittest
 from unittest.mock import patch
 
+from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
 from s3tables_uploader_v2.api import create_app
@@ -12,10 +13,22 @@ from s3tables_uploader_v2.models import JobStatus
 
 class FakeS3:
     def __init__(self): self.items = {}; self.parts = {}
+    @staticmethod
+    def _precondition_error():
+        return ClientError({"Error": {"Code": "PreconditionFailed"}}, "S3")
+    @staticmethod
+    def _not_found_error():
+        return ClientError({"Error": {"Code": "NoSuchKey"}}, "S3")
     def create_multipart_upload(self, **kwargs): self.create_args = kwargs; return {"UploadId": "upload"}
-    def put_object(self, Bucket, Key, Body, **kwargs): self.items[Key] = Body; return {"ETag": "etag"}
+    def put_object(self, Bucket, Key, Body, **kwargs):
+        if kwargs.get("IfNoneMatch") == "*" and Key in self.items:
+            raise self._precondition_error()
+        self.items[Key] = Body
+        return {"ETag": "etag"}
     def get_object(self, Bucket, Key):
         import io
+        if Key not in self.items:
+            raise self._not_found_error()
         return {"Body": io.BytesIO(self.items[Key]), "ETag": "etag"}
     def head_object(self, Bucket, Key):
         if Key not in self.items:
@@ -106,7 +119,7 @@ class ApiTests(unittest.TestCase):
         })
         return store, bucket, namespace, table, scope
 
-    def test_v1_history_contract_reads_canonical_audit_projection_and_starts_rollback(self):
+    def test_v1_history_contract_reads_canonical_audit_projection_and_queues_rollback(self):
         import json
         self.client.post("/login", json={"password":"password"})
         bucket, namespace, table = self.s3tables.bucket_arn, "pilot", "test_table"
@@ -121,11 +134,18 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(history.status_code, 200, history.text)
         self.assertEqual(history.json()["latest_rollback_upload_id"], "UPLOAD-ABCDEF123456")
         rollback = self.client.post("/api/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
-        self.assertEqual(rollback.status_code, 200, rollback.text)
-        args = self.glue.started[-1]["Arguments"]
-        self.assertEqual(args["--MODE"], "rollback")
-        self.assertEqual(args["--ROLLBACK_SNAPSHOT_ID"], "123")
-        self.assertEqual(args["--AUDIT_PREFIX"], f"s3://ah-data-analytics/temp_s3_update/web_ingest/upload_history/{scope}/{table}/")
+        self.assertEqual(rollback.status_code, 202, rollback.text)
+        mutation_id = rollback.json()["mutation_id"]
+        self.assertEqual(rollback.json()["phase"], "READY_FOR_MUTATION")
+        self.assertFalse(self.glue.started)
+        command = S3JobStore(self.s3, "landing", "s3-uploader-v2").get_mutation_command(mutation_id)
+        self.assertEqual(command.operation, "rollback")
+        self.assertEqual(command.rollback_snapshot_id, "123")
+        self.assertEqual(command.destination.table, table)
+        self.assertEqual(self.sqs.messages[-1]["MessageBody"], mutation_id)
+        repeated = self.client.post("/api/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
+        self.assertEqual(repeated.status_code, 202, repeated.text)
+        self.assertEqual(repeated.json()["mutation_id"], mutation_id)
 
     def test_administrator_can_create_namespace_and_delete_table(self):
         self.client.post("/login", json={"password":"password"})

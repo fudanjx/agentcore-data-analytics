@@ -71,11 +71,35 @@ class JobRequest(BaseModel):
 class JobStatus(BaseModel):
     schema_version: Literal[1] = 1
     job_id: str
-    phase: Literal["QUEUED", "CLAIMED", "PROFILING", "PREPARING", "STARTING_GLUE", "RUNNING_GLUE", "SUCCEEDED", "FAILED"]
+    phase: Literal["QUEUED", "CLAIMED", "PROFILING", "PREPARING", "READY_FOR_MUTATION", "STARTING_GLUE", "RUNNING_GLUE", "SUCCEEDED", "FAILED"]
     message: str
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error_code: str | None = None
     glue_run_id: str | None = None
+
+
+class MutationCommand(BaseModel):
+    """Durable command consumed by the per-table FIFO Glue dispatcher.
+
+    Upload jobs retain their existing immutable ``JobRequest`` records.  This
+    envelope gives the dispatcher one shape for those jobs and for rollback,
+    which has no uploaded source object.
+    """
+
+    schema_version: Literal[1] = 1
+    mutation_id: str
+    request_id: str = Field(min_length=1, max_length=128)
+    owner_user_id: str = Field(min_length=1)
+    operation: Literal["create", "append", "rollback"]
+    destination: Destination
+    upload_id: str = Field(default="", max_length=128)
+    source_job_id: str | None = None
+    rollback_snapshot_id: str | None = None
+    original_uploaded_by: str | None = None
+    original_uploaded_at: str | None = None
+    reporting_month: str = Field(default="", max_length=128)
+    filenames_json: str = Field(default="[]", max_length=8192)
+    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
 
 class JobEvent(BaseModel):

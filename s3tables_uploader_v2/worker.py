@@ -30,7 +30,6 @@ from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
 from .job_store import JobAlreadyClaimed, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
-from .table_lock import S3TableLockManager, S3TableMutationQueue, TableLockedError
 from .ingest_contract import normalise_names, temporal_array
 from .worker_analysis import profile_files, raw_key_impact_metrics, raw_key_row_selection, read_upload_table
 
@@ -336,7 +335,10 @@ def _combined_audit(audits: list[dict[str, Any]]) -> dict[str, Any]:
 
 def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = None, glue_client: Any | None = None, source_overrides: list[tuple[Path, str]] | None = None) -> str:
     s3 = s3_client or boto3.client("s3", region_name=settings.region)
-    glue = glue_client or boto3.client("glue", region_name=settings.region)
+    # The small FIFO dispatcher starts Glue after this disposable worker has
+    # prepared immutable staging artefacts. Keep the argument for callers
+    # that still pass the historical dependency.
+    _ = glue_client
     store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
     worker_id = f"{socket.gethostname()}-{os.getpid()}"
     try:
@@ -424,57 +426,11 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
         }
         manifest_key = _manifest_key(settings, job_id)
         s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="aws:kms")
-        queue = S3TableMutationQueue(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-queues")
-        queue_entry = queue.enqueue(
-            table_bucket_arn=request.destination.table_bucket_arn, namespace=request.destination.namespace,
-            table=request.destination.table, job_id=job_id, user_id=request.owner_user_id,
-            session_id=request.session_id, operation=request.operation, created_at=request.created_at.isoformat(),
-        )
-        queue_entry = queue.mark_ready(queue_entry)
-        while True:
-            position = queue.position(queue_entry)
-            if position == 1:
-                break
-            store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message=f"Waiting in the per-table FIFO queue (position {position})."))
-            time.sleep(5)
-        store.put_status(JobStatus(job_id=job_id, phase="STARTING_GLUE", message="Starting the S3 Tables ingestion job."))
-        lock_manager = S3TableLockManager(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-locks")
-        while True:
-            try:
-                table_lock = lock_manager.acquire(
-                    table_bucket_arn=request.destination.table_bucket_arn, namespace=request.destination.namespace,
-                    table=request.destination.table, owner_token=job_id, user_id=request.owner_user_id,
-                    request_id=job_id, session_id=request.session_id, operation=request.operation, phase="STARTING_GLUE",
-                )
-                break
-            except TableLockedError:
-                store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Waiting for the active table mutation to finish."))
-                time.sleep(5)
-        queue_entry = queue.mark_running(queue_entry)
-        try:
-            response = glue.start_job_run(
-                JobName=settings.glue_job_name,
-                JobRunQueuingEnabled=True,
-                Arguments={
-                "--MODE": request.operation, "--MANIFEST_URI": f"s3://{settings.landing_bucket}/{manifest_key}",
-                "--TABLE_BUCKET_ARN": request.destination.table_bucket_arn, "--NAMESPACE": request.destination.namespace,
-                "--TABLE": request.destination.table, "--RUN_ID": job_id,
-                "--UPLOAD_ID": request.upload_id or f"UPLOAD-{job_id.replace('-', '')[:12].upper()}",
-                "--UPLOADED_BY": request.owner_user_id, "--QC_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc",
-                "--AUDIT_PREFIX": f"s3://{_HISTORY_BUCKET}/{_history_prefix(request.destination.table_bucket_arn, request.destination.namespace, request.destination.table)}",
-                "--REPORTING_MONTH": request.reporting_month or "not-applicable", "--FILENAMES_JSON": json.dumps([source["name"] for source in sources]), "--ROLLBACK_SNAPSHOT_ID": "not-applicable",
-                "--ORIGINAL_UPLOADED_BY": request.owner_user_id, "--ORIGINAL_UPLOADED_AT": request.created_at.isoformat(),
-                "--LOCK_BUCKET": settings.landing_bucket, "--LOCK_KEY": table_lock.key, "--LOCK_ETAG": table_lock.etag,
-                "--QUEUE_BUCKET": settings.landing_bucket, "--QUEUE_KEY": queue_entry.key, "--QUEUE_ETAG": queue_entry.etag,
-            },
-            )
-        except Exception:
-            lock_manager.release(table_lock)
-            queue.release(queue_entry)
-            raise
-    glue_run_id = response["JobRunId"]
-    store.put_status(JobStatus(job_id=job_id, phase="RUNNING_GLUE", message="Glue ingestion is running.", glue_run_id=glue_run_id))
-    return glue_run_id
+    store.put_status(JobStatus(
+        job_id=job_id, phase="READY_FOR_MUTATION",
+        message="Sanitised staging is ready; waiting for the per-table FIFO Glue dispatcher.",
+    ))
+    return job_id
 
 
 def _rss_bytes(pid: int) -> int:
@@ -514,7 +470,6 @@ def _lease_phase_entry(action: str, lease_id: str, settings: WorkerSettings, cac
     """Child process entry point; each phase gets a fresh Python process."""
     try:
         s3 = boto3.client("s3", region_name=settings.region)
-        glue = boto3.client("glue", region_name=settings.region)
         store = S3JobStore(s3, settings.landing_bucket, settings.landing_prefix)
         lease = store.get_lease(lease_id)
         session = store.get_compat_session(str(lease["session_id"]))
@@ -528,10 +483,10 @@ def _lease_phase_entry(action: str, lease_id: str, settings: WorkerSettings, cac
         job_id = str((session.get("ingestion") or {}).get("job_id") or "")
         if not job_id:
             raise WorkerError("leased ingestion has no job id")
-        glue_run_id = process_job(job_id, settings, s3, glue, source_overrides=[(path, name) for path, name, _ in paths])
+        process_job(job_id, settings, s3, source_overrides=[(path, name) for path, name, _ in paths])
         session = store.get_compat_session(str(lease["session_id"]))
-        ingestion = {**(session.get("ingestion") or {}), "state": "RUNNING_GLUE", "job_run_id": glue_run_id}
-        _save_compat_session(store, session, phase="GLUE_RUNNING", progress_message="Glue ingestion is running.", ingestion=ingestion)
+        ingestion = {**(session.get("ingestion") or {}), "state": "READY_FOR_MUTATION", "job_run_id": None}
+        _save_compat_session(store, session, phase="QUEUED", progress_message="Sanitised staging is ready; waiting for the per-table FIFO Glue dispatcher.", ingestion=ingestion)
         result_queue.put({"ok": True})
     except Exception as error:
         result_queue.put({"ok": False, "error_type": type(error).__name__, "error": str(error)})
@@ -638,7 +593,7 @@ def run_leased_worker(lease_id: str, settings: WorkerSettings, s3_client: Any | 
                     if not ok:
                         _mark_resource_limit(store, lease, session, "QUEUED", reason)
                         return "resource-limit"
-                    _save_lease(store, lease, state="COMPLETED", message="Glue ingestion was started.")
+                    _save_lease(store, lease, state="COMPLETED", message="Sanitised staging is ready for the FIFO Glue dispatcher.")
                     return "completed"
             except Exception as error:
                 job_id = str((session.get("ingestion") or {}).get("job_id") or "")

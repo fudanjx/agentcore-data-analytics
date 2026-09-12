@@ -1,439 +1,333 @@
 # S3 Tables Uploader V3 — Deployment and API Integration Guide
 
-Updated: 2026-09-10 (Asia/Singapore)
-Audience: AWS operators and frontend engineers
-Base URL: https://s3-uploader-v2.bot-alex.com
+**Current as of 2026-09-12, Asia/Singapore**
+Implementation: `s3tables_uploader_v2/`
+Stack: `s3-uploader-v2`, region `ap-southeast-1`
+URL: `https://s3-uploader-v2.bot-alex.com`
+
+This is the current V3 deployment and frontend contract. It supersedes prior
+descriptions of multiple blocking dispatchers, API/worker-side Glue start,
+durable S3 table-queue records, fixed three-bucket administrator access, or
+legacy required Glue lock/queue arguments.
 
 ## Architecture
 
-~~~text
-Browser/existing application
-  -> ALB HTTPS host rule -> small API Fargate service (1 vCPU / 2 GiB)
-  -> encrypted/versioned landing S3 and FIFO worker queues
-  -> EventBridge Pipe -> one fixed-size leased Fargate worker
-  -> prepared Parquet, manifest and durable status in S3
-  -> Glue s3-uploader-v3-ingest -> S3 Tables/Iceberg + audit/QC/history
-~~~
+```text
+Browser / existing web application
+        |
+        v
+ALB + FastAPI/UI service (one 1 vCPU / 2 GiB task)
+        |                         \
+        |                          \-- S3 Tables control plane + skill bundles
+        v
+S3 durable state: versioned raw objects, sessions, leases, requests/status,
+contracts, prepared artifacts/manifests, QC and history
+        |
+        +--> BASE / LARGE FIFO -> EventBridge Pipe -> leased Fargate worker
+        |                                      profile, key analysis, preparation
+        |
+        +--> `s3-uploader-v3-mutations.fifo` -> one dispatcher -> Glue -> S3 Tables
+```
 
-The base worker is 4 vCPU/16 GiB and the large worker is 8 vCPU/32 GiB; both
-have 100 GiB ephemeral storage. The API does not parse user datasets. One
-worker remains alive through the human review/key choices to reuse local cached
-immutable sources. S3 remains authoritative if it must be recreated.
+S3 is the source of truth. SQS is still the durable queue. The dispatcher is a
+custom SQS consumer/scheduler, not a replacement for SQS. No DynamoDB, EFS,
+EKS or Lambda is used.
 
-## AWS services to set up
+### Live release
 
-The source of truth is infra/s3_uploader_v2_fargate.py; render it rather than
-manually maintaining a divergent CloudFormation template.
-
-### Inputs to provide
-
-| Parameter | Purpose |
+| Item | Value |
 | --- | --- |
-| ClusterArn | Existing ECS cluster, currently embedded-web-app |
-| VpcId, PrivateSubnets | Fargate placement |
-| ExistingAlbSecurityGroupId | ALB-to-API port 8090 ingress |
-| AlbListenerArn, AlbDnsName, AlbCanonicalHostedZoneId | HTTPS route target |
-| HostedZoneId, CertificateArn | DNS alias and TLS |
-| LoginPasswordSecretArn, LoginSigningSecretArn | Login password and HMAC signing secret (32+ chars) |
-| EncryptionSecretArn | Worker encryption material |
-| ApiImageUri, WorkerImageUri | Immutable linux/amd64 ECR image URIs |
-| EnableV3Leases | true in production |
+| API | `s3-uploader-v2-api:30`, desired/running 1 |
+| Dispatcher | `s3-uploader-v3-mutation-dispatcher:4`, desired/running 1 |
+| Base worker | `s3-uploader-v2-worker:45`, 4096 CPU / 16384 MiB / 100 GiB ephemeral |
+| Large worker | `s3-uploader-v2-worker:44`, 8192 CPU / 32768 MiB / 100 GiB ephemeral |
+| API image | `964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/s3-uploader-v2-api:20260912-single-async-dispatcher-amd64-1` |
+| Worker / dispatcher image | `964340114883.dkr.ecr.ap-southeast-1.amazonaws.com/s3-uploader-v2-worker:20260912-review-samples-amd64-1` |
+| Mutation queue | `s3-uploader-v3-mutations.fifo`; 120-second visibility; five receives before DLQ |
+| Glue | `s3-uploader-v3-ingest`; Glue 5.0, 4 `G.1X`, `MaxConcurrentRuns=5` |
 
-### Stack-created services
+The two ECR images are Linux/amd64 two-stage builds with Azure Linux distroless
+runtime images. The landing bucket physical name is CloudFormation-owned; read
+it from stack outputs/task environment instead of hard-coding it.
 
-| Service | Required configuration |
+## Concurrency and FIFO guarantee
+
+Every create, append and rollback is first persisted in S3 as a
+`MutationCommand`, then sent to one SQS FIFO queue. Its `MessageGroupId` is:
+
+```text
+SHA-256(table_bucket_arn + separator + namespace + separator + table)
+```
+
+The single 0.5 vCPU/1 GiB dispatcher tracks up to 50 received messages and may
+start up to five Glue operations for different tables, matching the Glue quota.
+It polls every 10 seconds, renews message visibility every 30 seconds and
+retains every SQS receipt until the corresponding preparation/Glue operation is
+terminal, its status is persisted and its owned table lock is released.
+
+Consequences:
+
+- A1, B1 and C1 can run at once when they are different tables and Glue has
+  capacity.
+- A2 is withheld by SQS until A1 has terminal state and the dispatcher deletes
+  A1’s receipt.
+- A same-table request is queued, never rejected as “table busy”.
+- On explicit Glue capacity errors the command returns to `READY_FOR_MUTATION`;
+  its message remains durable for retry. Glue run queuing is enabled as a
+  second account-quota guard.
+- A long same-table queue may delay later message receipt in the one physical
+  queue. This is an intentional simplicity trade-off, not loss of correctness.
+
+The dispatcher conditionally acquires an S3 lock immediately before Glue:
+
+```text
+s3-uploader-v2/table-locks/<table-identity-hash>.json
+```
+
+The lock includes operational owner/request/session data only. Conditional S3
+writes/ETags control acquisition, renewal, release and stale takeover. Startup
+reconciles existing locks into the Glue-slot count, so an ECS restart cannot
+over-admit work. The mutation DLQ alarms on any visible message.
+
+New Glue invocations omit `--LOCK_*` and `--QUEUE_*`. They are optional only
+for an in-flight legacy invocation. This prevents the historical
+`GlueArgumentError: argument --QUEUE_KEY: expected one argument` failure.
+
+## AWS services and required permissions
+
+`infra/s3_uploader_v2_fargate.py` renders the stack. It owns:
+
+| Service | V3 responsibility |
 | --- | --- |
-| S3 landing bucket | Versioning, SSE-KMS, public access blocked, one-day raw lifecycle, 30-day jobs lifecycle |
-| SQS FIFO | default jobs, base leases, large leases, and 14-day DLQ; 3,600-second visibility, redrive after two receives |
-| EventBridge Pipes | one per queue, batch size 1, target worker task and S3_UPLOADER_V2_JOB_ID=$.body override |
-| ECS/Fargate | API service desired count 1; task definitions for base/large/default worker |
-| ALB/Route 53 | target group health check /healthz, certificate, host rule and alias A for s3-uploader-v2.bot-alex.com |
-| IAM | distinct API, worker, execution and Pipe roles; least privilege; Glue deletes only its managed table-lock prefix |
-| CloudWatch | API and worker log groups, 30-day retention |
-| Glue | V3 job s3-uploader-v3-ingest, Glue 5.0, 4 G.1X, timeout 60 minutes, max concurrency 5 |
+| ECS Fargate | one API/UI service, disposable base/large worker tasks, one dispatcher service |
+| ECR | API and worker/dispatcher images |
+| S3 | encrypted/versioned source and durable state; contracts/history/skills |
+| SQS FIFO + DLQ | base/large worker dispatch and ordered mutations |
+| EventBridge Pipes | SQS-to-one-shot worker launch |
+| Glue | S3 Tables/Iceberg mutation, QC and audit writes |
+| S3 Tables | table buckets, namespaces, tables and Iceberg metadata |
+| CloudWatch | worker/dispatcher/Glue logs and mutation-DLQ alarm |
+| ALB, Route 53, ACM | HTTPS listener and hostname |
+| Secrets Manager | login password and signing secret |
 
-The API role needs landing multipart/session/lock S3, SQS send, Glue
-start/status, contracts/history reads, and S3 Tables control/data access. The
-worker role needs landing/contract S3, the encryption secret, Glue start, and
-lock release only when Glue could not start. The Glue role has
-`s3:DeleteObject` only for `s3-uploader-v2/table-locks/*` in the generated
-landing bucket so its terminal handler can release the lock it was passed. Pipe
-role needs queue receive/delete, ECS RunTask and worker-role PassRole. Add
-exact missing action/ARN pairs from CloudWatch errors; never solve AccessDenied
-with unbounded S3 or administrator permissions.
+IAM boundaries:
 
-## Deployment runbook
+- API: its S3 state prefixes, mutation send, authorised S3 Tables control-plane
+  actions, contracts/history and safe skill paths.
+- Workers/dispatcher: required landing/state paths, mutation queue receive /
+  delete / visibility, Glue start/get, and restricted `ListBucket` access for
+  both `s3-uploader-v2/table-locks` and `s3-uploader-v2/table-locks/*`.
+- Glue: staging, S3 Tables/Iceberg, QC and history. It does not own current SQS
+  receipts or dispatcher locks.
+- `s3tables:CreateTableBucket` is account scoped because a new bucket ARN does
+  not yet exist; other S3 Tables actions stay bucket/table scoped.
 
-~~~bash
-cd /Users/jinxin/Documents/AgentCore
-TAG=YYYYMMDD-v3-change-1
-REGISTRY=964340114883.dkr.ecr.ap-southeast-1.amazonaws.com
+Do not add a broad account-administrator policy to fix an access symptom;
+identify the exact S3/S3 Tables/Glue action and resource first.
 
-aws ecr get-login-password --region ap-southeast-1 \
- | docker login --username AWS --password-stdin "$REGISTRY"
-docker build --platform linux/amd64 -f s3tables_uploader_v2/Dockerfile.api \
- -t "s3-uploader-v2-api:$TAG" .
-docker build --platform linux/amd64 -f s3tables_uploader_v2/Dockerfile.worker \
- -t "s3-uploader-v2-worker:$TAG" .
-docker run --rm -v "$PWD:/workspace" -w /workspace -e PYTHONPATH=/workspace \
- "s3-uploader-v2-worker:$TAG" python -m unittest discover -s s3tables_uploader_v2/tests -v
-node --check s3tables_uploader_v2/static/app.js
+## Build, test and deploy
+
+Build a fresh immutable tag for every release. From the repository root:
+
+```bash
+TAG=YYYYMMDD-description-amd64-N
+
+docker buildx build --platform linux/amd64 --load \
+  -f s3tables_uploader_v2/Dockerfile.api \
+  -t local/s3-uploader-v3-api:$TAG .
+docker buildx build --platform linux/amd64 --load \
+  -f s3tables_uploader_v2/Dockerfile.worker \
+  -t local/s3-uploader-v3-worker:$TAG .
+
+docker run --rm local/s3-uploader-v3-worker:$TAG \
+  python3 -m unittest discover -s s3tables_uploader_v2/tests
+python3 -m unittest \
+  s3tables_uploader_v2.tests.test_mutation_dispatcher \
+  s3tables_uploader_v2.tests.test_api_jobs \
+  infra.tests.test_s3_uploader_v2_fargate
 git diff --check
+```
 
-docker tag "s3-uploader-v2-api:$TAG" "$REGISTRY/s3-uploader-v2-api:$TAG"
-docker tag "s3-uploader-v2-worker:$TAG" "$REGISTRY/s3-uploader-v2-worker:$TAG"
-docker push "$REGISTRY/s3-uploader-v2-api:$TAG"
-docker push "$REGISTRY/s3-uploader-v2-worker:$TAG"
+Deploy in this order:
 
-python3 -B infra/s3_uploader_v2_fargate.py > /private/tmp/s3-uploader-v3.json
-~~~
+1. Publish tested API and worker images to their ECR repositories under the
+   immutable tag; capture both manifest digests.
+2. Upload `s3tables_uploader_v2/glue_job.py` to the V3 Glue script URI.
+3. Deploy the CloudFormation stack with those image URIs. Keep
+   `MutationDispatcherService.DesiredCount` at **one**.
+4. Wait for CloudFormation `UPDATE_COMPLETE`, then verify both ECS services
+   desired/running 1, their active task definitions/images and `GET /healthz`.
+5. Check dispatcher logs, FIFO/DLQ metrics and stale table locks.
+6. Smoke-test a disposable create/append, an eligible rollback, concurrent
+   different-table work and ordered same-table work.
 
-Create a CloudFormation update change set using all existing parameters, set
-EnableV3Leases=true, and replace only ApiImageUri and WorkerImageUri with the
-new immutable tags. Review it before execution. For an image-only change,
-expected resources are API service/task definition, worker task definitions and
-their EventBridge Pipes. Stop for unexpected DNS, S3 lifecycle/deletion, Glue
-or IAM widening changes.
+When changing task environment entries, locate the variable by its `Name`; do
+not update an array element by position. A previous positional change set the
+numeric dispatcher poll setting to a Glue job name and terminated the task.
 
-Copy-ready change-set command:
+## Authentication and UI identity
 
-~~~bash
-aws cloudformation create-change-set --region ap-southeast-1 \
- --stack-name s3-uploader-v2 --change-set-name "v3-$TAG" --change-set-type UPDATE \
- --template-body file:///private/tmp/s3-uploader-v3.json \
- --capabilities CAPABILITY_NAMED_IAM \
- --parameters \
- ParameterKey=ClusterArn,UsePreviousValue=true \
- ParameterKey=VpcId,UsePreviousValue=true \
- ParameterKey=PrivateSubnets,UsePreviousValue=true \
- ParameterKey=AlbListenerArn,UsePreviousValue=true \
- ParameterKey=AlbDnsName,UsePreviousValue=true \
- ParameterKey=AlbCanonicalHostedZoneId,UsePreviousValue=true \
- ParameterKey=HostedZoneId,UsePreviousValue=true \
- ParameterKey=CertificateArn,UsePreviousValue=true \
- ParameterKey=LoginPasswordSecretArn,UsePreviousValue=true \
- ParameterKey=LoginSigningSecretArn,UsePreviousValue=true \
- ParameterKey=EncryptionSecretArn,UsePreviousValue=true \
- ParameterKey=ExistingAlbSecurityGroupId,UsePreviousValue=true \
- ParameterKey=EnableV3Leases,ParameterValue=true \
- ParameterKey=ApiImageUri,ParameterValue="$REGISTRY/s3-uploader-v2-api:$TAG" \
- ParameterKey=WorkerImageUri,ParameterValue="$REGISTRY/s3-uploader-v2-worker:$TAG"
+The existing signed login cookie is required for all API requests. The pilot
+panel obtains three profiles through `GET /api/dev/identity-profiles` and sends
+only `X-Pilot-User-Id`. `GET /api/identity` resolves effective permissions:
 
-aws cloudformation wait change-set-create-complete --region ap-southeast-1 \
- --stack-name s3-uploader-v2 --change-set-name "v3-$TAG"
-aws cloudformation describe-change-set --region ap-southeast-1 \
- --stack-name s3-uploader-v2 --change-set-name "v3-$TAG"
-~~~
+- `local-admin` sees every customer bucket in the current account and can
+  create buckets/namespaces/delete uploader tables.
+- `local-editor` sees only configured assignment(s), with history and rollback.
+- `local-unassigned` receives a deny response.
 
-~~~bash
-aws cloudformation execute-change-set \
- --region ap-southeast-1 --stack-name s3-uploader-v2 --change-set-name "v3-$TAG"
-aws cloudformation wait stack-update-complete \
- --region ap-southeast-1 --stack-name s3-uploader-v2
-curl -fsS https://s3-uploader-v2.bot-alex.com/healthz
-~~~
+For production integration, replace the development header with a trusted
+identity mapping at the API boundary. Do not let a client provide admin flags,
+bucket lists, history or rollback grants.
 
-After execution, verify the API's primary task definition, both worker image
-URIs, all Pipe states, and the health response. Do not stop active leased
-workers merely because a new revision exists; let them complete, cancel, or
-expire safely.
+## API integration contract
 
-## Authentication contract
+All calls are same-origin, authenticated and JSON unless marked multipart.
+FastAPI failures are `{ "detail": "..." }`; expect `401/403` for access,
+`409` for state conflicts and `422` for request validation. Persist returned
+session/job/mutation IDs and poll durable state—not ECS task state.
 
-- /login and /healthz are public; all other routes require cookie
-  s3_uploader_v2_session.
-- Login accepts an HTML form or JSON with password.
-- Use credentials: include on every frontend fetch request.
-- The production cookie is Secure, HttpOnly and SameSite=Strict.
-- Current identity is a shared administrator; do not infer future editor
-  permissions from browser-supplied roles.
+### Identity and destinations
 
-~~~js
-async function requireJson(response) {
-  const body = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(body.detail || "HTTP request failed");
-  return body;
-}
-await requireJson(await fetch("/login", {
-  method: "POST", credentials: "include",
-  headers: {"Content-Type": "application/json"},
-  body: JSON.stringify({password})
-}));
-~~~
-
-## API integration: recommended browser flow
-
-~~~text
-identity -> file selection lease -> multipart review upload -> session poll
--> optional key impact -> ingestion -> session/Glue poll -> history refresh
-~~~
-
-Never calculate worker size, schema, sanitisation, type compatibility or locked
-key availability in the browser. Render the worker/API result instead.
-
-### Discovery and table APIs
-
-| Method/path | Request | Result |
+| Endpoint | Request | Result |
 | --- | --- | --- |
-| GET /api/identity | — | User/capabilities/bucket scope |
-| GET /api/buckets | — | All discoverable table buckets |
-| GET /api/skills/files?table_bucket_arn=... | query | Optional bundle files for the selected bucket |
-| GET /api/namespaces?table_bucket_arn=... | query | Namespace list |
-| POST /api/namespaces | table_bucket_arn, namespace JSON | Created namespace |
-| GET /api/tables?table_bucket_arn=...&namespace=... | query | Cards with timestamps, row_count, managed/key info |
-| DELETE /api/tables | table_bucket_arn, namespace, table JSON | Delete uploader-managed table |
+| `GET /api/identity` | — | Effective user, capabilities, scope mode and buckets. |
+| `GET /api/buckets` | — | Buckets visible to user. |
+| `POST /api/buckets` | `{ "name":"new-bucket" }` | `201`, bucket ARN; admin only. |
+| `GET /api/namespaces?table_bucket_arn=...` | query | Namespaces for authorised bucket. |
+| `POST /api/namespaces` | bucket ARN + `namespace` | `201`; admin only. |
+| `GET /api/tables?table_bucket_arn=...&namespace=...` | query | Cards with timestamps, metadata row count, managed flag and locked key. Format time as `Asia/Singapore`. |
+| `DELETE /api/tables` | bucket ARN, namespace, table | Admin managed-table delete; `409 TABLE_MUTATION_IN_PROGRESS` if locked. |
 
-Format card timestamps only for display using Asia/Singapore; retain server ISO
-values for state. Example:
+### Warm worker lease
 
-~~~js
-new Intl.DateTimeFormat("en-SG", {
-  dateStyle:"medium", timeStyle:"medium", timeZone:"Asia/Singapore"
-}).format(new Date(iso))
-~~~
+On every file selection, call:
 
-### Selection-time V3 lease APIs
-
-Create: POST /api/v3/worker-leases
-
-~~~json
-{"files":[{"name":"January.parquet","size_bytes":104857600}]}
-~~~
-
-Save lease_id. The response includes worker_state, worker_size, routing_score,
-routing_reason, expires_at, and can_retry_large.
-
-Update: PUT /api/v3/worker-leases/{lease_id}
-
-Send the same files body whenever selection changes before Review. A same-tier
-result contains reused:true and the same ID. A route-size change contains
-replaced:true, replaced_lease_id, and a new lease_id; replace local state.
-
-Cancel: DELETE /api/v3/worker-leases/{lease_id} returns 204 for an idle lease.
-Call it when selection becomes empty.
-
-Manual retry: POST /api/v3/worker-leases/{lease_id}/retry-large returns 202
-only after server-recognised RESOURCE_LIMIT_EXCEEDED with can_retry_large:true.
-A 409 means retry is unsafe/unavailable; do not retry Glue from JavaScript.
-
-Warm-up is non-blocking: if lease creation fails, Review can omit
-worker_lease_id; the API creates a fallback lease. Do not create a new lease on
-every file-input event when an existing idle lease can be PUT-updated.
-
-### Multipart review session
-
-POST /api/v2/upload-sessions accepts multipart/form-data:
-
-| Field | Required | Value |
-| --- | --- | --- |
-| mode | yes | create or append |
-| table_bucket_arn | yes | Destination S3 Tables bucket ARN |
-| namespace, table | yes | Lowercase destination identifiers |
-| files | yes, repeated | Parquet, Parquet GZIP, CSV, TSV, XLSX or XLS |
-| worker_lease_id | recommended | Current V3 lease ID |
-
-~~~js
-const form = new FormData();
-form.set("mode", "append"); form.set("table_bucket_arn", bucketArn);
-form.set("namespace", namespace); form.set("table", table);
-if (state.leaseId) form.set("worker_lease_id", state.leaseId);
-for (const file of input.files) form.append("files", file, file.name);
-const session = await requireJson(await fetch("/api/v2/upload-sessions", {
-  method:"POST", credentials:"include", body:form
-}));
-~~~
-
-The API uploads into encrypted/versioned landing S3 using bounded 8 MiB parts,
-computes per-file SHA-256, creates a durable session and attaches a valid lease.
-Poll GET /api/v2/upload-sessions/{session_id} every 2–5 seconds. Render phase,
-progress_message, error, preflight, key_impact, ingestion, and worker_lease;
-404 means expired/deleted, 403 means wrong user/session.
-
-Preflight is the source of truth. Enable ingestion only when accepted is true.
-Show target_schema, per-file warnings/sanitisation, and
-multi_file_schema.type_conflicts_stored_as_string as informational output.
-Do not reject a matching-column multi-file selection just because source types
-differ. Hide the key selector when deduplication_locked_columns is non-empty;
-show its derived deduplication_columns or the no-active-key notice.
-
-### Key impact and ingestion
-
-For an unlocked table only:
-
-~~~http
-POST /api/v2/upload-sessions/{session_id}/key-impact
+```http
+POST /api/v3/worker-leases
 Content-Type: application/json
 
-{"deduplication_columns":["epic_csn","sap_csn"],"type_overrides":{}}
-~~~
+{"files":[{"name":"source.parquet","size_bytes":104857600}]}
+```
 
-It returns 202. Poll until READY_FOR_ACKNOWLEDGEMENT, show metrics, and retain
-the acknowledgement token for its 30-minute expiry.
+The `201` response has `lease_id`, `worker_state`, `worker_size`,
+`routing_score`, `routing_reason`, `expires_at` and `can_retry_large`.
 
-Start processing:
+| Endpoint | Integration rule |
+| --- | --- |
+| `PUT /api/v3/worker-leases/{lease_id}` | New selection. Same tier: `reused:true`; changed tier: replacement lease and `replaced:true`. |
+| `DELETE /api/v3/worker-leases/{lease_id}` | Cancel unattached selection; returns `204`. |
+| `POST /api/v3/worker-leases/{lease_id}/retry-large` | `202`; owner-only after recognised base resource failure. |
 
-~~~json
-POST /api/v2/upload-sessions/{session_id}/ingestions
+The backend recalculates routing; never submit frontend-selected worker size.
+If warm-up JavaScript fails, normal upload-session creation still creates a
+lease as compatibility fallback.
+
+### V1-compatible upload session
+
+The static V3 UI submits a multipart form:
+
+```http
+POST /api/v2/upload-sessions
+Content-Type: multipart/form-data
+
+mode=create|append
+table_bucket_arn=arn:aws:s3tables:...
+namespace=...
+table=...
+worker_lease_id=<optional lease from selection>
+files=<one or more files>
+```
+
+Poll `GET /api/v2/upload-sessions/{session_id}`. Its durable response includes
+phase, progress/error, review/preflight, key-impact, ingestion job and safe
+worker-lease fields. Do not wait for worker startup before upload.
+
+The `review`/`preflight` payload exposes `sample_values` (at most five short,
+non-empty examples) and `samples_masked` for de-duplication and optional manual
+encryption candidates. Render examples only when `samples_masked` is `false`.
+Automatically protected healthcare fields, including detected NRIC columns,
+must remain masked; their values and quality counts are not returned. Never
+reuse review examples in a manifest, audit/history view, or Glue request.
+
+| Endpoint | Request / expected behavior |
+| --- | --- |
+| `POST /api/v2/upload-sessions/{id}/key-impact` | `{ "deduplication_columns":[...], "type_overrides":{} }`; returns `202`; poll session. |
+| `POST /api/v2/upload-sessions/{id}/ingestions` | `request_id`, reporting month, dedup mode/columns, impact token when a new key is chosen, type overrides, manual encryption fields and temporal acknowledgement where applicable. Returns `202 {session_id,job_id,phase:"QUEUED"}`. |
+| `GET /api/v2/jobs/{job_id}` | Owner-only immutable request and durable job status. |
+| `DELETE /api/v2/upload-sessions/{id}` | Owner-only discard/cancel. |
+
+For a configured table key, hide the selector and do not send replacement key
+choices. The API derives the available source subset. For an unconfigured key,
+the first selected key must have valid impact acknowledgement before it is
+saved permanently.
+
+### History and rollback mutation
+
+`GET /api/upload-history?table_bucket_arn=...&namespace=...&table=...` returns
+history and `latest_rollback_upload_id`. Only that latest successful update
+with a previous snapshot is eligible.
+
+```http
+POST /api/rollbacks
+Content-Type: application/json
+
 {
-  "request_id":"client-reference",
-  "reporting_month":"2026-09",
-  "deduplication_mode":"keyed",
-  "deduplication_columns":["epic_csn","sap_csn"],
-  "key_analysis_token":"token-from-session",
-  "type_overrides":{},
-  "manual_encryption_columns":[]
+  "table_bucket_arn":"arn:aws:s3tables:...",
+  "namespace":"pilot",
+  "table":"target_table",
+  "upload_id":"UPLOAD-...",
+  "confirm":true
 }
-~~~
+```
 
-An unlocked keyed request must exactly match the unexpired worker impact token.
-For a locked append table, the API ignores a browser replacement key and uses
-the worker-derived locked-key subset. With no available locked columns it
-proceeds as unkeyed. Success is 202 with session_id, job_id and phase QUEUED.
+This returns `202` with `mutation_id`, `phase`, `status_url`, `upload_id` and
+`operation:"rollback"`. Poll `GET /api/mutations/{mutation_id}`, which returns
+owner-scoped `{ mutation, status }`, including durable phase/message, Glue run
+ID and error code. Refresh cards/history only after success. The same
+owner/table/upload request is idempotent and reconnects to its original command.
 
-Continue polling the session through STARTING_GLUE, GLUE_RUNNING, SUCCEEDED or
-FAILED; ingestion.job_run_id appears after Glue starts. Never retry an ambiguous
-create/append merely because the browser request was lost. Query the session/job
-first. GET /api/v2/jobs/{job_id} exposes the owner-visible durable
-request/status. GET /api/ingestions/{job_run_id} returns Glue state/message.
+### Skill bundle APIs
 
-### Optional direct-to-S3 multipart protocol
-
-The V1-compatible multipart form is the recommended frontend path. A future
-direct-S3 client can instead use these retained endpoints:
-
-| Method/path | Request / response |
-| --- | --- |
-| POST /api/v2/upload-sessions | JSON: file_name, content_type, optional source_sha256. Returns session_id, upload_id, source_key. |
-| POST /api/v2/upload-sessions/{session_id}/parts | JSON: part_number. Returns one presigned PUT URL. |
-| POST /api/v2/upload-sessions/{session_id}/complete | JSON: parts, operation, destination. Returns job_id and QUEUED. |
-| GET /api/v2/jobs/{job_id} | Durable request and status for its owner. |
-
-The landing bucket CORS rule permits production-origin PUT and exposes ETag.
-Send every completed S3 part's ETag/PartNumber to complete. If source_sha256
-was supplied at session creation, the API validates the resulting object
-checksum metadata before dispatch.
-
-### History and rollback APIs
-
-| Method/path | Request | Rule |
+| Endpoint | Request | Result |
 | --- | --- | --- |
-| GET /api/upload-history?... | bucket ARN, namespace, table query | Returns history and latest_rollback_upload_id |
-| POST /api/rollbacks | table_bucket_arn, namespace, table, upload_id, confirm:true JSON | Starts Glue rollback |
-| GET /api/ingestions/{job_run_id} | path | Poll Glue mutation result |
+| `GET /api/skills/files?table_bucket_arn=...` | query | Safe relative-path tree and S3 destination URI. |
+| `POST /api/skills/files` | multipart `table_bucket_arn`, `paths_json`, repeated `files` | Add/overwrite safe files. |
+| `GET /api/skills/files/download?table_bucket_arn=...&path=...` | query | Attachment stream. |
+| `DELETE /api/skills/files` | `{ "table_bucket_arn":"...", "path":"...", "confirm":true }` | Confirmed deletion. |
 
-Only show rollback for the exact latest_rollback_upload_id, after explicit human
-confirmation. A rollback cannot restore a table's initial create because there
-is no prior snapshot.
+## Frontend polling and operation display
 
-## Operations and alarms
+Use 2–5 second polling for an active session/mutation, reducing frequency after
+30 seconds. Recover the saved session ID on page reload and resume polling.
 
-### Concurrent users and table mutation exclusion
-
-Users may create leases, upload sources, profile files, analyse keys and
-prepare different tables concurrently. Each upload has an owner, session ID,
-lease ID, request/job ID, version-pinned source object and separate S3 prefix.
-No worker reads another session's raw sources.
-
-Lease and compatibility-session objects are changed with S3 ETag `IfMatch`
-compare-and-swap writes. Each accepted mutation increments `state_version`.
-If the API binds a session while a worker has an older lease copy, the worker
-reloads and merges its heartbeat instead of overwriting `session_id`, expiry,
-cancellation, retry state or terminal result. This prevents a stale heartbeat
-from detaching an already-uploaded session and leaving the UI in `RECEIVED`
-until lease expiry.
-
-Final table writes use a separate conditional S3 lock:
-
-~~~text
-s3-uploader-v2/table-locks/<sha256(bucket-arn, namespace, table)>.json
-~~~
-
-The worker acquires it immediately before Glue submission; rollback acquires
-the same lock. Glue receives lock bucket/key/ETag and releases it in its
-terminal `finally` path. A lock contains operational IDs only, never source or
-healthcare values. A stale lock is bounded by expiry and may be safely taken
-over with an ETag-matched write.
-
-Current policy is deliberate exclusion, not a costly 16/32 GiB wait: a second
-mutation of the same table receives a clear table-busy failure and the user
-retries after the first Glue run completes. Different tables do not block one
-another. A future table-operation queue may add automatic wait/retry, but must
-retain the lock as the final safety gate and must not start duplicate Glue jobs.
-
-### Idempotency and retry rules
-
-- Reuse the existing lease on selection changes when its fixed worker size is
-  still suitable; do not POST another lease for every browser event.
-- Replace a worker only for a deterministic size change or terminal/unsafe old
-  lease.
-- Reuse accepted request/session/lease IDs on browser, API and SQS retries.
-- Never retry an ambiguous create, append, rollback or Glue start. Query
-  durable status, manifest, QC, audit history and Iceberg snapshot first.
-- A lease expiring with an attached `RECEIVED`, `PROFILING`, `KEY_ANALYSING` or
-  `QUEUED` session writes terminal `WORKER_LEASE_EXPIRED`, stopping infinite
-  UI polling and allowing a fresh review.
-
-For a stuck UI, check session state first, then lease/job JSON in landing S3,
-then worker CloudWatch/ECS stopped-task reason, then Glue/QC/manifest. A worker
-stopping after completion/cancellation/expiry is normal. Recommended alarms:
-DLQ messages, Pipe failure, non-zero worker exits, API unhealthy targets, Glue
-failure/timeout, Fargate memory/storage pressure, and long-running leases.
-
-Before every release: preserve V1, add a regression test, run the full image
-suite, push immutable images, review the change set, confirm Pipe task target
-revisions and /healthz, then use a disposable test table for a real smoke test.
-
-## Latest production deployment
-
-| Component | Live value after 2026-09-10 deployment |
+| State | User-facing meaning |
 | --- | --- |
-| CloudFormation | `s3-uploader-v2` — `UPDATE_COMPLETE` |
-| API | `s3-uploader-v2-api:24`, image `20260910-production-readiness-1` |
-| Base worker | `s3-uploader-v2-worker:31`, 4 vCPU / 16 GiB |
-| Large worker | `s3-uploader-v2-worker:30`, 8 vCPU / 32 GiB |
-| API digest | `sha256:47490762f54467109c225b5ff343c89da163aa251816282a8f9f5fb1fcf3e7df` |
-| Worker digest | `sha256:b4aa1408946ba2204bf98e32da0044b42ae169742940b789feaa7046fa37cd29` |
-| Pipes | base, large and legacy worker pipes — `RUNNING` |
-| Health | `GET /healthz` returned `{"status":"ok"}` |
-| Glue script | `generic_glue_job.py`, ETag `96eafa899ec674accc9aad8d396e8a4f` |
+| `RECEIVED`, `PROFILING` | Source stored; worker is starting/profiling. |
+| `READY_FOR_REVIEW` | Render schema/sanitisation review. |
+| `KEY_ANALYSING`, `READY_FOR_ACKNOWLEDGEMENT` | Render/wait for key impact; acknowledge only a new locked key. |
+| `QUEUED`, `PREPARING`, `READY_FOR_MUTATION` | Preparing or waiting in FIFO/for Glue capacity. Continue polling; do not resubmit. |
+| `STARTING_GLUE`, `RUNNING_GLUE` | Dispatcher owns the mutation; show durable message. |
+| `SUCCEEDED`, `FAILED` | Terminal; refresh cards/history only after success. |
+| `RESOURCE_LIMIT_EXCEEDED` | Offer `Retry using large worker` to owner. |
 
-The 2026-09-10 release passed 48 containerised automated tests, infrastructure-template
-validation, Python compilation, and `git diff --check`. It did not write test
-data to a live production S3 Table. Before a high-volume release, exercise two
-disposable tables in parallel and confirm a second mutation of one table is
-rejected while the first lock remains active.
+An ECS worker stopping can be normal completion, cancellation or expiry. It is
+not a UI status source. Start diagnosis from the durable session/job/mutation
+record, then worker/dispatcher logs, Glue run/log, QC/manifest and Iceberg
+snapshot/history.
 
-## 2026-09-11 FIFO corrective deployment
+## Release validation checklist
 
-For this release, all ingestion submissions create a durable S3 queue record
-under `s3-uploader-v2/table-queues/<destination-hash>/` before their worker is
-allowed to start the Glue mutation. This is intentionally separate from the
-SQS FIFO message group: SQS only orders ECS task dispatch, whereas the durable
-table queue remains present until Glue reaches a terminal result. A second
-same-table upload therefore reports a queued position rather than failing with
-"table busy"; uploads targeting different tables remain independent.
-
-The worker must have `s3:ListBucket` constrained to the queue, lock, job,
-compatibility-session and lease prefixes. The V3 Glue role must be permitted
-to delete only landing-bucket lock and queue objects. The worker passes
-`QUEUE_BUCKET`, `QUEUE_KEY` and `QUEUE_ETAG` to Glue; rollback passes empty
-values because it continues to use its existing direct mutation lock.
-
-Build explicitly for the Fargate platform. A local Apple Silicon image is not
-deployable to this ECS service:
-
-~~~bash
-docker buildx build --platform linux/amd64 --load \
-  -f s3tables_uploader_v2/Dockerfile.api -t local/s3-uploader-v3-api:$TAG .
-docker buildx build --platform linux/amd64 --load \
-  -f s3tables_uploader_v2/Dockerfile.worker -t local/s3-uploader-v3-worker:$TAG .
-~~~
-
-The `20260911-table-fifo-amd64-1` production deployment used API task
-definition `s3-uploader-v2-api:27`, base worker `:36`, and large worker `:37`.
-The API ECR digest is
-`sha256:16fb49725f31987c9afc3759f79800f1bfcbb1a3cbd4446910c0bb10f600444d`;
-the worker digest is
-`sha256:9394ca0b34155c1f4b2a000ebe332ca8ff50d7aa989299b479e4be4a0759f2e2`.
-All three Pipes were `RUNNING`, the stack was `UPDATE_COMPLETE`, and
-`GET /healthz` returned `{"status":"ok"}` after rollout.
+- Routing boundaries and combined multi-file scores match backend decisions.
+- Same-tier selection edits reuse a lease; tier changes replace exactly once.
+- Multi-file name sets match while type drift is tolerated and projected by
+  contract.
+- Profile, repeated key analysis and preparation use the same leased worker.
+- Locked-key subset/no-key semantics preserve the immutable de-dup contract.
+- Same-table operations are FIFO; different tables use up to five Glue slots.
+- Dispatcher restart, visibility renewal, capacity wait and ambiguous Glue
+  start cannot create a duplicate mutation.
+- History/eligible rollback, metadata row cards, Singapore timestamps, skill
+  routes, all-admin discovery and scoped-editor denial work.
+- Monitor API health, mutation DLQ depth, FIFO queue age, stale-lock age,
+  resource-limit events, Glue failure/timeout and unexpected worker cost.

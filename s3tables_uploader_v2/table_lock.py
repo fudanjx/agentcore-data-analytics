@@ -153,6 +153,36 @@ class S3TableLockManager:
         except BotoCoreError as error:
             raise TableLockError("Unable to release the table mutation lock") from error
 
+    def release_if_owned(self, *, table_bucket_arn: str, namespace: str, table: str, owner_token: str) -> bool:
+        """Release only the current lock belonging to the specified job."""
+        key = self._key(table_bucket_arn, namespace, table)
+        try:
+            payload, etag = self._read(key)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return False
+            raise TableLockError("Unable to read the table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to read the table mutation lock") from error
+        if payload.get("owner_token") != owner_token or payload.get("request_id") != owner_token:
+            return False
+        self.release(TableLease(key, etag, owner_token, payload))
+        return True
+
+    def get_lease(self, *, table_bucket_arn: str, namespace: str, table: str) -> TableLease | None:
+        """Return the current lease, if any, without altering ownership."""
+        key = self._key(table_bucket_arn, namespace, table)
+        try:
+            payload, etag = self._read(key)
+        except ClientError as error:
+            if error.response.get("Error", {}).get("Code") in {"NoSuchKey", "404"}:
+                return None
+            raise TableLockError("Unable to read the table mutation lock") from error
+        except BotoCoreError as error:
+            raise TableLockError("Unable to read the table mutation lock") from error
+        owner_token = payload.get("owner_token")
+        return TableLease(key, etag, str(owner_token or ""), payload)
+
     def list_leases(self) -> list[TableLease]:
         """List only the bounded lock prefix for startup reconciliation."""
         leases: list[TableLease] = []

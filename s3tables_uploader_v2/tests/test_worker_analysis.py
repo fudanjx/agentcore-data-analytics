@@ -75,6 +75,34 @@ class WorkerAnalysisTests(unittest.TestCase):
         self.assertEqual(result["deduplication_columns"], ["c", "d", "f"])
         self.assertEqual(result["deduplication_candidates"], [])
 
+    def test_profile_shows_safe_examples_and_masks_protected_columns(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.parquet"
+            pq.write_table(pa.table({
+                "description": ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot"],
+                "PAT_ENC_CSN_ID": ["100", "101", "102", "103", "104", "105"],
+            }), source)
+            result = profile_files(
+                [(source, "source.parquet", "digest")], "create", "arn", "pilot", "target",
+            )
+
+        candidates = {item["column"]: item for item in result["deduplication_candidates"]}
+        safe = candidates["description"]
+        self.assertFalse(safe["samples_masked"])
+        self.assertEqual(safe["non_null_count"], 6)
+        self.assertEqual(len(safe["sample_values"]), 5)
+        self.assertTrue(set(safe["sample_values"]).issubset({"alpha", "bravo", "charlie", "delta", "echo", "foxtrot"}))
+
+        protected = candidates["pat_enc_csn_id"]
+        self.assertTrue(protected["samples_masked"])
+        self.assertEqual(protected["sample_values"], [])
+        self.assertIsNone(protected["non_null_count"])
+
+        manual = {item["column"]: item for item in result["sanitization_review"]["manual_encryption_candidates"]}
+        self.assertIn("description", manual)
+        self.assertEqual(manual["description"]["sample_values"], safe["sample_values"])
+        self.assertNotIn("pat_enc_csn_id", manual)
+
     def test_key_impact_uses_v1_exact_duplicate_and_conflict_semantics(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.parquet"

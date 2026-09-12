@@ -23,9 +23,9 @@ from pydantic import BaseModel, Field
 from .auth import COOKIE_NAME, login_cookie, require_user, valid_password
 from .config import Settings
 from .job_store import MissingRecord, S3JobStore
-from .models import Destination, JobRequest, JobSource, JobStatus, UploadSession
+from .models import Destination, JobRequest, JobSource, JobStatus, MutationCommand, UploadSession
 from .sanitization import sanitised_schema
-from .table_lock import S3TableLockManager, S3TableMutationQueue, TableLockedError
+from .table_lock import S3TableLockManager
 from .worker_routing import RoutingError, SelectedFile, route_files
 from . import skill_bundle
 
@@ -415,6 +415,20 @@ def create_app(
             MessageGroupId=str(lease["lease_id"]),
         )
 
+    def _mutation_group(destination: Destination) -> str:
+        return hashlib.sha256(
+            f"{destination.table_bucket_arn}\x1f{destination.namespace}\x1f{destination.table}".encode("utf-8")
+        ).hexdigest()
+
+    def _enqueue_mutation(mutation_id: str, destination: Destination) -> None:
+        """Send an idempotent durable Glue mutation command to its table group."""
+        sqs.send_message(
+            QueueUrl=settings.mutation_queue_url,
+            MessageBody=mutation_id,
+            MessageDeduplicationId=mutation_id,
+            MessageGroupId=_mutation_group(destination),
+        )
+
     def _new_lease(files: list[dict[str, Any]], user_id: str) -> dict[str, Any]:
         try:
             route = route_files([SelectedFile(name=str(item["name"]), size_bytes=int(item["size_bytes"])) for item in files])
@@ -565,6 +579,11 @@ def create_app(
             raise HTTPException(400, "The reserved uploader audit table cannot be deleted through this UI")
         if not _is_uploader_managed_table(payload.table_bucket_arn, payload.namespace, payload.table):
             raise HTTPException(409, "This table is browse-only because it was not created by this uploader")
+        lock = S3TableLockManager(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-locks").get_lease(
+            table_bucket_arn=payload.table_bucket_arn, namespace=payload.namespace, table=payload.table,
+        )
+        if lock is not None:
+            raise HTTPException(409, "TABLE_MUTATION_IN_PROGRESS")
         try:
             s3tables.delete_table(tableBucketARN=payload.table_bucket_arn, namespace=payload.namespace, name=payload.table)
         except ClientError as error:
@@ -591,7 +610,7 @@ def create_app(
             "latest_rollback_upload_id": latest.get("upload_id") if latest else None,
         }
 
-    @app.post("/api/rollbacks")
+    @app.post("/api/rollbacks", status_code=202)
     def start_rollback(payload: RollbackRequest, user_id: str = Depends(current_user)) -> dict[str, Any]:
         _require_table_bucket(payload.table_bucket_arn, user_id)
         if not _profile(user_id)["can_rollback_uploads"]:
@@ -613,49 +632,60 @@ def create_app(
         snapshot_id = selected.get("previous_snapshot_id")
         if not snapshot_id:
             raise HTTPException(409, "The initial table load has no earlier snapshot to restore")
-        run_id = str(uuid.uuid4())
-        lock_manager = S3TableLockManager(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-locks")
+        # Rollback is a table mutation like create and append.  Its stable
+        # request id makes an accidental repeat click reconnect to the same
+        # durable command instead of starting a second Glue restore.
+        request_id = hashlib.sha256(
+            f"rollback\x1f{user_id}\x1f{payload.table_bucket_arn}\x1f{payload.namespace}\x1f{payload.table}\x1f{payload.upload_id}".encode("utf-8")
+        ).hexdigest()
         try:
-            table_lock = lock_manager.acquire(
-                table_bucket_arn=payload.table_bucket_arn, namespace=payload.namespace, table=payload.table,
-                owner_token=run_id, user_id=user_id, request_id=run_id, session_id=None,
-                operation="rollback", phase="STARTING_GLUE",
+            mutation_id = store.get_mutation_request(owner_user_id=user_id, request_id=request_id)
+        except MissingRecord:
+            proposed_id = str(uuid.uuid4())
+            command = MutationCommand(
+                mutation_id=proposed_id,
+                request_id=request_id,
+                owner_user_id=user_id,
+                operation="rollback",
+                destination=Destination(
+                    table_bucket_arn=payload.table_bucket_arn, namespace=payload.namespace, table=payload.table,
+                ),
+                upload_id=payload.upload_id,
+                rollback_snapshot_id=str(snapshot_id),
+                original_uploaded_by=selected.get("uploaded_by") or user_id,
+                original_uploaded_at=selected.get("uploaded_at") or _now(),
+                reporting_month=selected.get("reporting_month") or "not-applicable",
+                filenames_json=selected.get("filenames") or "[]",
             )
-        except TableLockedError as error:
-            raise HTTPException(409, "TABLE_MUTATION_IN_PROGRESS") from error
-        try:
-            response = glue.start_job_run(
-                JobName=settings.glue_job_name,
-                JobRunQueuingEnabled=True,
-                Arguments={
-                    "--MODE": "rollback",
-                    "--MANIFEST_URI": "s3://ah-data-analytics/temp_s3_update/web_ingest/uploads/not-used-for-rollback.json",
-                    "--TABLE_BUCKET_ARN": payload.table_bucket_arn,
-                    "--NAMESPACE": payload.namespace,
-                    "--TABLE": payload.table,
-                    "--QC_PREFIX": "s3://ah-data-analytics/temp_s3_update/qc",
-                    "--RUN_ID": run_id,
-                    "--UPLOAD_ID": payload.upload_id,
-                    "--UPLOADED_BY": user_id,
-                    "--ORIGINAL_UPLOADED_BY": selected.get("uploaded_by") or user_id,
-                    "--ORIGINAL_UPLOADED_AT": selected.get("uploaded_at") or _now(),
-                    "--REPORTING_MONTH": selected.get("reporting_month") or "not-applicable",
-                    "--FILENAMES_JSON": selected.get("filenames") or "[]",
-                    "--AUDIT_PREFIX": f"s3://{_HISTORY_BUCKET}/{_history_prefix(payload.table_bucket_arn, payload.namespace, payload.table)}",
-                    "--ROLLBACK_SNAPSHOT_ID": str(snapshot_id),
-                    "--LOCK_BUCKET": settings.landing_bucket, "--LOCK_KEY": table_lock.key, "--LOCK_ETAG": table_lock.etag,
-                    "--QUEUE_BUCKET": "", "--QUEUE_KEY": "", "--QUEUE_ETAG": "",
-                },
-            )
-        except ClientError as error:
-            lock_manager.release(table_lock)
-            raise HTTPException(502, "AWS Glue could not start the rollback") from error
+            store.put_mutation_command(command)
+            if store.put_mutation_request(owner_user_id=user_id, request_id=request_id, mutation_id=proposed_id):
+                store.put_status(JobStatus(
+                    job_id=proposed_id, phase="READY_FOR_MUTATION",
+                    message="Rollback is queued for per-table FIFO Glue dispatch.",
+                ))
+                mutation_id = proposed_id
+            else:
+                mutation_id = store.get_mutation_request(owner_user_id=user_id, request_id=request_id)
+        command = store.get_mutation_command(mutation_id)
+        _enqueue_mutation(mutation_id, command.destination)
         return {
-            "job_run_id": response["JobRunId"],
-            "qc_uri": f"s3://ah-data-analytics/temp_s3_update/qc/web/{run_id}/report.json",
+            "mutation_id": mutation_id,
+            "phase": store.get_status(mutation_id).status.phase,
+            "status_url": f"/api/mutations/{mutation_id}",
             "upload_id": payload.upload_id,
             "operation": "rollback",
         }
+
+    @app.get("/api/mutations/{mutation_id}")
+    def mutation_status(mutation_id: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
+        try:
+            command = store.get_mutation_command(mutation_id)
+            status = store.get_status(mutation_id).status
+        except MissingRecord as error:
+            raise HTTPException(404, "MUTATION_NOT_FOUND") from error
+        if command.owner_user_id != user_id:
+            raise HTTPException(403, "MUTATION_FORBIDDEN")
+        return {"mutation": command.model_dump(mode="json"), "status": status.model_dump(mode="json")}
 
     @app.get("/api/skills/files")
     def skill_files(table_bucket_arn: str, user_id: str = Depends(current_user)) -> dict[str, Any]:
@@ -1039,16 +1069,9 @@ def create_app(
         return {"state": state, "message": message, "raw": run}
 
     def _reconcile_glue_job(job_id: str, status: JobStatus) -> JobStatus:
-        if status.phase != "RUNNING_GLUE" or not status.glue_run_id:
-            return status
-        result = _glue_run(status.glue_run_id)
-        state = result["state"]
-        if state == "SUCCEEDED":
-            status = JobStatus(job_id=job_id, phase="SUCCEEDED", message="Glue ingestion succeeded.", glue_run_id=status.glue_run_id)
-            store.put_status(status)
-        elif state in {"FAILED", "ERROR", "TIMEOUT", "STOPPED"}:
-            status = JobStatus(job_id=job_id, phase="FAILED", message=result["message"], error_code=f"GLUE_{state}", glue_run_id=status.glue_run_id)
-            store.put_status(status)
+        # The dispatcher is the single writer for mutation terminal state.
+        # This API route only mirrors the S3-backed status for the unchanged
+        # session UI; independently polling Glue here races the FIFO owner.
         return status
 
     @app.get("/api/v2/upload-sessions/{session_id}")
@@ -1061,7 +1084,7 @@ def create_app(
         if job_id and session.get("phase") != "FAILED":
             try:
                 status = _reconcile_glue_job(job_id, store.get_status(job_id).status)
-                phase_map = {"QUEUED": "QUEUED", "CLAIMED": "QUEUED", "PROFILING": "QUEUED", "PREPARING": "STARTING_GLUE", "STARTING_GLUE": "STARTING_GLUE", "RUNNING_GLUE": "GLUE_RUNNING", "SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED"}
+                phase_map = {"QUEUED": "QUEUED", "CLAIMED": "QUEUED", "PROFILING": "QUEUED", "PREPARING": "STARTING_GLUE", "READY_FOR_MUTATION": "QUEUED", "STARTING_GLUE": "STARTING_GLUE", "RUNNING_GLUE": "GLUE_RUNNING", "SUCCEEDED": "SUCCEEDED", "FAILED": "FAILED"}
                 ingestion = {**(session.get("ingestion") or {}), "state": status.phase, "job_run_id": status.glue_run_id, "qc_uri": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc/{job_id}.json"}
                 changes: dict[str, Any] = {"phase": phase_map[status.phase], "progress_message": status.message, "ingestion": ingestion}
                 if status.phase == "FAILED":
@@ -1164,18 +1187,20 @@ def create_app(
                          deduplication_columns=effective_deduplication_columns,
                          manual_encryption_columns=payload.manual_encryption_columns)
         store.put_request(job)
-        S3TableMutationQueue(s3, settings.landing_bucket, f"{settings.landing_prefix}/table-queues").enqueue(
-            table_bucket_arn=job.destination.table_bucket_arn, namespace=job.destination.namespace,
-            table=job.destination.table, job_id=job.job_id, user_id=user_id,
-            session_id=session_id, operation=job.operation, created_at=job.created_at.isoformat(),
-        )
-        store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload queued for the isolated Fargate worker."))
-        group = hashlib.sha256(f"{job.destination.table_bucket_arn}\x1f{job.destination.namespace}\x1f{job.destination.table}".encode()).hexdigest()
+        store.put_mutation_command(MutationCommand(
+            mutation_id=job_id, request_id=payload.request_id, owner_user_id=user_id,
+            operation=job.operation, destination=job.destination, upload_id=job.upload_id,
+            source_job_id=job_id, reporting_month=job.reporting_month,
+            filenames_json=json.dumps([item.name for item in job.source_files]),
+        ))
+        store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Queued for preparation and per-table FIFO Glue dispatch."))
+        _enqueue_mutation(job_id, job.destination)
+        group = _mutation_group(job.destination)
         if not (settings.leases_enabled and session.get("worker_lease_id")):
             sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId=group)
         ingestion = {"request_id": payload.request_id, "job_id": job_id, "upload_id": upload_id, "operation": "ingestion", "state": "QUEUED", "job_run_id": None,
                      "qc_uri": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc/{job_id}.json"}
-        _save_compat_session(session, phase="QUEUED", progress_message="Upload queued for isolated processing.", ingestion=ingestion)
+        _save_compat_session(session, phase="QUEUED", progress_message="Queued for preparation and per-table FIFO Glue dispatch.", ingestion=ingestion)
         return {"session_id": session_id, "job_id": job_id, "phase": "QUEUED"}
 
     @app.post("/api/v2/upload-sessions/{session_id}/parts")
@@ -1228,10 +1253,14 @@ def create_app(
             upload_id=_upload_id(),
         )
         store.put_request(job)
+        store.put_mutation_command(MutationCommand(
+            mutation_id=job_id, request_id=job_id, owner_user_id=user_id,
+            operation=job.operation, destination=job.destination, upload_id=job.upload_id,
+            source_job_id=job_id,
+        ))
         store.put_status(JobStatus(job_id=job_id, phase="QUEUED", message="Upload completed; waiting for processing."))
-        group = hashlib.sha256(
-            f"{job.destination.table_bucket_arn}\x1f{job.destination.namespace}\x1f{job.destination.table}".encode("utf-8")
-        ).hexdigest()
+        group = _mutation_group(job.destination)
+        _enqueue_mutation(job_id, job.destination)
         sqs.send_message(QueueUrl=settings.queue_url, MessageBody=job_id, MessageDeduplicationId=job_id, MessageGroupId=group)
         return {"job_id": job_id, "phase": "QUEUED"}
 

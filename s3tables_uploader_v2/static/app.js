@@ -497,7 +497,8 @@ function renderSessionProgress(session) {
     : session.session_id ? ` Session ID: ${session.session_id}.` : '';
   const message = `${session.progress_message || 'Processing upload session…'}${elapsed}${identifier}`;
   $('activity').textContent = message;
-  if (['STARTING_GLUE', 'GLUE_RUNNING'].includes(session.phase)) {
+  const ingestionQueueWait = session.phase === 'QUEUED' && Boolean(session.ingestion?.job_id);
+  if (['STARTING_GLUE', 'GLUE_RUNNING'].includes(session.phase) || ingestionQueueWait) {
     $('outcome').hidden = false;
     $('status').className = 'running';
     $('status').textContent = message;
@@ -1031,7 +1032,7 @@ async function rollbackUpload(item) {
   const response = await apiFetch('/api/rollbacks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: state.table, table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace, upload_id: item.upload_id, confirm: true }) });
   const result = await response.json();
   if (!response.ok) { $('status').textContent = 'Rollback was not started.'; $('status').className = 'failed'; $('status-body').textContent = JSON.stringify(result, null, 2); return; }
-  $('status-body').textContent = JSON.stringify(result, null, 2); poll(result.job_run_id, result.qc_uri, 'rollback');
+  $('status-body').textContent = JSON.stringify(result, null, 2); pollMutation(result.mutation_id);
 }
 
 $('refresh').onclick = loadNamespaces;
@@ -1175,6 +1176,39 @@ async function poll(id, qcUri, operation, retryCount = 0) {
       $('upload-status').className = 'operation-status';
     }
     state.gluePollTimer = setTimeout(() => poll(id, qcUri, operation, retryCount + 1), delay);
+  }
+}
+
+async function pollMutation(mutationId, retryCount = 0) {
+  const activeId = `mutation:${mutationId}`;
+  if (state.activeJobRunId && state.activeJobRunId !== activeId) return;
+  state.activeJobRunId = activeId;
+  try {
+    const response = await apiFetch(`/api/mutations/${encodeURIComponent(mutationId)}`);
+    const result = await response.json();
+    if (!response.ok) throw new Error(responseDetail(result, 'Mutation status is temporarily unavailable.'));
+    const status = result.status || {};
+    const terminal = ['SUCCEEDED', 'FAILED'].includes(status.phase);
+    $('activity').textContent = status.message || 'Rollback is queued.';
+    $('status').textContent = status.message || 'Rollback is queued.';
+    $('status').className = status.phase === 'SUCCEEDED' ? 'succeeded' : status.phase === 'FAILED' ? 'failed' : 'running';
+    $('status-body').textContent = JSON.stringify(result, null, 2);
+    if (!terminal) {
+      state.gluePollTimer = setTimeout(() => pollMutation(mutationId), 5000);
+      return;
+    }
+    state.gluePollTimer = null;
+    state.activeJobRunId = null;
+    if (status.phase === 'SUCCEEDED') {
+      try { await loadTables(); await loadHistory(); } catch (_) { /* refresh can be retried independently */ }
+    }
+  } catch (error) {
+    if (state.activeJobRunId !== activeId) return;
+    const delay = Math.min(30000, 5000 * Math.max(1, retryCount + 1));
+    $('activity').textContent = `Unable to refresh rollback status; retrying in ${Math.ceil(delay / 1000)}s.`;
+    $('status').textContent = $('activity').textContent;
+    $('status').className = 'running';
+    state.gluePollTimer = setTimeout(() => pollMutation(mutationId, retryCount + 1), delay);
   }
 }
 

@@ -10,7 +10,7 @@ from typing import Any
 
 from botocore.exceptions import ClientError
 
-from .models import JobEvent, JobRequest, JobStatus, UploadSession
+from .models import JobEvent, JobRequest, JobStatus, MutationCommand, UploadSession
 
 
 class JobAlreadyClaimed(RuntimeError):
@@ -48,6 +48,13 @@ class S3JobStore:
 
     def status_key(self, job_id: str) -> str:
         return self._key(f"jobs/{job_id}/status.json")
+
+    def mutation_command_key(self, mutation_id: str) -> str:
+        return self._key(f"mutations/{mutation_id}/command.json")
+
+    def mutation_request_key(self, owner_user_id: str, request_id: str) -> str:
+        digest = hashlib.sha256(f"{owner_user_id}\x1f{request_id}".encode("utf-8")).hexdigest()
+        return self._key(f"mutation-requests/{digest}.json")
 
     # The unchanged v1 browser is a session-oriented client.  These records
     # intentionally live alongside the worker job records, rather than on an
@@ -151,6 +158,45 @@ class S3JobStore:
         except ClientError as error:
             if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
                 raise MissingRecord(job_id) from error
+            raise
+
+    def put_mutation_command(self, command: MutationCommand) -> None:
+        self._put_json(
+            self.mutation_command_key(command.mutation_id), command.model_dump(mode="json"), IfNoneMatch="*"
+        )
+
+    def get_mutation_command(self, mutation_id: str) -> MutationCommand:
+        try:
+            response = self.s3.get_object(Bucket=self.bucket, Key=self.mutation_command_key(mutation_id))
+            return MutationCommand.model_validate(self._read_json(response))
+        except ClientError as error:
+            if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
+                raise MissingRecord(mutation_id) from error
+            raise
+
+    def put_mutation_request(self, *, owner_user_id: str, request_id: str, mutation_id: str) -> bool:
+        """Return false when this owner/request pair already has a command."""
+        try:
+            self._put_json(
+                self.mutation_request_key(owner_user_id, request_id),
+                {"owner_user_id": owner_user_id, "request_id": request_id, "mutation_id": mutation_id},
+                IfNoneMatch="*",
+            )
+            return True
+        except ClientError as error:
+            if self._is_precondition_failure(error):
+                return False
+            raise
+
+    def get_mutation_request(self, *, owner_user_id: str, request_id: str) -> str:
+        try:
+            response = self.s3.get_object(
+                Bucket=self.bucket, Key=self.mutation_request_key(owner_user_id, request_id)
+            )
+            return str(self._read_json(response)["mutation_id"])
+        except ClientError as error:
+            if error.response["Error"].get("Code") in {"NoSuchKey", "404"}:
+                raise MissingRecord(request_id) from error
             raise
 
     def put_status(self, status: JobStatus, expected_etag: str | None = None) -> str:
