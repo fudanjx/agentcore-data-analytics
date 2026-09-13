@@ -13,14 +13,16 @@ disabled and must remain so until their seven-day retention window ends.
 
 | Component | Immutable image |
 | --- | --- |
-| API | `s3-uploader-api:20260913-production-cleanup-amd64-1` (`sha256:1d24a4daf38fc2b1730583bd5e0d06d550d90d9ada0ff6e0e22d4b0716319580`) |
+| API | `s3-uploader-api:20260914-skill-bundle-access-amd64-1` (`sha256:d52c5b8eaa996421624554f742fae9ed9f70c645e4e4516ce1d46a5578150dcb`) |
 | Worker and dispatcher | `s3-uploader-worker:20260914-numeric-contract-cast-amd64-1` (`sha256:d637a3234ba3e33927c92f604e6d0a754a8269f2043cf4476f59d380cca449a7`) |
 
-Both Linux/amd64 images passed Docker Scout with zero detected critical, high,
-medium, or low vulnerabilities. The production API and dispatcher each run one
-healthy task; both named DLQ alarms were `OK` at cutover. Verify those facts
-again before any later infrastructure update rather than treating this record
-as live monitoring.
+The worker image passed Docker Scout with zero detected critical, high, medium,
+or low vulnerabilities. Docker Scout was unavailable for the 14 September API
+release because scanning would have transmitted the private application image
+to Docker's external service; no scan result is claimed for that API image. The
+production API and dispatcher each run one healthy task; both named DLQ alarms
+were `OK` at cutover. Verify those facts again before any later infrastructure
+update rather than treating this record as live monitoring.
 
 ## Production architecture
 
@@ -97,12 +99,24 @@ S3_UPLOADER_API_BASE_URL=https://s3-uploader-v2.bot-alex.com
 S3_UPLOADER_GLUE_JOB_NAME=s3-uploader-ingest
 S3_UPLOADER_CONTRACT_BUCKET=ah-data-analytics
 S3_UPLOADER_CONTRACT_PREFIX=temp_s3_update/web_ingest/table_contracts
+S3_UPLOADER_SKILL_BUNDLE_BUCKET=agentcore-harness-dev
+S3_UPLOADER_SKILL_BUNDLE_PREFIX=skills
 S3_UPLOADER_JOB_ID                 # Pipe override for a disposable worker only
 ```
 
 The API fails startup if its landing prefix, all three queues, login secrets,
 API base URL, Glue job, or contract location is absent. There is no legacy
 queue fallback or leases feature flag.
+
+### Skill bundle storage
+
+The non-versioned `/api/skills/files` endpoints store only the selected table
+bucket's skill bundle under
+`s3://agentcore-harness-dev/skills/<table-bucket-name>/`. The API task role is
+limited to listing that `skills/` prefix and reading, writing, or deleting its
+objects. The worker, dispatcher, and Glue roles have no skill-bundle access.
+The `S3_UPLOADER_SKILL_BUNDLE_*` variables are the only supported runtime
+configuration; legacy `PILOT_SKILL_BUNDLE_*` variables are ignored.
 
 ## Build, test, and blue-green release
 

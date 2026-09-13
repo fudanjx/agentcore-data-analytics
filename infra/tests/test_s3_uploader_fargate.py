@@ -1,7 +1,7 @@
 import json
 import unittest
 
-from infra.s3_uploader_fargate import GLUE_JOB_NAME, LANDING_PREFIX, render_template
+from infra.s3_uploader_fargate import GLUE_JOB_NAME, LANDING_PREFIX, SKILL_BUNDLE_BUCKET, SKILL_BUNDLE_PREFIX, render_template
 
 
 class FargateTemplateTests(unittest.TestCase):
@@ -40,6 +40,8 @@ class FargateTemplateTests(unittest.TestCase):
         api_environment = resources["ApiTaskDefinition"]["Properties"]["ContainerDefinitions"][0]["Environment"]
         self.assertIn({"Name": "S3_UPLOADER_LANDING_PREFIX", "Value": LANDING_PREFIX}, api_environment)
         self.assertIn({"Name": "S3_UPLOADER_MUTATION_QUEUE_URL", "Value": {"Ref": "MutationQueue"}}, api_environment)
+        self.assertIn({"Name": "S3_UPLOADER_SKILL_BUNDLE_BUCKET", "Value": SKILL_BUNDLE_BUCKET}, api_environment)
+        self.assertIn({"Name": "S3_UPLOADER_SKILL_BUNDLE_PREFIX", "Value": SKILL_BUNDLE_PREFIX}, api_environment)
         dispatcher_environment = resources["MutationDispatcherTaskDefinition"]["Properties"]["ContainerDefinitions"][0]["Environment"]
         self.assertIn({"Name": "S3_UPLOADER_GLUE_JOB_NAME", "Value": {"Ref": "GlueJob"}}, dispatcher_environment)
         statements = resources["ApiTaskRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
@@ -48,6 +50,12 @@ class FargateTemplateTests(unittest.TestCase):
         self.assertIn("s3tables:DeleteTable", actions)
         self.assertIn("glue:StartJobRun", actions)
         self.assertNotIn("s3-uploader-v3", json.dumps(resources))
+
+        skill_object_statement = next(
+            statement for statement in statements
+            if statement.get("Resource") == f"arn:aws:s3:::{SKILL_BUNDLE_BUCKET}/{SKILL_BUNDLE_PREFIX}/*"
+        )
+        self.assertEqual(set(skill_object_statement["Action"]), {"s3:GetObject", "s3:PutObject", "s3:DeleteObject"})
 
     def test_historical_landing_data_is_read_only(self):
         resources = render_template()["Resources"]

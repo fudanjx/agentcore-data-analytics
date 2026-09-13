@@ -1,4 +1,5 @@
 import hashlib
+import os
 import unittest
 from unittest.mock import patch
 
@@ -308,6 +309,22 @@ class ApiTests(unittest.TestCase):
             self.assertEqual(deleted.status_code, 200, deleted.text)
             self.assertEqual(deleted.json()["deleted_path"], "SKILL.md")
             self.assertNotIn(key, self.s3.items)
+
+    def test_skill_bundle_uses_only_neutral_destination_configuration(self):
+        from s3tables_uploader import skill_bundle
+
+        with patch.dict(os.environ, {
+            "PILOT_SKILL_BUNDLE_BUCKET": "ignored-legacy-bucket",
+            "PILOT_SKILL_BUNDLE_PREFIX": "ignored-legacy-prefix",
+            "S3_UPLOADER_SKILL_BUNDLE_BUCKET": "configured-skill-bucket",
+            "S3_UPLOADER_SKILL_BUNDLE_PREFIX": "configured/skills",
+        }, clear=False):
+            destination = skill_bundle._destination("ah-soc-delta-pilot")
+        self.assertEqual(destination, (
+            "configured-skill-bucket",
+            "configured/skills/ah-soc-delta-pilot",
+            "s3://configured-skill-bucket/configured/skills/ah-soc-delta-pilot/",
+        ))
 
     def test_login_protects_session_creation_and_keeps_upload_off_api(self):
         self.assertEqual(self.client.post("/api/v3/upload-sessions", json={}).status_code, 401)

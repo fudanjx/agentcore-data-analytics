@@ -55,8 +55,8 @@ def table_bucket_name(table_bucket_arn: str) -> str:
 
 
 def _destination(bucket_name: str) -> tuple[str, str, str]:
-    bucket = os.environ.get("PILOT_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET).strip()
-    raw_prefix = os.environ.get("PILOT_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX).strip()
+    bucket = os.environ.get("S3_UPLOADER_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET).strip()
+    raw_prefix = os.environ.get("S3_UPLOADER_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX).strip()
     prefix_parts = [part for part in raw_prefix.replace("\\", "/").split("/") if part]
     if not bucket or any(part in {".", ".."} for part in prefix_parts):
         raise SkillBundleError("The skill-bundle destination configuration is invalid", 503)
