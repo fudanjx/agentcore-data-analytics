@@ -14,7 +14,7 @@ disabled and must remain so until their seven-day retention window ends.
 | Component | Immutable image |
 | --- | --- |
 | API | `s3-uploader-api:20260913-production-cleanup-amd64-1` (`sha256:1d24a4daf38fc2b1730583bd5e0d06d550d90d9ada0ff6e0e22d4b0716319580`) |
-| Worker and dispatcher | `s3-uploader-worker:20260913-production-cleanup-amd64-1` (`sha256:7249d67d67f0b5b338858311f0fbe793bf61a3e71114f188f933bad273c6fb5e`) |
+| Worker and dispatcher | `s3-uploader-worker:20260914-numeric-contract-cast-amd64-1` (`sha256:d637a3234ba3e33927c92f604e6d0a754a8269f2043cf4476f59d380cca449a7`) |
 
 Both Linux/amd64 images passed Docker Scout with zero detected critical, high,
 medium, or low vulnerabilities. The production API and dispatcher each run one

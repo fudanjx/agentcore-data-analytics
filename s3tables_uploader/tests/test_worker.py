@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 
-from s3tables_uploader.worker import _history_prefix, _iceberg_type, _save_lease, _write_create_contract, _write_prepared_parquet, process_job
+from s3tables_uploader.worker import WorkerError, _history_prefix, _iceberg_type, _save_lease, _write_create_contract, _write_prepared_parquet, process_job
 from s3tables_uploader.config import WorkerSettings
 from s3tables_uploader.models import Destination, JobRequest, JobSource
 from s3tables_uploader.job_store import S3JobStore
@@ -253,6 +253,29 @@ class WorkerTests(unittest.TestCase):
         self.assertEqual(schema.field("visit_date").type, pa.date32())
         self.assertEqual(schema.field("count").type, pa.int64())
         self.assertEqual(staged["missing"].null_count, 1)
+
+    def test_contract_numeric_string_conversion_trims_whitespace_without_losing_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"
+            pq.write_table(pa.table({"measurement": [" 1", "2.5", "  ", None]}), source)
+            schema, rows, _ = _write_prepared_parquet(
+                source, output, b"x" * 32,
+                target_schema=[{"name": "measurement", "type": "DOUBLE"}],
+            )
+            staged = pq.read_table(output)
+        self.assertEqual(rows, 4)
+        self.assertEqual(schema.field("measurement").type, pa.float64())
+        self.assertEqual(staged["measurement"].to_pylist(), [1.0, 2.5, None, None])
+
+    def test_contract_numeric_string_conversion_rejects_non_numeric_values_with_column_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source, output = Path(directory) / "source.parquet", Path(directory) / "output.parquet"
+            pq.write_table(pa.table({"measurement": ["1", "not-a-number"]}), source)
+            with self.assertRaisesRegex(WorkerError, r"Column 'measurement': DOUBLE conversion would discard 1 non-empty value"):
+                _write_prepared_parquet(
+                    source, output, b"x" * 32,
+                    target_schema=[{"name": "measurement", "type": "DOUBLE"}],
+                )
 
     def test_create_writes_the_v1_append_contract(self):
         class FakeS3:

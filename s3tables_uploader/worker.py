@@ -188,6 +188,14 @@ def _cast_contract_column(column: pa.ChunkedArray, target_type: str) -> pa.Array
             pl.when(pl.col("v").is_in(["true", "1"])).then(True)
             .when(pl.col("v").is_in(["false", "0"])).then(False).otherwise(None)
         ).to_series().to_arrow()
+    if target_type in {"BIGINT", "DOUBLE"} and (pa.types.is_string(column.type) or pa.types.is_large_string(column.type)):
+        import polars as pl
+        text = pl.from_arrow(column).cast(pl.String, strict=False).str.strip_chars()
+        numeric = text.replace("", None).cast(pl.Int64 if target_type == "BIGINT" else pl.Float64, strict=False)
+        discarded = int((text.is_not_null() & (text != "")).sum()) - int(numeric.len() - numeric.null_count())
+        if discarded:
+            raise WorkerError(f"{target_type} conversion would discard {discarded} non-empty value(s)")
+        return numeric.to_arrow()
     return pc.cast(column, _arrow_contract_type(target_type), safe=False)
 
 
@@ -202,7 +210,10 @@ def _project_to_contract(table: pa.Table, target_schema: list[dict[str, str]] | 
         if name not in table.schema.names:
             arrays.append(pa.nulls(len(table), type=_arrow_contract_type(target_type)))
         else:
-            arrays.append(_cast_contract_column(table[name], target_type))
+            try:
+                arrays.append(_cast_contract_column(table[name], target_type))
+            except WorkerError as error:
+                raise WorkerError(f"Column {name!r}: {error}") from error
     return pa.table(arrays, names=[field["name"] for field in target_schema])
 
 
