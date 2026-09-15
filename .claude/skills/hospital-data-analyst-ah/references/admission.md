@@ -5,28 +5,28 @@ description: Column reference and SQL guidance for the ah-analytics admission ta
 
 # AH Analytics — admission table (inpatient admissions)
 
-**One row per admission episode. Primary date: `Adm_Date`.**
+**One row per admission episode. Primary date: `adm_date`.**
 
 **Two source systems are combined in one file**, distinguished by admission date and by which identifier is populated:
 
-| | Admission date | `Case_No` | `PAT_ENC_CSN_ID` |
+| | Admission date | `case_no` | `pat_enc_csn_id` |
 |---|---|---|---|
 | **Legacy SAP era** | before 1 Jan 2023 | populated | null |
 | **NGEMR/EPIC era** | from 1 Jan 2023 | null | populated |
 
 Columns populated in only one era are marked in the **Era** column below.
 
-## Adm_Ward — derived field used for ward reporting
+## adm_ward — derived field used for ward reporting
 
-Ward-level admission reports do **not** group by raw `Adm_Nrs_OU`. Production derives `Adm_Ward` first:
+Ward-level admission reports do **not** group by raw `adm_nrs_ou`. Production derives `adm_ward` first:
 
 ```
-Adm_Ward = Current_Ward,  UNLESS Adm_Nrs_OU starts with "LW"
-           AND Adm_Nrs_OU NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LCUCC')
-           → then Adm_Ward = Adm_Nrs_OU
+adm_ward = current_ward,  UNLESS adm_nrs_ou starts with "LW"
+           AND adm_nrs_ou NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LCUCC')
+           → then adm_ward = adm_nrs_ou
 ```
 
-The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')`) is applied to this **derived** `Adm_Ward`, not to raw `Adm_Nrs_OU`.
+The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')`) is applied to this **derived** `adm_ward`, not to raw `adm_nrs_ou`.
 
 ## Full column reference
 
@@ -36,61 +36,61 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 
 
 | Column | Type | Era | Description | Example | Values |
 |---|---|---|---|---|---|
-| `Case_No` | TEXT | SAP only | Legacy episode identifier stem, 10 digits, always starts `2800`. **Concatenate with `C` (below) for the full SAP case number** — e.g. `Case_No` `2800348407` + `C` `H` → full case no. `2800348407H`. | `2800348407` | High-cardinality identifier — one per episode |
-| `C` | TEXT | SAP only | Final character of the full SAP case number — concatenate onto `Case_No` to form the full case no. (e.g. `2800348407` + `H` → `2800348407H`). Not a separate field: `infra/etl_ah_analytics.py`'s column-sanitisation step currently renames this column to `record_type` on load — it should not be renamed; treat it only as the `Case_No` suffix. | `H` | Single letter, A–Z |
-| `Pat_ID` | TEXT | | Internal patient ID. Format differs by era. | `Z1478946` | Letter+digit (e.g. `Z1478946`) — NGEMR; numeric (e.g. `403094`) — SAP |
-| `Ext_Pat_ID` | TEXT | | **PII — Singapore NRIC/FIN.** Treat as sensitive; don't surface raw values outside authorised use. Standard prefixes are `S`/`T` (citizens/PRs) and `F`/`G`/`M` (foreigners); other prefixes (e.g. `R`) occasionally appear for some foreign nationals. | `S1234567A` (format only) | NRIC/FIN format: 1 letter + 7 digits + 1 checksum letter |
-| `Resident` | TEXT | | Binary residency flag, independent of `Residency` below. | `Resident` | `Resident`, `Non-Resident` |
-| `Nationality` | TEXT | | Nationality **code** — short half of the code/description pair with `Nationality_1`. | `SG` | `SG`, `PR`, `MY`, `FR`, `FNR`, `CN`, `IN`, `BD`, `ZO` (Others), `PH`, `GB`, `TW`, `AU`, `MM`, `NO`, `TH`, `ID` |
-| `Nationality_1` | TEXT | | Nationality **description** — full-text half of the pair with `Nationality`. | `Singapore` | Free text, e.g. `Singapore`, `Malaysian`, `Chinese`, `Indian`, `Bangladeshi`, `Filipino` |
-| `Residency` | TEXT | NGEMR only | Resident-status code (matches `Resident_MOH` in `pt-class-lookup.md`) — derived from `Subvention_Doc_Type`. | `SG` | `SG`, `PR`, `FR`, `FNR` |
-| `Subvention_Doc_Type` | TEXT | NGEMR only | ID document type used to establish subvention eligibility — source for `Residency` above. | `SG Pink IC/BC` | `SG Pink IC/BC`, `SG Blue IC`, `S Pass`, `Employment Pass`, `Other WP`, `Domestic WP`, `Long-Term Visit Pass`, `Others` |
-| `Age` | TEXT | | Age in years at admission. Stored as text with inconsistent leading whitespace — `.strip()` before casting to INT. | `71` | Numeric, e.g. `17`–`99` |
-| `Sex` | TEXT | | | `M` | `M` for Male, `F` for Female |
-| `Postal_Code` | TEXT | | **PII** — Singapore postal code (identifies to block level). Handle per data-governance rules. | `597264` (format only) | 6-digit numeric |
+| `case_no` | TEXT | SAP only | Legacy episode identifier stem, 10 digits, always starts `2800`. **Concatenate with `c` (below) for the full SAP case number** — e.g. `case_no` `2800348407` + `c` `H` → full case no. `2800348407H`. | `2800348407` | High-cardinality identifier — one per episode |
+| `c` | TEXT | SAP only | Final character of the full SAP case number — concatenate onto `case_no` to form the full case no. (e.g. `2800348407` + `H` → `2800348407H`). Not a separate field: `infra/etl_ah_analytics.py`'s column-sanitisation step currently renames this column to `record_type` on load — it should not be renamed; treat it only as the `case_no` suffix. | `H` | Single letter, A–Z |
+| `pat_id` | TEXT | | Internal patient ID. Format differs by era. | `Z1478946` | Letter+digit (e.g. `Z1478946`) — NGEMR; numeric (e.g. `403094`) — SAP |
+| `ext_pat_id` | TEXT | | **PII — Singapore NRIC/FIN.** Treat as sensitive; don't surface raw values outside authorised use. Standard prefixes are `S`/`T` (citizens/PRs) and `F`/`G`/`M` (foreigners); other prefixes (e.g. `R`) occasionally appear for some foreign nationals. | `S1234567A` (format only) | NRIC/FIN format: 1 letter + 7 digits + 1 checksum letter |
+| `resident` | TEXT | | Binary residency flag, independent of `residency` below. | `resident` | `resident`, `Non-resident` |
+| `nationality` | TEXT | | nationality **code** — short half of the code/description pair with `nationality_1`. | `SG` | `SG`, `PR`, `MY`, `FR`, `FNR`, `CN`, `IN`, `BD`, `ZO` (Others), `PH`, `GB`, `TW`, `AU`, `MM`, `NO`, `TH`, `ID` |
+| `nationality_1` | TEXT | | nationality **description** — full-text half of the pair with `nationality`. | `Singapore` | Free text, e.g. `Singapore`, `Malaysian`, `Chinese`, `Indian`, `Bangladeshi`, `Filipino` |
+| `residency` | TEXT | NGEMR only | resident-status code (matches `Resident_MOH` in `pt-class-lookup.md`) — derived from `subvention_doc_type`. | `SG` | `SG`, `PR`, `FR`, `FNR` |
+| `subvention_doc_type` | TEXT | NGEMR only | ID document type used to establish subvention eligibility — source for `residency` above. | `SG Pink IC/BC` | `SG Pink IC/BC`, `SG Blue IC`, `S Pass`, `Employment Pass`, `Other WP`, `Domestic WP`, `Long-Term Visit Pass`, `Others` |
+| `age` | TEXT | | age in years at admission. Stored as text with inconsistent leading whitespace — `.strip()` before casting to INT. | `71` | Numeric, e.g. `17`–`99` |
+| `sex` | TEXT | | | `M` | `M` for Male, `F` for Female |
+| `postal_code` | TEXT | | **PII** — Singapore postal code (identifies to block level). Handle per data-governance rules. | `597264` (format only) | 6-digit numeric |
 
 ### Admission details
 
 | Column | Type | Era | Description | Example | Values |
 |---|---|---|---|---|---|
-| `Adm_Date` | TIMESTAMP | | Admission date — primary date filter. Format `YYYY-MM-DD` in the raw file (SAP-era dates are `DD.MM.YYYY` before conversion — see `Date_Conversion()` in `data_prep.py`). | `2024-10-24` | Date |
-| `Adm_Time` | TIME | | Admission time. | `08:03:00` | `HH:MM:SS` |
-| `Adm_Dept_OU` | TEXT | | Admitting department code. Resolve via the `Adm_Dept_OU / Dept_OU — department mapping` table below for the department name. | `LSFAMED` | See mapping table below, e.g. `LSFAMED`, `LSHAOPT`, `LSCHROGS`, `LSHAENT`, `LSCHRO`, `LSHAGERI` |
-| `Adm_Nrs_OU` | TEXT | | Raw admitting ward/nursing-unit code. **Do not use directly for ward reporting** — see `Adm_Ward` derivation above. | `LW4W` | Ward codes, e.g. `LW4W`, `LW12W`, `LWASW`, `LCENDO`, `LCHAOPT` |
-| `Current_Ward` | TEXT | | Patient's current/latest ward code — fallback in the `Adm_Ward` derivation. Same code space as `Adm_Nrs_OU`. | `LW4W` | Same code space as `Adm_Nrs_OU` |
-| `Adm_Bed` | TEXT | | Bed code within ward. `NONE` or null both indicate no bed assigned. | `L004004` | Bed codes, or `NONE` / null |
-| `Adm_Type` | TEXT | | Admission route/type code — see the `Adm_Type` codes table below. | `EM` | See `Adm_Type` codes table below |
-| `Adm_Src_1` | TEXT | | Code half of a code/description pair with `Adm_Reason`: `1`=A&E, `2`=SOC, `3`=Ward. | `1` | `1`, `2`, `3` |
-| `Adm_Cls` | TEXT | | Raw patient class code at admission — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`). | `SUB` | Codes defined in `pt_class_abc`: `A`, `AP`, `ARF`, `B1`, `B1P`, `B1RF`, `B2`, `B2P`, `B2RF`, `C`, `CP`, `CRF`, `NR`, `PTE`, `PTEP`, `PTRF`, `SUB`, `SUBP` |
-| `Wish_Cls` | TEXT | | Patient's requested class — same code space as `Adm_Cls`, typically the coarser tiers. | `C` | `C`, `B2`, `B1`, `A` |
-| `Adm_Trt_Cat` | TEXT | | Treatment/acuity category code — same code set as `inflight.Trt_Cat`; resolve via `inflight.md`'s Trt_Cat → Acuity table (maps to L1/L2/L3/EDTU bands). | `CL3` | See `inflight.md`'s Trt_Cat → Acuity table |
-| `Adm_Acmd_Cat` | TEXT | | Accommodation category at admission. **NGEMR-era values are unreliable** -- populated with the mapped patient-class label (e.g. `B2 - SUB`), not the true bed accommodation type. See the correction below before using this column for NGEMR-era rows. | `SUB` | `ICU`, `HD`, `ISO`, `A1`, `B1`, `B2`, `C`, `SUB`, `PTE`, `OTHER` (SAP era); mapped class label for NGEMR era -- see correction below |
-| `Adm_Status` | TEXT | | `A` = finalised, `P` = preliminary. Filter `Adm_Status <> 'P'` for finalised records (per `data-ontology.yaml`). | `A` | `A`, `P` |
-| `Adm_Reason` | TEXT | NGEMR only | Description half of the code/description pair with `Adm_Src_1` (see above). | `SOC` | `SOC`, `A&E`, `Ward` |
-| `Adm_Phy` / `Adm_Phy_Name` | TEXT | NGEMR only | Admitting physician staff ID / name. Staff PII — genericise in any shared examples. | `M14796F` / `NG, JING YU` (format only) | Staff ID / name |
+| `adm_date` | TIMESTAMP | | Admission date — primary date filter. Format `YYYY-MM-DD` in the raw file (SAP-era dates are `DD.MM.YYYY` before conversion — see `Date_Conversion()` in `data_prep.py`). | `2024-10-24` | Date |
+| `adm_time` | TIME | | Admission time. | `08:03:00` | `HH:MM:SS` |
+| `adm_dept_ou` | TEXT | | Admitting department code. Resolve via the `adm_dept_ou / dept_ou — department mapping` table below for the department name. | `LSFAMED` | See mapping table below, e.g. `LSFAMED`, `LSHAOPT`, `LSCHROGS`, `LSHAENT`, `LSCHRO`, `LSHAGERI` |
+| `adm_nrs_ou` | TEXT | | Raw admitting ward/nursing-unit code. **Do not use directly for ward reporting** — see `adm_ward` derivation above. | `LW4W` | Ward codes, e.g. `LW4W`, `LW12W`, `LWASW`, `LCENDO`, `LCHAOPT` |
+| `current_ward` | TEXT | | Patient's current/latest ward code — fallback in the `adm_ward` derivation. Same code space as `adm_nrs_ou`. | `LW4W` | Same code space as `adm_nrs_ou` |
+| `adm_bed` | TEXT | | bed code within ward. `NONE` or null both indicate no bed assigned. | `L004004` | bed codes, or `NONE` / null |
+| `adm_type` | TEXT | | Admission route/type code — see the `adm_type` codes table below. | `EM` | See `adm_type` codes table below |
+| `adm_src_1` | TEXT | | Code half of a code/description pair with `adm_reason`: `1`=A&E, `2`=SOC, `3`=Ward. | `1` | `1`, `2`, `3` |
+| `adm_cls` | TEXT | | Raw patient class code at admission — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`). | `SUB` | Codes defined in `pt_class_abc`: `A`, `AP`, `ARF`, `B1`, `B1P`, `B1RF`, `B2`, `B2P`, `B2RF`, `C`, `CP`, `CRF`, `NR`, `PTE`, `PTEP`, `PTRF`, `SUB`, `SUBP` |
+| `wish_cls` | TEXT | | Patient's requested class — same code space as `adm_cls`, typically the coarser tiers. | `C` | `C`, `B2`, `B1`, `A` |
+| `adm_trt_cat` | TEXT | | Treatment/acuity category code — same code set as `inflight.Trt_Cat`; resolve via `inflight.md`'s Trt_Cat → Acuity table (maps to L1/L2/L3/EDTU bands). | `CL3` | See `inflight.md`'s Trt_Cat → Acuity table |
+| `adm_acmd_cat` | TEXT | | Accommodation category at admission. **NGEMR-era values are unreliable** -- populated with the mapped patient-class label (e.g. `B2 - SUB`), not the true bed accommodation type. See the correction below before using this column for NGEMR-era rows. | `SUB` | `ICU`, `HD`, `ISO`, `A1`, `B1`, `B2`, `C`, `SUB`, `PTE`, `OTHER` (SAP era); mapped class label for NGEMR era -- see correction below |
+| `adm_status` | TEXT | | `A` = finalised, `P` = preliminary. Filter `adm_status <> 'P'` for finalised records (per `data-ontology.yaml`). | `A` | `A`, `P` |
+| `adm_reason` | TEXT | NGEMR only | Description half of the code/description pair with `adm_src_1` (see above). | `SOC` | `SOC`, `A&E`, `Ward` |
+| `adm_phy` / `adm_phy_name` | TEXT | NGEMR only | Admitting physician staff ID / name. Staff PII — genericise in any shared examples. | `M14796F` / `NG, JING YU` (format only) | Staff ID / name |
 
 ### Discharge details (captured on the admission record, for the same episode)
 
 | Column | Type | Description | Example | Values |
 |---|---|---|---|---|
-| `Disch_Date` | TIMESTAMP | Discharge date. Null when `Adm_Status = 'P'` (preliminary — not yet finalised) or when the patient remains admitted (not yet discharged) as of data extraction. | `2024-10-24` | Date, or null |
-| `Disch_Time` | TIME | | `11:11:00` | `HH:MM:SS` |
-| `Disch_Cls` | TEXT | Patient class at discharge — same code space and lookup as `Adm_Cls`. | `SUB` | Same code space as `Adm_Cls` |
-| `Disch_Dept_OU` | TEXT | Discharging department code — same code space as `Adm_Dept_OU`. | `LSFAMED` | Same code space as `Adm_Dept_OU` |
-| `Disch_Acmd_Cat` | TEXT | Accommodation category at discharge — same code space as `Adm_Acmd_Cat`. **Shares the same NGEMR-era defect** (mapped class label, not true accommodation type) -- see the correction below. | `SUB` | Same code space as `Adm_Acmd_Cat` |
-| `Disch_Nrs_OU` | TEXT | Discharging ward code. | `LCENDO` | Ward codes |
-| `Disch_Bed` | TEXT | Bed code at discharge. `NONE` or null both indicate no bed assigned. | `L011017` | Bed codes, or `NONE` / null |
-| `Disch_Type` | TEXT | MOH discharge-type code — see canonical mapping below for consistent reporting across SAP/NGEMR eras. | `09` | See `Disch_Type` canonical mapping below |
-| `Disch_Type_1` | TEXT | Free-text discharge disposition paired with `Disch_Type`. Raw text varies by era for the same code (SAP abbreviated forms vs NGEMR full text) — use the canonical mapping below, not this raw column, for reporting. | `Discharge to Home (with TCU)` | See `Disch_Type` canonical mapping below |
-| `Disch_Phy` / `Disch_Phy_Name` | TEXT | Discharging physician staff ID / name. Staff PII. | `M14796F` / `NG, JING YU` (format only) | Staff ID / name |
-| `Disch_Status` | TEXT | `A` = finalised, `P` = preliminary — same semantics as `Adm_Status`. | `A` | `A`, `P` |
-| `Infect_Dis` | TEXT | Infectious-disease flag. | `IF` | `IF`, `IP` |
+| `disch_date` | TIMESTAMP | Discharge date. Null when `adm_status = 'P'` (preliminary — not yet finalised) or when the patient remains admitted (not yet discharged) as of data extraction. | `2024-10-24` | Date, or null |
+| `disch_time` | TIME | | `11:11:00` | `HH:MM:SS` |
+| `disch_cls` | TEXT | Patient class at discharge — same code space and lookup as `adm_cls`. | `SUB` | Same code space as `adm_cls` |
+| `disch_dept_ou` | TEXT | Discharging department code — same code space as `adm_dept_ou`. | `LSFAMED` | Same code space as `adm_dept_ou` |
+| `disch_acmd_cat` | TEXT | Accommodation category at discharge — same code space as `adm_acmd_cat`. **Shares the same NGEMR-era defect** (mapped class label, not true accommodation type) -- see the correction below. | `SUB` | Same code space as `adm_acmd_cat` |
+| `disch_nrs_ou` | TEXT | Discharging ward code. | `LCENDO` | Ward codes |
+| `disch_bed` | TEXT | bed code at discharge. `NONE` or null both indicate no bed assigned. | `L011017` | bed codes, or `NONE` / null |
+| `disch_type` | TEXT | MOH discharge-type code — see canonical mapping below for consistent reporting across SAP/NGEMR eras. | `09` | See `disch_type` canonical mapping below |
+| `disch_type_1` | TEXT | Free-text discharge disposition paired with `disch_type`. Raw text varies by era for the same code (SAP abbreviated forms vs NGEMR full text) — use the canonical mapping below, not this raw column, for reporting. | `Discharge to Home (with TCU)` | See `disch_type` canonical mapping below |
+| `disch_phy` / `disch_phy_name` | TEXT | Discharging physician staff ID / name. Staff PII. | `M14796F` / `NG, JING YU` (format only) | Staff ID / name |
+| `disch_status` | TEXT | `A` = finalised, `P` = preliminary — same semantics as `adm_status`. | `A` | `A`, `P` |
+| `infect_dis` | TEXT | Infectious-disease flag. | `IF` | `IF`, `IP` |
 
-#### Disch_Type — canonical mapping (for consistent reporting across SAP + NGEMR eras)
+#### disch_type — canonical mapping (for consistent reporting across SAP + NGEMR eras)
 
-Raw `Disch_Type_1` text differs by era for the same `Disch_Type` code. Derive a single canonical `Discharge_Type` label per code rather than grouping on raw `Disch_Type_1` directly:
+Raw `disch_type_1` text differs by era for the same `disch_type` code. Derive a single canonical `Discharge_Type` label per code rather than grouping on raw `disch_type_1` directly:
 
-| Disch_Type | Canonical Discharge_Type | Raw `Disch_Type_1` values seen |
+| disch_type | Canonical Discharge_Type | Raw `disch_type_1` values seen |
 |---|---|---|
 | `1` | Discharge to Home (without TCU) | `Pat discharged`, `Patient discharged`, `Discharge to Home (without TCU)` |
 | `2` | Discharge to NHG Hospital | `Dis. NHG Hosp`, `Discharge to NHG Hospital` |
@@ -123,69 +123,69 @@ Raw `Disch_Type_1` text differs by era for the same `Disch_Type` code. Derive a 
 
 | Column | Type | Era | Description | Example | Values |
 |---|---|---|---|---|---|
-| `Diagnosis_Code` | TEXT | | ICD-10 diagnosis code. | `L91.00` | ICD-10 codes |
-| `Diagnosis_Desc` | TEXT | | Free-text description paired with `Diagnosis_Code`. | `Keloid` | Free text |
-| `Prin_Diagnosis_Code` | TEXT | NGEMR only | Principal diagnosis — despite the column name, holds the free-text description, not a code. Swapped with `Prin_Diagnosis_Desc` at the source extract. | `Keloid` | Free text |
-| `Prin_Diagnosis_Desc` | TEXT | NGEMR only | Principal diagnosis — despite the column name, holds the ICD-10 code, not a description. Swapped with `Prin_Diagnosis_Code` at the source extract. | `R07.4` | ICD-10 codes |
-| `DRG_Code` | TEXT | SAP only | DRG code. | `K09A` | DRG codes |
-| `DRG_Desc` | TEXT | SAP only | DRG description. | `Other Endocrine, Nutritional and Metabolic...` | Free text |
+| `diagnosis_code` | TEXT | | ICD-10 diagnosis code. | `L91.00` | ICD-10 codes |
+| `diagnosis_desc` | TEXT | | Free-text description paired with `diagnosis_code`. | `Keloid` | Free text |
+| `prin_diagnosis_code` | TEXT | NGEMR only | Principal diagnosis — despite the column name, holds the free-text description, not a code. Swapped with `prin_diagnosis_desc` at the source extract. | `Keloid` | Free text |
+| `prin_diagnosis_desc` | TEXT | NGEMR only | Principal diagnosis — despite the column name, holds the ICD-10 code, not a description. Swapped with `prin_diagnosis_code` at the source extract. | `R07.4` | ICD-10 codes |
+| `drg_code` | TEXT | SAP only | DRG code. | `K09A` | DRG codes |
+| `drg_desc` | TEXT | SAP only | DRG description. | `Other Endocrine, Nutritional and Metabolic...` | Free text |
 
 ### Referral & source
 
 | Column | Type | Description | Example | Values |
 |---|---|---|---|---|
-| `Ref_Hosp_1` | TEXT | Referring source, free text — values vary in leading whitespace and casing for the same source (e.g. `NG TENG FONG GENERAL HOSPITAL` vs `Ng Teng Fong General Hospital`). `.strip()` + case-normalise before grouping directly on this column; already handled downstream via `fin_ref_hosp_inpt()` in `data_prep.py`. | `National University Hospital` | Free text, e.g. `National University Hospital`, `Intra-Dept referral SOC (Sub)`, `Intra-Dept referral A&E`, `NG TENG FONG GENERAL HOSPITAL` |
-| `Referral_type` | TEXT | Resolved referral-type label, description half of the pair with `Referral_Hospital`. | `Intra-Hosp SOC` | `Intra-Hosp SOC`, `Natl Uni Health`, `Intra-Hosp A&E`, `Jurong Health`, `NHG Hosp/Inst`, `Other Govt Body`, `Intra-Hosp Ward`, `Alexandra Healt`, `NUP Polyclinics`, `Step-Down Care` |
-| `Referral_Hospital` | TEXT | Internal hospital code, code half of the pair with `Referral_type` (1:1). | `ZZZ0802` | `ZZZ0802` (Intra-Dept SOC), `ZZZ2601` (NUH), `ZZZ0701` (Intra-Dept A&E), `ZZZ2504` (Jurong Health/NTFGH), plus other `ZZZ####` codes |
+| `ref_hosp_1` | TEXT | Referring source, free text — values vary in leading whitespace and casing for the same source (e.g. `NG TENG FONG GENERAL HOSPITAL` vs `Ng Teng Fong General Hospital`). `.strip()` + case-normalise before grouping directly on this column; already handled downstream via `fin_ref_hosp_inpt()` in `data_prep.py`. | `National University Hospital` | Free text, e.g. `National University Hospital`, `Intra-Dept referral SOC (Sub)`, `Intra-Dept referral A&E`, `NG TENG FONG GENERAL HOSPITAL` |
+| `referral_type` | TEXT | Resolved referral-type label, description half of the pair with `referral_hospital`. | `Intra-Hosp SOC` | `Intra-Hosp SOC`, `Natl Uni Health`, `Intra-Hosp A&E`, `Jurong Health`, `NHG Hosp/Inst`, `Other Govt Body`, `Intra-Hosp Ward`, `Alexandra Healt`, `NUP Polyclinics`, `Step-Down Care` |
+| `referral_hospital` | TEXT | Internal hospital code, code half of the pair with `referral_type` (1:1). | `ZZZ0802` | `ZZZ0802` (Intra-Dept SOC), `ZZZ2601` (NUH), `ZZZ0701` (Intra-Dept A&E), `ZZZ2504` (Jurong Health/NTFGH), plus other `ZZZ####` codes |
 
 ### Administrative / pipeline fields
 
 | Column | Type | Description | Example | Values |
 |---|---|---|---|---|
-| `prelim_flag` | TEXT | `N` = finalised, `Y` = preliminary. **Don't filter on this by default** — only add `WHERE "prelim_flag" = 'N'` when the user explicitly asks to exclude provisional records. | `N` | `N`, `Y` |
+| `prelim_flag` | TEXT | `N` = finalised, `Y` = preliminary. **Don't filter on this by default** — only add `WHERE prelim_flag = 'N'` when the user explicitly asks to exclude provisional records. | `N` | `N`, `Y` |
 | `cnt` | INTEGER | Always `1`. Row-counter helper column — `SUM(cnt)` = row count; used throughout the reporting pivots. | `1` | `1` |
-| `PAT_ENC_CSN_ID` | TEXT | NGEMR only | 12-digit NGEMR encounter identifier. | `100220440898` | High-cardinality identifier — one per episode |
+| `pat_enc_csn_id` | TEXT | NGEMR only | 12-digit NGEMR encounter identifier. | `100220440898` | High-cardinality identifier — one per episode |
 
-## Adm_Acmd_Cat / Disch_Acmd_Cat — NGEMR-era correction (bed_accom lookup)
+## adm_acmd_cat / disch_acmd_cat — NGEMR-era correction (bed_accom lookup)
 
-For NGEMR-era episodes (`Adm_Date >= 2023-01-01`), both `Adm_Acmd_Cat` and
-`Disch_Acmd_Cat` are populated with the mapped patient-class label (e.g. `B2 - SUB`), not
+For NGEMR-era episodes (`adm_date >= 2023-01-01`), both `adm_acmd_cat` and
+`disch_acmd_cat` are populated with the mapped patient-class label (e.g. `B2 - SUB`), not
 the true bed accommodation category -- don't use either directly for anything requiring
 the real accommodation type.
 
-Derive the correct value from `inflight`'s own `Accom_Category`, using a **last-recorded
+Derive the correct value from `inflight`'s own `accom_category`, using a **last-recorded
 (as-of), not exact-date** lookup: a bed's accommodation category is a near-fixed physical
 property, so if `inflight` didn't record that exact bed on that exact date, the most
 recent earlier reading for that same bed is a reliable stand-in.
 
 ```sql
 WITH bed_accom AS (
-  SELECT DISTINCT "Bed", "Inflight_Date", "Accom_Category"
+  SELECT DISTINCT bed, inflight_date, accom_category
   FROM inflight
 )
 SELECT
   a.*,
-  adm_ba."Accom_Category"   AS adm_accom_category_corrected,
-  disch_ba."Accom_Category" AS disch_accom_category_corrected
+  adm_ba.accom_category   AS adm_accom_category_corrected,
+  disch_ba.accom_category AS disch_accom_category_corrected
 FROM admission a
 LEFT JOIN LATERAL (
-  SELECT ba."Accom_Category"
+  SELECT ba.accom_category
   FROM bed_accom ba
-  WHERE ba."Bed" = a."Adm_Bed" AND ba."Inflight_Date" <= a."Adm_Date"
-  ORDER BY ba."Inflight_Date" DESC
+  WHERE ba.bed = a.adm_bed AND ba.inflight_date <= a.adm_date
+  ORDER BY ba.inflight_date DESC
   LIMIT 1
 ) adm_ba ON true
 LEFT JOIN LATERAL (
-  SELECT ba."Accom_Category"
+  SELECT ba.accom_category
   FROM bed_accom ba
-  WHERE ba."Bed" = a."Disch_Bed" AND ba."Inflight_Date" <= a."Disch_Date"
-  ORDER BY ba."Inflight_Date" DESC
+  WHERE ba.bed = a.disch_bed AND ba.inflight_date <= a.disch_date
+  ORDER BY ba.inflight_date DESC
   LIMIT 1
 ) disch_ba ON true
 ```
 
-SAP-era `Adm_Acmd_Cat`/`Disch_Acmd_Cat` are assumed reliable as-is and don't need this
-correction. Use `COALESCE(adm_ba."Accom_Category", a."Adm_Acmd_Cat")` (and the discharge
+SAP-era `adm_acmd_cat`/`disch_acmd_cat` are assumed reliable as-is and don't need this
+correction. Use `COALESCE(adm_ba.accom_category, a.adm_acmd_cat)` (and the discharge
 equivalent) when a fallback is needed -- this only fires for a bed with **no `inflight`
 reading at all before the target date** (e.g. a bed newly commissioned that day), a much
 narrower gap than the exact-date-match approach: it also resolves `inflight.md`'s same-day
@@ -193,11 +193,11 @@ top-up union, since a same-day admit+discharge case's bed will normally still ha
 `inflight` history to carry forward, even though it has no `inflight` row on that exact
 date. See `inflight.md`'s top-up section for how this applies there.
 
-## Adm_Dept_OU / Dept_OU — department mapping (Subspec)
+## adm_dept_ou / dept_ou — department mapping (Subspec)
 
-Same code space as `discharge.Adm_Dept_OU`/`Dept_OU`.
+Same code space as `discharge.adm_dept_ou`/`dept_ou`.
 
-| Dept_OU | Dept_Name |
+| dept_ou | Dept_Name |
 |---|---|
 | `LSFAGS` | Fast General Surgery |
 | `LSFAMED` | Fast Medicine |
@@ -244,7 +244,7 @@ Same code space as `discharge.Adm_Dept_OU`/`Dept_OU`.
 | `LOMOT` | Main OT holding |
 | `LCUCC` | Emergency / Urgent Care Centre |
 
-## Adm_Type codes
+## adm_type codes
 
 | Code | Meaning |
 |------|---------|
@@ -259,15 +259,15 @@ Same code space as `discharge.Adm_Dept_OU`/`Dept_OU`.
 | `SO` | Social Overstay |
 | `TA` | Technical Adm. |
 
-The "inpatient-only" filter, `Adm_Type IN ('EM|SD|DI|EL|TA|RA')` to be included; Excludes `DO` (Day Surgery OP), `DS` (Day Surgery), `ES` (Endoscopy) and `SO` (Social Overstay) — these are day-case/procedural/overstay types, not true inpatient admissions.
+The "inpatient-only" filter, `adm_type IN ('EM|SD|DI|EL|TA|RA')` to be included; Excludes `DO` (Day Surgery OP), `DS` (Day Surgery), `ES` (Endoscopy) and `SO` (Social Overstay) — these are day-case/procedural/overstay types, not true inpatient admissions.
 
 ## Patient class
 
-Resolve `Adm_Cls` through `pt_class_abc` (see `references/pt-class-lookup.md`). Quick paying-status split:
+Resolve `adm_cls` through `pt_class_abc` (see `references/pt-class-lookup.md`). Quick paying-status split:
 
 ```sql
 CASE
-  WHEN "Adm_Cls" IN ('B2','B2P','C') THEN 'Subsidised'
+  WHEN adm_cls IN ('B2','B2P','C') THEN 'Subsidised'
   ELSE 'Paying'
 END AS paying_status
 ```
@@ -278,25 +278,25 @@ END AS paying_status
 WITH adm_ward AS (
   SELECT *,
     CASE
-      WHEN LEFT("Adm_Nrs_OU", 2) = 'LW'
-           AND "Adm_Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU')
-        THEN "Adm_Nrs_OU"
-      ELSE "Current_Ward"
-    END AS "Adm_Ward"
+      WHEN LEFT(adm_nrs_ou, 2) = 'LW'
+           AND adm_nrs_ou NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU')
+        THEN adm_nrs_ou
+      ELSE current_ward
+    END AS adm_ward
   FROM admission
-  WHERE "Adm_Status" != 'P'
-    AND "Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
+  WHERE adm_status != 'P'
+    AND adm_type IN ('EM','EL','SD','DI','TA','RA')
 )
 SELECT
-  DATE_TRUNC('month', "Adm_Date") AS month,
-  "Adm_Ward",
+  DATE_TRUNC('month', adm_date) AS month,
+  adm_ward,
   COUNT(*) AS admissions
 FROM adm_ward
-WHERE "Adm_Ward" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')
+WHERE adm_ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')
 GROUP BY 1, 2 ORDER BY 1;
 ```
 
-Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
+Add `AND prelim_flag = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
 ## Joins
 
