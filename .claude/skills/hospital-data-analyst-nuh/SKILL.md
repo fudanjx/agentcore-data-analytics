@@ -60,7 +60,7 @@ query using the applicable reference rules.
 
 | Table | Coverage | Key era note |
 |---|---|---|
-| `emd` | Jan 2023–Jun 2026 | `NCPUCC` starts Jan 2025 — report unavailable, not zero, for 2023–2024 |
+| `emd` | Jan 2023–Jun 2026 | In S3, `NCPUCC` is available from Jan 2023. Query and include it for CY2023 onward; never apply the former Jan 2025 availability limit. |
 | `soc` | Jan 2023–Jun 2026 | Apply the universal `VISIT_TYPE` and `PATIENT_CLASS` mappings in `soc.md` for every period |
 | `surgery` | Jan 2023–Jun 2026 | SAP = `UID IS NULL` through Jan 2024; Epic = `UID IS NOT NULL` from Feb 2024 |
 | `inpatient_movement` | Snapshot-based | Use `CASE_NO` before May 2025; use `EPIC_CSN` from May 2025 |
