@@ -55,7 +55,7 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 
 |---|---|---|---|---|---|
 | `Adm_Date` | TIMESTAMP | | Admission date — primary date filter. Format `YYYY-MM-DD` in the raw file (SAP-era dates are `DD.MM.YYYY` before conversion — see `Date_Conversion()` in `data_prep.py`). | `2024-10-24` | Date |
 | `Adm_Time` | TIME | | Admission time. | `08:03:00` | `HH:MM:SS` |
-| `Adm_Dept_OU` | TEXT | | Admitting department code. Resolve via the `Subspec` sheet in `Class.xlsx` for the department name. | `LSFAMED` | Codes defined in the `Subspec` sheet of `Class.xlsx`, e.g. `LSFAMED`, `LSHAOPT`, `LSCHROGS`, `LSHAENT`, `LSCHRO`, `LSHAGERI` |
+| `Adm_Dept_OU` | TEXT | | Admitting department code. Resolve via the `Adm_Dept_OU / Dept_OU — department mapping` table below for the department name. | `LSFAMED` | See mapping table below, e.g. `LSFAMED`, `LSHAOPT`, `LSCHROGS`, `LSHAENT`, `LSCHRO`, `LSHAGERI` |
 | `Adm_Nrs_OU` | TEXT | | Raw admitting ward/nursing-unit code. **Do not use directly for ward reporting** — see `Adm_Ward` derivation above. | `LW4W` | Ward codes, e.g. `LW4W`, `LW12W`, `LWASW`, `LCENDO`, `LCHAOPT` |
 | `Current_Ward` | TEXT | | Patient's current/latest ward code — fallback in the `Adm_Ward` derivation. Same code space as `Adm_Nrs_OU`. | `LW4W` | Same code space as `Adm_Nrs_OU` |
 | `Adm_Bed` | TEXT | | Bed code within ward. `NONE` or null both indicate no bed assigned. | `L004004` | Bed codes, or `NONE` / null |
@@ -63,8 +63,8 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 
 | `Adm_Src_1` | TEXT | | Code half of a code/description pair with `Adm_Reason`: `1`=A&E, `2`=SOC, `3`=Ward. | `1` | `1`, `2`, `3` |
 | `Adm_Cls` | TEXT | | Raw patient class code at admission — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`). | `SUB` | Codes defined in `pt_class_abc`: `A`, `AP`, `ARF`, `B1`, `B1P`, `B1RF`, `B2`, `B2P`, `B2RF`, `C`, `CP`, `CRF`, `NR`, `PTE`, `PTEP`, `PTRF`, `SUB`, `SUBP` |
 | `Wish_Cls` | TEXT | | Patient's requested class — same code space as `Adm_Cls`, typically the coarser tiers. | `C` | `C`, `B2`, `B1`, `A` |
-| `Adm_Trt_Cat` | TEXT | | Treatment/acuity category code — resolve via the `Acuity` sheet in `Class.xlsx` (maps to L1/L2/L3/EDTU bands). | `CL3` | Codes defined in the `Acuity` sheet of `Class.xlsx` |
-| `Adm_Acmd_Cat` | TEXT | | Accommodation category at admission. | `SUB` | `ICU`, `HD`, `ISO`, `A1`, `B1`, `B2`, `C`, `SUB`, `PTE`, `OTHER` |
+| `Adm_Trt_Cat` | TEXT | | Treatment/acuity category code — same code set as `inflight.Trt_Cat`; resolve via `inflight.md`'s Trt_Cat → Acuity table (maps to L1/L2/L3/EDTU bands). | `CL3` | See `inflight.md`'s Trt_Cat → Acuity table |
+| `Adm_Acmd_Cat` | TEXT | | Accommodation category at admission. **NGEMR-era values are unreliable** -- populated with the mapped patient-class label (e.g. `B2 - SUB`), not the true bed accommodation type. See the correction below before using this column for NGEMR-era rows. | `SUB` | `ICU`, `HD`, `ISO`, `A1`, `B1`, `B2`, `C`, `SUB`, `PTE`, `OTHER` (SAP era); mapped class label for NGEMR era -- see correction below |
 | `Adm_Status` | TEXT | | `A` = finalised, `P` = preliminary. Filter `Adm_Status <> 'P'` for finalised records (per `data-ontology.yaml`). | `A` | `A`, `P` |
 | `Adm_Reason` | TEXT | NGEMR only | Description half of the code/description pair with `Adm_Src_1` (see above). | `SOC` | `SOC`, `A&E`, `Ward` |
 | `Adm_Phy` / `Adm_Phy_Name` | TEXT | NGEMR only | Admitting physician staff ID / name. Staff PII — genericise in any shared examples. | `M14796F` / `NG, JING YU` (format only) | Staff ID / name |
@@ -77,7 +77,7 @@ The final exclusion filter (`NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 
 | `Disch_Time` | TIME | | `11:11:00` | `HH:MM:SS` |
 | `Disch_Cls` | TEXT | Patient class at discharge — same code space and lookup as `Adm_Cls`. | `SUB` | Same code space as `Adm_Cls` |
 | `Disch_Dept_OU` | TEXT | Discharging department code — same code space as `Adm_Dept_OU`. | `LSFAMED` | Same code space as `Adm_Dept_OU` |
-| `Disch_Acmd_Cat` | TEXT | Accommodation category at discharge — same code space as `Adm_Acmd_Cat`. | `SUB` | Same code space as `Adm_Acmd_Cat` |
+| `Disch_Acmd_Cat` | TEXT | Accommodation category at discharge — same code space as `Adm_Acmd_Cat`. **Shares the same NGEMR-era defect** (mapped class label, not true accommodation type) -- see the correction below. | `SUB` | Same code space as `Adm_Acmd_Cat` |
 | `Disch_Nrs_OU` | TEXT | Discharging ward code. | `LCENDO` | Ward codes |
 | `Disch_Bed` | TEXT | Bed code at discharge. `NONE` or null both indicate no bed assigned. | `L011017` | Bed codes, or `NONE` / null |
 | `Disch_Type` | TEXT | MOH discharge-type code — see canonical mapping below for consistent reporting across SAP/NGEMR eras. | `09` | See `Disch_Type` canonical mapping below |
@@ -145,6 +145,93 @@ Raw `Disch_Type_1` text differs by era for the same `Disch_Type` code. Derive a 
 | `prelim_flag` | TEXT | `N` = finalised, `Y` = preliminary. **Don't filter on this by default** — only add `WHERE "prelim_flag" = 'N'` when the user explicitly asks to exclude provisional records. | `N` | `N`, `Y` |
 | `cnt` | INTEGER | Always `1`. Row-counter helper column — `SUM(cnt)` = row count; used throughout the reporting pivots. | `1` | `1` |
 | `PAT_ENC_CSN_ID` | TEXT | NGEMR only | 12-digit NGEMR encounter identifier. | `100220440898` | High-cardinality identifier — one per episode |
+
+## Adm_Acmd_Cat / Disch_Acmd_Cat — NGEMR-era correction (bed_accom lookup)
+
+For NGEMR-era episodes (`Adm_Date >= 2023-01-01`), both `Adm_Acmd_Cat` and
+`Disch_Acmd_Cat` are populated with the mapped patient-class label (e.g. `B2 - SUB`), not
+the true bed accommodation category -- don't use either directly for anything requiring
+the real accommodation type.
+
+Derive the correct value from `inflight`'s own `Accom_Category`, using a **last-recorded
+(as-of), not exact-date** lookup: a bed's accommodation category is a near-fixed physical
+property, so if `inflight` didn't record that exact bed on that exact date, the most
+recent earlier reading for that same bed is a reliable stand-in.
+
+```sql
+WITH bed_accom AS (
+  SELECT DISTINCT "Bed", "Inflight_Date", "Accom_Category"
+  FROM inflight
+)
+SELECT
+  a.*,
+  adm_ba."Accom_Category"   AS adm_accom_category_corrected,
+  disch_ba."Accom_Category" AS disch_accom_category_corrected
+FROM admission a
+LEFT JOIN LATERAL (
+  SELECT ba."Accom_Category"
+  FROM bed_accom ba
+  WHERE ba."Bed" = a."Adm_Bed" AND ba."Inflight_Date" <= a."Adm_Date"
+  ORDER BY ba."Inflight_Date" DESC
+  LIMIT 1
+) adm_ba ON true
+LEFT JOIN LATERAL (
+  SELECT ba."Accom_Category"
+  FROM bed_accom ba
+  WHERE ba."Bed" = a."Disch_Bed" AND ba."Inflight_Date" <= a."Disch_Date"
+  ORDER BY ba."Inflight_Date" DESC
+  LIMIT 1
+) disch_ba ON true
+```
+
+SAP-era `Adm_Acmd_Cat`/`Disch_Acmd_Cat` are assumed reliable as-is and don't need this
+correction. Use `COALESCE(adm_ba."Accom_Category", a."Adm_Acmd_Cat")` (and the discharge
+equivalent) when a fallback is needed -- this only fires for a bed with **no `inflight`
+reading at all before the target date** (e.g. a bed newly commissioned that day), a much
+narrower gap than the exact-date-match approach: it also resolves `inflight.md`'s same-day
+top-up union, since a same-day admit+discharge case's bed will normally still have earlier
+`inflight` history to carry forward, even though it has no `inflight` row on that exact
+date. See `inflight.md`'s top-up section for how this applies there.
+
+## Adm_Dept_OU / Dept_OU — department mapping (Subspec)
+
+Same code space as `discharge.Adm_Dept_OU`/`Dept_OU`.
+
+| Dept_OU | Dept_Name |
+|---|---|
+| `LSFAGS` | Fast General Surgery |
+| `LSFAMED` | Fast Medicine |
+| `LSCHROGS` | Chronic General Surgery |
+| `LSCHRO` | Chronic |
+| `LSPALL` | Palliative Care |
+| `LSWELL` | Wellness |
+| `LSWEGYNA` | Wellness Gynaecology |
+| `LSANAE` | Anaesthesia |
+| `LSUCC` | Urgent Care |
+| `LSHAOPT` | HA Opthalmology |
+| `LSHAENT` | HA Otolaryngology |
+| `LSHAOMS` | HA Oral Maxil Surg |
+| `LSHAPERI` | HA Periodontics |
+| `LSHAPROS` | HA Prosthodontics |
+| `LSHAENDO` | HA Endodontics |
+| `LSHAGDEN` | HA General Dentistry |
+| `LSHAGDGD` | HA Geriatric Dentistry_PG |
+| `LSHADEN` | HA Dental Services |
+| `LSHAGERI` | HA Geriatric Medicine |
+| `LSHAPSYM` | HA Psychological Meds |
+| `LSHAORTH` | HA General Orthopaedic |
+| `LSHAAREC` | HA Adult Reconstruction |
+| `LSEDTU` | Extended Diag Treatment |
+| `LSFARHM` | Fast Rehabilitation Med |
+| `LSHARHM` | HA Rehabilitation Med |
+| `LSHAURO` | HA Urology |
+| `LSFAVAS` | Fast Vascular Surgery |
+| `LSCHCACA` | Chronic Cardiology |
+| `LSCHPLS` | Plastic Surgery |
+| `LSHAHRM` | Hand Surgery |
+| `LSFATHO` | Fast Thoracic Surgery |
+| `LSFANS` | Fast Neurosurgery |
+| `LSAMBS` | Ambulatory Services |
 
 ## Ward exclusions
 

@@ -14,6 +14,25 @@ Before writing any SQL:
 4. If the query involves patient class, residency, or paying status, also read `references/pt-class-lookup.md`.
 5. Inspect the live schema with `describe_table` when a requested field or type is uncertain.
 
+## Base-query sanity check
+
+Build every period query as a base CTE first, using only the table's standard filters plus
+the requested date range — no user-specific slicing yet:
+
+```sql
+WITH base AS (
+  SELECT * FROM <table>
+  WHERE <standard data-ontology.yaml filters> AND <date field> BETWEEN <start> AND <end>
+)
+SELECT COUNT(*) FROM base;  -- or SUM(<primary metric>) FROM base
+```
+
+Then apply the user's filters/grouping/nested logic **on top of `base`**, not by rewriting
+the query from scratch. The full rationale, the reconciliation target
+(`references/ah-yearly-benchmarks.json` or `scripts/validate_<table>_dashboard.py`), and the
+skip condition are all in `data-ontology.yaml`'s `base_totals_first` global rule — read it
+there rather than here, so this stays the one place that logic is written.
+
 ## Fail-closed reporting gate
 
 Treat historical operational reporting as a low-freedom workflow. Never replace missing,
@@ -46,8 +65,3 @@ Before presenting a chart, dashboard, or mapped result for any table in
 5. When a direct SQL result is too large, use the SQL-export operation to retrieve the
    complete result as a file, then run the matching validator on that export -- never a
    preview, partial mapping, or manually reconstructed rows.
-
-Adding QC coverage for a new table requires no change to this file: confirm the table's
-entry in `data-ontology.yaml`, add a `validate_<table>_dashboard.py` to `scripts/`
-following the existing validators' shape, and add that table's section to
-`references/ah-yearly-benchmarks.json` if it has a locked annual benchmark.

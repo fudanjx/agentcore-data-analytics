@@ -42,14 +42,14 @@ Note: several columns hold the same information as their `admission` table count
 |---|---|---|---|---|
 | `Adm_Date` | TIMESTAMP | Admission date. | `2024-10-24` | Date |
 | `Adm_Time` | TIME | Admission time. | `08:03:00` | `HH:MM:SS` |
-| `Adm_Dept_OU` | TEXT | Admitting department code — code half of the pair with `Adm_Dept_OU_Text`. Resolve via the `Subspec` sheet in `Class.xlsx`. | `LSFAMED` | Codes defined in the `Subspec` sheet of `Class.xlsx` |
+| `Adm_Dept_OU` | TEXT | Admitting department code — code half of the pair with `Adm_Dept_OU_Text`. Same code space as `admission.Adm_Dept_OU` — resolve via `admission.md`'s Subspec mapping table. | `LSFAMED` | See `admission.md`'s Subspec mapping table |
 | `Adm_Dept_OU_Text` | TEXT | Admitting department name — description half of the pair with `Adm_Dept_OU`. Can differ from `Dept_OU`/`Disch_Dept_OU_Text` (below) when the patient's department changed during the stay. | `Fast Medicine` | Free text |
 | `Adm_Nurs_OU` | TEXT | Admitting ward code — code half of the pair with `Adm_Nurs_OU_Text`. Can differ from `Nrs_OU` (below) when the patient's ward changed during the stay. | `LW13W` | Ward codes |
 | `Adm_Nurs_OU_Text` | TEXT | Admitting ward name — description half of the pair with `Adm_Nurs_OU`. | `Alex Ward 13` | Free text |
 | `Adm_Bed` | TEXT | Bed code at admission. `NONE` or null both indicate no bed assigned. | `L004004` | Bed codes, or `NONE` / null |
 | `Adm_Type` | TEXT | Admission route/type code — same code set as `admission.Adm_Type`. | `EM` | `DI`, `DO`, `DS`, `EL`, `EM`, `ES`, `RA`, `SD`, `SO`, `TA` |
 | `Adm_Class` | TEXT | Raw patient class at admission — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`). Can differ from `Disch_Class` (below) when the patient's class changed during the stay. | `SUB` | Codes defined in `pt_class_abc` |
-| `Adm_Trt_Cat` | TEXT | Treatment/acuity category at admission — resolve via the `Acuity` sheet in `Class.xlsx`. Can differ from `Trt_Cat` (below) when acuity changed during the stay. | `CL3` | Codes defined in the `Acuity` sheet of `Class.xlsx` |
+| `Adm_Trt_Cat` | TEXT | Treatment/acuity category at admission — same code set as `inflight.Trt_Cat`; resolve via `inflight.md`'s Trt_Cat → Acuity table. Can differ from `Trt_Cat` (below) when acuity changed during the stay. | `CL3` | See `inflight.md`'s Trt_Cat → Acuity table |
 | `Adm_Status` | TEXT | Admission status. Only `A` (`Actual`) observed for this table. | `A` | `A` |
 | `Adm_Status_Text` | TEXT | Description half of the pair with `Adm_Status`. | `Actual` | `Actual` |
 | `Adm_Physician` | TEXT | Admitting physician staff ID — code half of the pair with `Admitting_Physician_Name`. Staff PII. | `M18760G` (format only) | Staff ID |
@@ -68,7 +68,7 @@ Note: several columns hold the same information as their `admission` table count
 | `Disch_Nrs_OU_Text` | TEXT | Discharging ward name — description half of the pair with `Nrs_OU`. Casing/spacing varies by era for the same ward (e.g. `ALEX WARD 12` vs `Alex Ward 12`) — normalise before grouping directly. | `Alex Ward 4` | Free text |
 | `Disch_Bed` | TEXT | Bed code at discharge. `NONE` or null both indicate no bed assigned. | `L011017` | Bed codes, or `NONE` / null |
 | `Disch_Class` | TEXT | Raw patient class at discharge — resolve through `pt_class_abc`. | `SUB` | Codes defined in `pt_class_abc` |
-| `Trt_Cat` | TEXT | Treatment/acuity category at discharge — resolve via the `Acuity` sheet in `Class.xlsx`. Identical to `Discharge_Acuity_Level` (below) — use one, not both. | `CL3` | Codes defined in the `Acuity` sheet of `Class.xlsx` |
+| `Trt_Cat` | TEXT | Treatment/acuity category at discharge — same code set as `inflight.Trt_Cat`; resolve via `inflight.md`'s Trt_Cat → Acuity table. Identical to `Discharge_Acuity_Level` (below) — use one, not both. | `CL3` | See `inflight.md`'s Trt_Cat → Acuity table |
 | `Discharge_Acuity_Level` | TEXT | Alias of `Trt_Cat` — always the same value. Kept for backward compatibility only. | `CL3` | Same values as `Trt_Cat` |
 | `Disch_Status` | TEXT | Discharge status. Filter `Disch_Status = 'A'` for finalised discharge records — part of the standard filter set alongside `Adm_Type` and `Nrs_OU` below. | `A` | `A` |
 | `Disch_Type` | TEXT | MOH discharge-type code — see canonical mapping below for consistent reporting across SAP/NGEMR eras. Same code set as `admission.Disch_Type`. | `09` | See `Disch_Type` canonical mapping below |

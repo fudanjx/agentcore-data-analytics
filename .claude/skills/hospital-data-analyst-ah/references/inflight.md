@@ -40,15 +40,32 @@ UNION ALL
 SELECT d."Nrs_OU"        AS "Ward",
        d."Disch_Date"    AS "Inflight_Date",
        d."cnt",
-       a."Disch_Acmd_Cat" AS "Accom_Category",
+       COALESCE(ba."Accom_Category", a."Disch_Acmd_Cat") AS "Accom_Category",
        d."Disch_Class"   AS "Class",
        d."Trt_Cat"       AS "Trt_Cat"
 FROM discharge d
 JOIN admission a ON d."PAT_ENC_CSN_ID" = a."PAT_ENC_CSN_ID"
+LEFT JOIN LATERAL (
+  SELECT bo."Accom_Category"
+  FROM (SELECT DISTINCT "Bed", "Inflight_Date", "Accom_Category" FROM inflight) bo
+  WHERE bo."Bed" = d."Disch_Bed" AND bo."Inflight_Date" <= d."Disch_Date"
+  ORDER BY bo."Inflight_Date" DESC
+  LIMIT 1
+) ba ON true
 WHERE d."Adm_Date" = d."Disch_Date"
   AND d."Adm_Type" IN ('EM','EL','SD','DI','TA','RA')
   AND d."Nrs_OU" NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT','LCUCC')
 ```
+
+`Accom_Category` here now comes from the `bed_accom` last-recorded lookup (see
+`admission.md`'s Adm_Acmd_Cat / Disch_Acmd_Cat correction) on `Disch_Bed`/`Disch_Date`,
+falling back to admission's `Disch_Acmd_Cat` only when that bed has no `inflight` history
+at all before the discharge date -- this resolves the case that the exact-date join can't
+reach (a same-day case never has an `inflight` row on its own date by construction), since
+the bed will normally still have *earlier* `inflight` history to carry forward. The
+`JOIN admission` is now only needed for the `Disch_Acmd_Cat` fallback and `Trt_Cat`
+sourcing note above -- it could be dropped if that fallback is ever deemed unnecessary, but
+left in for now.
 
 Add `AND "prelim_flag" = 'N'` (both the `inflight` side and the `d.`/discharge side) only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
 
@@ -175,7 +192,25 @@ Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provis
 
 ## Lodger identification
 
-Patient whose accommodation class differs from their entitled class. Production first backfills blank/`OTHER` `Accom_Category` from the ward's default class (`Ward_cls` sheet in `Class.xlsx`), then compares against the **looked-up** `Class_abc` (not the raw `Class` code):
+Patient whose accommodation class differs from their entitled class. Production first backfills blank/`OTHER` `Accom_Category` from the ward's default class below, then compares against the **looked-up** `Class_abc` (not the raw `Class` code):
+
+| Ward | Ward_cls |
+|---|---|
+| `LW2W` | `C` |
+| `LW3W` | `C` |
+| `LW4W` | `B2` |
+| `LW5W` | `B2` |
+| `LW7W` | `B1` |
+| `LW8ISO` | `ISO` |
+| `LW9W` | `ISO` |
+| `LW10W` | `B2` |
+| `LW11W` | `C` |
+| `LW12W` | `B2` |
+| `LW13W` | `C` |
+| `LWASW` | `ASW` |
+| `LWEDTU` | `EDTU` |
+| `LWICU1` | `ICU` |
+| `LWICU2` | `ICU` |
 
 ```sql
 WHERE "Accom_Category" IN ('A1','B1','B2')
