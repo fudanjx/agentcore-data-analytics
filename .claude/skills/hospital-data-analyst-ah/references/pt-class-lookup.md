@@ -5,7 +5,7 @@ description: Shared patient class and residency lookup for all ah-analytics tabl
 
 # AH Analytics — Patient Class & Residency Lookup (`pt_class_abc`)
 
-All five clinical tables (`outpatient`, `admission`, `discharge`, `inflight`, `procedure`) store a raw class code column (`Class`, `Adm_Cls`, `Disch_Class`, `Class`, `Cls` respectively). These must be resolved through this lookup before any class-based reporting.
+All five clinical tables (`outpatient`, `admission`, `discharge`, `inflight`, `procedure`) store a raw class code column (`class`, `adm_cls`, `disch_class`, `class`, `cls` respectively). These must be resolved through this lookup before any class-based reporting.
 
 ## Full mapping table
 
@@ -68,8 +68,8 @@ END AS "Class_abc_MOH"
 ```
 
 Replace `raw_class_col` with the table-specific column name:
-- `outpatient` → `"Class"`
-- `admission` → `"Adm_Cls"`
-- `discharge` → `"Disch_Class"` or `"Adm_Class"`
-- `inflight` → `"Class"`
-- `procedure` → `"Cls"`
+- `outpatient` → `class`
+- `admission` → `adm_cls`
+- `discharge` → `disch_class` or `adm_class`
+- `inflight` → `class`
+- `procedure` → `cls`
