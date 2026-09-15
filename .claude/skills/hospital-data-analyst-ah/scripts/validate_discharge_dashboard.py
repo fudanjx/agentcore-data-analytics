@@ -58,20 +58,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", required=True, type=Path, help="Classified aggregate CSV")
     parser.add_argument("--audit", required=True, type=Path, help="QC audit JSON")
     parser.add_argument(
-        "--benchmark",
-        action="append",
-        default=[],
-        metavar="YEAR=TOTAL",
-        help="Expected annual discharges total; repeat as needed.",
-    )
-    parser.add_argument(
         "--benchmark-file",
         type=Path,
         default=None,
-        help="references/ah-yearly-benchmarks.json — the 'discharge' section is "
-        "{year: {discharges}} extracted from the official yearly inpatient reports "
-        "(TABLE 1.6). discharges merges into --benchmark; only checked for years "
-        "within the requested month range.",
+        help="references/ah-yearly-benchmarks.json — the 'discharge' section's "
+        "'monthly' block is {metric: {'YYYY-MM': value}} for discharges, extracted "
+        "from the official yearly inpatient reports (TABLE 1.6). The metric is "
+        "checked by summing its monthly series over exactly the requested "
+        "--start-month..--end-month range — works for any range (a partial year, a "
+        "full year, or one spanning a year boundary), not just a full calendar year. "
+        "Missing monthly coverage for the full requested range is skipped with a "
+        "warning, not an error.",
     )
     parser.add_argument("--fail-on-unmapped", action="store_true")
     return parser.parse_args()
@@ -94,28 +91,38 @@ def month_sequence(start: str, end: str) -> list[str]:
     return result
 
 
-def parse_benchmarks(values: list[str]) -> dict[str, int]:
-    result: dict[str, int] = {}
-    for value in values:
-        try:
-            year, total = value.split("=", 1)
-            if len(year) != 4:
-                raise ValueError
-            result[year] = int(total.replace(",", ""))
-        except ValueError as exc:
-            raise ValueError(f"invalid benchmark {value!r}; use YEAR=TOTAL") from exc
-    return result
-
-
-def load_benchmark_file(path: Path, table: str) -> dict[str, dict[str, int]]:
-    """Pull one table's section out of the consolidated ah-yearly-benchmarks.json
-    (sectioned {table: {year: {...}}} so admission/discharge/etc. share one file)."""
+def load_monthly_benchmarks(path: Path, table: str) -> dict[str, dict[str, int]]:
+    """Pull one table's "monthly" benchmark series out of the consolidated
+    ah-yearly-benchmarks.json: {metric: {"YYYY-MM": value}}. The per-year annual
+    totals alongside it in the file are a human-readable summary only — the
+    validator only reads "monthly", since summing the right months covers the
+    full-year case too plus anything narrower or spanning a year boundary.
+    Missing/absent monthly data means every check against it is skipped with a
+    warning, never an error."""
     data = json.loads(path.read_text(encoding="utf-8"))
-    table_data = data.get(table, {})
-    for year, metrics in table_data.items():
-        if len(year) != 4 or not isinstance(metrics, dict):
-            raise ValueError(f"{path}: malformed entry for {table}.{year!r}")
-    return table_data
+    monthly = data.get(table, {}).get("monthly", {})
+    for metric, series in monthly.items():
+        if not isinstance(series, dict):
+            raise ValueError(f"{path}: {table}.monthly.{metric!r} must be an object")
+    return monthly
+
+
+def monthly_benchmark_total(
+    monthly: dict[str, dict[str, int]], metric: str, months: list[str]
+) -> int | None:
+    """Sum a benchmark metric's monthly series over exactly the requested months.
+    Returns None (never 0) if the metric has no monthly series at all, or is
+    missing any one of the requested months — the caller skips the check with
+    a warning rather than comparing actual against a partial/wrong sum."""
+    series = monthly.get(metric)
+    if series is None:
+        return None
+    total = 0
+    for m in months:
+        if m not in series:
+            return None
+        total += series[m]
+    return total
 
 
 def integral_count(raw: str, row_number: int, column: str) -> int:
@@ -152,14 +159,9 @@ def main() -> int:
 
     try:
         expected_months = month_sequence(args.start_month, args.end_month)
-        benchmarks = parse_benchmarks(args.benchmark)
-        file_benchmarks = (
-            load_benchmark_file(args.benchmark_file, "discharge") if args.benchmark_file else {}
+        monthly_benchmarks = (
+            load_monthly_benchmarks(args.benchmark_file, "discharge") if args.benchmark_file else {}
         )
-        requested_years = {m[:4] for m in expected_months}
-        for year, metrics in file_benchmarks.items():
-            if year in requested_years and "discharges" in metrics:
-                benchmarks.setdefault(year, metrics["discharges"])
         mapping_count, valid_class_abc = load_class_mapping(args.class_mapping)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
         print(f"QC FAILED: {exc}", file=sys.stderr)
@@ -254,10 +256,23 @@ def main() -> int:
     source_total = sum(monthly_total.values())
     if paying_total + subsidised_total + unclassified_class_total != source_total:
         errors.append("paying + subsidised + unclassified-class does not equal source total")
-    for year, expected in benchmarks.items():
-        actual = annual_total.get(year, 0)
-        if actual != expected:
-            errors.append(f"{year} discharges total {actual} != benchmark {expected}")
+
+    # The month-coverage gate above already forces the CSV to contain exactly
+    # the requested months, so the metric's grand total is directly comparable
+    # to the benchmark's monthly series summed over that same range — no more
+    # per-year bucketing or "is this a full calendar year" guesswork needed.
+    expected = monthly_benchmark_total(monthly_benchmarks, "discharges", expected_months)
+    if expected is None:
+        if monthly_benchmarks:
+            warnings.append(
+                f"no monthly benchmark data for discharges covering the full "
+                f"requested range {expected_months[0]}..{expected_months[-1]} -- skipped"
+            )
+    elif source_total != expected:
+        errors.append(
+            f"discharges total {source_total} != benchmark {expected} "
+            f"(summed {expected_months[0]}..{expected_months[-1]})"
+        )
 
     if unmapped_classes:
         warnings.append(
@@ -285,7 +300,6 @@ def main() -> int:
         "unclassified_adm_types": sorted(unclassified_types),
         "monthly_totals": dict(sorted(monthly_total.items())),
         "annual_totals": dict(sorted(annual_total.items())),
-        "benchmarks": benchmarks,
         "warnings": warnings,
         "errors": errors,
     }
