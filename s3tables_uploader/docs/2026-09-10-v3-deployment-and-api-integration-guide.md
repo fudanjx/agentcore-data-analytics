@@ -110,9 +110,15 @@ queue fallback or leases feature flag.
 
 ### Skill bundle storage
 
-The non-versioned `/api/skills/files` endpoints store only the selected table
-bucket's skill bundle under
-`s3://agentcore-harness-dev/skills/<table-bucket-name>/`. The API task role is
+The source now exposes `/api/skills/versions` for immutable ZIP snapshots under
+`s3://agentcore-harness-dev/skills/<table-bucket-name>/`. A ZIP may contain
+`SKILL.md` at its root or inside one enclosing folder. The browser lists flat
+ZIP objects with a timestamp-derived upload time, accepts one ZIP per upload,
+and supports download and confirmed delete. Older loose skill files remain
+available through the compatibility `/api/skills/files` routes. These snapshots
+are archives; the consuming runtime does not automatically unpack or activate
+one. The published image listed above predates this source change and needs a
+new API image release before the routes are live. The API task role is
 limited to listing that `skills/` prefix and reading, writing, or deleting its
 objects. The worker, dispatcher, and Glue roles have no skill-bundle access.
 The `S3_UPLOADER_SKILL_BUNDLE_*` variables are the only supported runtime
@@ -172,6 +178,8 @@ completion from an ECS task lifecycle.
 | `/api/rollbacks` | POST | Admin/authorised confirmed rollback. |
 | `/api/skills/files` | GET/POST/DELETE | Skill list, upload, confirmed delete. |
 | `/api/skills/files/download` | GET | Skill file download. |
+| `/api/skills/versions` | GET/POST/DELETE | ZIP snapshot list, upload, confirmed delete. |
+| `/api/skills/versions/download` | GET | ZIP snapshot download. |
 
 Use Singapore timezone (`Asia/Singapore`) when rendering card and history
 timestamps. Do not calculate table row counts in the browser.
