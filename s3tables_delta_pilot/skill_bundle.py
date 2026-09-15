@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import json
+import io
 import mimetypes
 import os
 import re
+import uuid
+import zipfile
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from urllib.parse import quote
 
@@ -19,6 +23,9 @@ DEFAULT_DESTINATION_PREFIX = "skills"
 MAX_FILES = 500
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 250 * 1024 * 1024
+MAX_ZIP_BYTES = 50 * 1024 * 1024
+_VERSION_RE = re.compile(r"^(?P<stamp>\d{8}T\d{9}Z)-[0-9a-f]{8}\.zip$")
+_FLAT_ZIP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.zip$", re.IGNORECASE)
 _BUCKET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<header>.*?)\r?\n---[ \t]*(?P<rest>\r?\n.*|\Z)",
@@ -192,6 +199,98 @@ def list_skill_files(table_bucket_arn: str) -> dict:
         "destination_uri": destination_uri,
         "files": sorted(files, key=lambda item: item["path"].casefold()),
     }
+
+
+def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -> None:
+    """Require a complete, safe skill ZIP without expanding it onto disk."""
+    if not filename.lower().endswith(".zip") or not content or len(content) > MAX_ZIP_BYTES:
+        raise SkillBundleError("Upload one ZIP file of at most 50 MB")
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+            if not entries or len(entries) > MAX_FILES:
+                raise SkillBundleError(f"A skill ZIP must contain 1 to {MAX_FILES} files")
+            seen: set[str] = set()
+            total = 0
+            for entry in entries:
+                path = _safe_relative_path(entry.filename)
+                if path in seen or entry.flag_bits & 1 or (entry.external_attr >> 16) & 0o170000 == 0o120000:
+                    raise SkillBundleError("The skill ZIP contains a duplicate, encrypted, or linked file")
+                seen.add(path)
+                total += entry.file_size
+                if entry.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
+                    raise SkillBundleError("The skill ZIP expands beyond the allowed size")
+            skill_paths = [path for path in seen if path == "SKILL.md" or (path.count("/") == 1 and path.endswith("/SKILL.md"))]
+            if len(skill_paths) != 1:
+                raise SkillBundleError("The skill ZIP must contain one SKILL.md at the root or inside one enclosing folder")
+            skill_path = skill_paths[0]
+            if skill_path != "SKILL.md":
+                folder = skill_path.split("/", 1)[0]
+                if any(not path.startswith(f"{folder}/") for path in seen):
+                    raise SkillBundleError("All files in a wrapped skill ZIP must share one enclosing folder")
+            _normalise_skill_frontmatter(archive.read(skill_path), table_bucket_name(table_bucket_arn))
+            for entry in entries:
+                # Reading verifies CRCs and rejects corrupt ZIP members before publication.
+                if entry.filename != skill_path:
+                    archive.read(entry)
+    except (zipfile.BadZipFile, EOFError, RuntimeError, OSError) as error:
+        raise SkillBundleError("The uploaded file is not a valid ZIP archive") from error
+
+
+def version_location(table_bucket_arn: str, filename: str) -> tuple[str, str]:
+    if not _FLAT_ZIP_RE.fullmatch(filename):
+        raise SkillBundleError("Invalid skill version filename")
+    bucket_name = table_bucket_name(table_bucket_arn)
+    bucket, prefix, _ = _destination(bucket_name)
+    return bucket, f"{prefix}/{filename}"
+
+
+def list_skill_versions(table_bucket_arn: str) -> dict:
+    bucket_name = table_bucket_name(table_bucket_arn)
+    bucket, prefix, uri = _destination(bucket_name)
+    versions = []
+    try:
+        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
+            for item in page.get("Contents", []):
+                filename = item.get("Key", "").removeprefix(f"{prefix}/")
+                if not _FLAT_ZIP_RE.fullmatch(filename):
+                    continue
+                match = _VERSION_RE.fullmatch(filename)
+                if match:
+                    uploaded = datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
+                elif filename[:-4].isdigit() and len(filename[:-4]) == 14:
+                    try:
+                        uploaded = datetime.strptime(filename[:-4], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
+                    except ValueError:
+                        uploaded = item.get("LastModified")
+                elif filename[:-4].isdigit() and len(filename[:-4]) in {10, 13}:
+                    try:
+                        uploaded = datetime.fromtimestamp(int(filename[:-4]) / (1000 if len(filename[:-4]) == 13 else 1), tz=timezone.utc)
+                    except (OverflowError, ValueError):
+                        uploaded = item.get("LastModified")
+                else:
+                    uploaded = item.get("LastModified")
+                versions.append({"filename": filename, "uploaded_at": uploaded.isoformat() if uploaded else None, "size": int(item.get("Size", 0))})
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to list skill versions from S3", 502) from error
+    return {"skill_name": bucket_name, "destination_uri": uri, "versions": sorted(versions, key=lambda item: (item["uploaded_at"] or "", item["filename"]), reverse=True)}
+
+
+def publish_version(table_bucket_arn: str, user_id: str, filename: str, content: bytes) -> dict:
+    validate_version_zip(table_bucket_arn, filename, content)
+    bucket_name = table_bucket_name(table_bucket_arn)
+    bucket, prefix, uri = _destination(bucket_name)
+    uploaded = datetime.now(timezone.utc)
+    snapshot = f"{uploaded.strftime('%Y%m%dT%H%M%S')}{uploaded.microsecond // 1000:03d}Z-{uuid.uuid4().hex[:8]}.zip"
+    try:
+        s3.put_object(
+            Bucket=bucket, Key=f"{prefix}/{snapshot}", Body=content,
+            ContentType="application/zip", ServerSideEncryption="AES256", IfNoneMatch="*",
+            Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256], "original-filename": quote(filename, safe="._-")[:256]},
+        )
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to upload the skill version to S3", 502) from error
+    return {"skill_name": bucket_name, "destination_uri": uri, "filename": snapshot, "uploaded_at": uploaded.isoformat(), "size": len(content)}
 
 
 def skill_file_location(table_bucket_arn: str, path: str) -> tuple[str, str, str]:

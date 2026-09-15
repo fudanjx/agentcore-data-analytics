@@ -1993,6 +1993,63 @@ def list_skill_files(table_bucket_arn: str, user: PilotUser = Depends(_current_u
         raise HTTPException(error.status_code, str(error)) from error
 
 
+@app.get("/api/skills/versions")
+def list_skill_versions(table_bucket_arn: str, user: PilotUser = Depends(_current_user)):
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        return skill_bundle.list_skill_versions(table_bucket_arn)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.post("/api/skills/versions", status_code=201)
+async def upload_skill_version(
+    table_bucket_arn: str = Form(),
+    file: UploadFile = File(),
+    user: PilotUser = Depends(_current_user),
+):
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        content = await file.read(skill_bundle.MAX_ZIP_BYTES + 1)
+        return skill_bundle.publish_version(table_bucket_arn, user.user_id, file.filename or "", content)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+
+
+@app.get("/api/skills/versions/download")
+def download_skill_version(table_bucket_arn: str, filename: str, user: PilotUser = Depends(_current_user)):
+    _require_bucket_access(user, table_bucket_arn)
+    try:
+        bucket, key = skill_bundle.version_location(table_bucket_arn, filename)
+        result = skill_bundle.s3.get_object(Bucket=bucket, Key=key)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        raise HTTPException(404 if code in {"404", "NoSuchKey", "NotFound"} else 502, "Unable to download the skill version") from error
+    return StreamingResponse(
+        _stream_s3_object(result["Body"]), media_type="application/zip",
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"},
+    )
+
+
+@app.delete("/api/skills/versions")
+def delete_skill_version(payload: DeleteSkillFileRequest, user: PilotUser = Depends(_current_user)):
+    _require_bucket_access(user, payload.table_bucket_arn)
+    if not payload.confirm:
+        raise HTTPException(422, "Confirm deletion before removing a skill version")
+    try:
+        bucket, key = skill_bundle.version_location(payload.table_bucket_arn, payload.path)
+        skill_bundle.s3.head_object(Bucket=bucket, Key=key)
+        skill_bundle.s3.delete_object(Bucket=bucket, Key=key)
+    except skill_bundle.SkillBundleError as error:
+        raise HTTPException(error.status_code, str(error)) from error
+    except ClientError as error:
+        code = error.response.get("Error", {}).get("Code", "")
+        raise HTTPException(404 if code in {"404", "NoSuchKey", "NotFound"} else 502, "Unable to delete the skill version") from error
+    return {"deleted_filename": payload.path}
+
+
 @app.post("/api/skills/files")
 async def upload_skill_files(
     table_bucket_arn: str = Form(),

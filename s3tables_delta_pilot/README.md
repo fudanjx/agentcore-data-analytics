@@ -97,16 +97,18 @@ service starts. The service role therefore needs scoped `s3:ListBucket`,
 ## Skill-bundle upload
 
 After selecting an authorized S3 Tables bucket, an administrator or assigned
-editor can browse the bucket's managed skill prefix as a folder tree. Each file
-shows its name, size, and S3 last-modified time and can be downloaded or
-deleted. This pilot does not call Dify or generate skill content.
+editor can browse all ZIP versions directly below the bucket's managed skill
+prefix. The panel shows each ZIP filename, size, and upload time (decoded from
+the snapshot filename when available), with download and confirmed delete.
 
-Users may upload a complete folder or a changed subset of files. Every relative
-path is validated; a root `SKILL.md`, when uploaded, must have valid UTF-8
-frontmatter and its `name` is forced to the selected table-bucket name.
-Resources upload before `SKILL.md`. An existing relative path is overwritten;
-a new relative path is added. Files omitted from an upload are retained and can
-only be removed through the confirmed per-file delete action.
+The panel accepts one ZIP containing `SKILL.md` at the ZIP root or inside one
+enclosing folder, along with safe resource paths under that folder.
+It checks ZIP integrity, size limits, and valid UTF-8 skill frontmatter before
+upload. Each upload is saved as a new UTC timestamped ZIP snapshot, for example
+`20260915T101112123Z-a1b2c3d4.zip`, so previous versions remain intact.
+Existing loose skill files remain outside this version explorer. The current
+runtime sync downloads ZIPs as objects and does not activate or unpack a
+selected snapshot; runtime activation needs a separate consumer change.
 
 Configure the S3 destination (defaults shown):
 
@@ -119,15 +121,10 @@ For a table bucket named `ah-soc-delta-pilot`, the destination and normalized
 frontmatter are:
 
 ```text
-s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/SKILL.md
+s3://agentcore-harness-dev/skills/ah-soc-delta-pilot/20260915T101112123Z-a1b2c3d4.zip
 ```
 
-```yaml
----
-name: ah-soc-delta-pilot
-description: ...
----
-```
+The legacy `/api/skills/files` API still manages loose files for compatibility.
 
 The backend rechecks bucket authorization before every list, transfer, and
 delete action. Uploads are limited to 500 files, 50 MB per file, and 250 MB

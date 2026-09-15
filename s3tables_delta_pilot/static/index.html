@@ -56,16 +56,16 @@
       <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
       <details id="skill-builder" class="skill-builder" hidden>
         <summary><strong>Upload a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
-        <p class="hint">Browse the files currently stored for the selected S3 Tables bucket. Uploading an existing relative path overwrites only that file; a new path is added without changing other files. A root <code>SKILL.md</code>, when uploaded, is checked and its <code>name</code> is aligned to this table-bucket name.</p>
+        <p class="hint">Upload a complete skill ZIP with <code>SKILL.md</code> at the ZIP root or inside one enclosing folder. Each upload is saved as a new timestamped snapshot; previous ZIP versions remain available for download.</p>
         <div class="skill-explorer-toolbar">
-          <strong>Skill files</strong>
-          <button id="refresh-skill-files" class="secondary" type="button">Refresh files</button>
+          <strong>Skill ZIP versions</strong>
+          <button id="refresh-skill-files" class="secondary" type="button">Refresh versions</button>
         </div>
-        <p id="skill-location" class="hint">Select an S3 Tables bucket to view its skill files.</p>
+        <p id="skill-location" class="hint">Select an S3 Tables bucket to view its skill versions.</p>
         <div id="skill-file-explorer" class="skill-file-explorer" aria-live="polite"></div>
-        <label for="skill-bundle-files">Skill bundle folder <input id="skill-bundle-files" type="file" webkitdirectory directory multiple></label>
+        <label for="skill-bundle-files">Skill ZIP file <input id="skill-bundle-files" type="file" accept=".zip,application/zip"></label>
         <div class="skill-actions">
-          <button id="upload-skill-bundle" type="button" disabled>Upload skill files</button>
+          <button id="upload-skill-bundle" type="button" disabled>Upload ZIP version</button>
           <p id="skill-bundle-status" class="operation-status" aria-live="polite"></p>
         </div>
       </details>
