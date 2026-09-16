@@ -15,6 +15,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY dify-server.py .
 COPY model_usage.py .
+COPY dependencies.py .
+COPY lifespan.py .
+COPY permissions.py .
 
 RUN adduser --disabled-password --gecos "" appuser
 USER appuser

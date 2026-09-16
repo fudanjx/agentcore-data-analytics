@@ -12,7 +12,6 @@ from pathlib import Path
 import boto3
 from strands import tool
 
-
 logger = logging.getLogger(__name__)
 BUCKET = os.environ.get("SKILLS_BUCKET", "").strip()
 PREFIX = os.environ.get("SKILLS_PREFIX", "").strip()
@@ -320,6 +319,8 @@ def _resolve_resource(skill_name: str, resource_path: str) -> Path:
         raise FileNotFoundError(f"Skill resource does not exist: {resource_path}")
     return candidate
 
+def get_skill_path_by_name(skill_name: str) -> Path:
+    return LOCAL_DIR.resolve() / skill_name
 
 def skill_resource_s3_location(skill_name: str, resource_path: str) -> tuple[str, str | None]:
     """Return an S3 object URI and optional ZIP member for a synced resource."""

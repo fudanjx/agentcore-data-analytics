@@ -18,7 +18,7 @@ file intentionally contains no OpenWebUI, native Dify App API, or file-upload
 proxy routes.
 """
 
-import base64
+import base64 # noqa: I001
 import json
 import logging
 import mimetypes
@@ -28,6 +28,7 @@ import re
 import threading
 import time
 import uuid
+from collections.abc import Iterable
 from contextlib import contextmanager
 from urllib.parse import urlparse
 
@@ -39,6 +40,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, StreamingResponse
 
 import model_usage
+from dependencies import DifyConnDep, NuhsConnDep
+from lifespan import lifespan
+from permissions import get_gateway_permissions_by_user_id
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("agentcore-dify-proxy")
@@ -150,7 +154,7 @@ _RUNTIME_INTERRUPTED_TEXT = (
     "Please retry the request."
 )
 
-app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0")
+app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0", lifespan=lifespan)
 
 _agentcore_control_client = None
 _s3_client = None
@@ -610,12 +614,14 @@ def _runtime_kwargs(
     runtime_arn: str,
     session_id: str,
     user_id: str,
+    user_gateway_permissions: Iterable[str],
 ) -> dict:
     """Build the request expected by an AgentCore Runtime backend."""
     payload = {
         "messages": messages,
         "chat_id": session_id,
         "model_item": {"info": {"user_id": user_id}},
+        "user_gateway_permissions": user_gateway_permissions
     }
     return {
         "agentRuntimeArn": runtime_arn,
@@ -665,9 +671,10 @@ def _stream_runtime_events(
     runtime_arn: str,
     session_id: str,
     user_id: str,
+    user_gateway_permissions: Iterable[str]
 ):
     """Yield Runtime events and periodic keepalives without replaying requests."""
-    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id)
+    kwargs = _runtime_kwargs(messages, runtime_arn, session_id, user_id, user_gateway_permissions)
     items: queue.Queue = queue.Queue(maxsize=256)
     stop_requested = threading.Event()
     state = {"body": None}
@@ -787,12 +794,13 @@ def _invoke_runtime_buffered(
     runtime_arn: str,
     session_id: str,
     user_id: str,
+    user_gateway_permissions: Iterable[str]
 ) -> _BufferedRuntimeResult:
     """Collect a Runtime SSE response for an OpenAI non-streaming request."""
     parts = []
     usage = None
     agent_steps = []
-    for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id):
+    for event in _stream_runtime_events(messages, runtime_arn, session_id, user_id, user_gateway_permissions):
         if isinstance(event, model_usage.Usage):
             usage = event
         elif isinstance(event, _RuntimeHeartbeat):
@@ -1609,6 +1617,7 @@ async def _build_completion(
     stream: bool,
     session_id: str,
     user_id: str,
+    user_gateway_permissions: Iterable[str],
     output_urls: bool = False,
 ):
     completion_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"
@@ -1640,6 +1649,7 @@ async def _build_completion(
                         backend_arn,
                         session_id,
                         user_id,
+                        user_gateway_permissions,
                     ),
                     backend_type,
                     session_id,
@@ -1657,6 +1667,7 @@ async def _build_completion(
             backend_arn,
             session_id,
             user_id,
+            user_gateway_permissions,
         )
         result_text = runtime_result.text
         usage = runtime_result.usage
@@ -1734,7 +1745,12 @@ def models_by_slug(slug: str):
 
 
 @app.post("/{slug}/v1/chat/completions")
-async def chat_completions_by_slug(slug: str, request: Request):
+async def chat_completions_by_slug(
+    slug: str,
+    request: Request,
+    dify_conn: DifyConnDep,
+    nuhs_conn: NuhsConnDep
+):
     backend = await run_in_threadpool(get_dify_backend, slug)
     if backend is None:
         return _error(404, "unknown_backend", f"Unknown Dify backend: {slug}")
@@ -1761,6 +1777,13 @@ async def chat_completions_by_slug(slug: str, request: Request):
         DIFY_OFFICE_SOURCE_PROFILE,
     )
 
+    # Get user permissions to be sent to Agentcore Runtime
+    user_gateway_permissions = await get_gateway_permissions_by_user_id(
+        dify_conn,
+        nuhs_conn,
+        user_id
+    )
+    
     try:
         return await _build_completion(
             messages=messages,
@@ -1772,6 +1795,7 @@ async def chat_completions_by_slug(slug: str, request: Request):
             session_id=session_id,
             user_id=user_id,
             output_urls=output_urls,
+            user_gateway_permissions=user_gateway_permissions
         )
     except Exception as error:
         logger.error("AgentCore error [%s]: %s", slug, error)

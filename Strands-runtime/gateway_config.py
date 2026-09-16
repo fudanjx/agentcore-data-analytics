@@ -75,6 +75,7 @@ def load_gateway_configs(raw: str | None = None) -> dict[str, GatewayConfig]:
     """Load optional Gateway mappings from JSON."""
     if raw is None:
         raw = os.environ.get(ENV_NAME)
+        print(raw)
     if not raw or not raw.strip():
         return {}
 
