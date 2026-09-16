@@ -99,11 +99,19 @@ permissions.
 
 ## Build
 
-With Docker Desktop running:
+On Windows PowerShell with Docker Desktop running:
 
-```bash
-./build_agentcore_bundle.sh ./dist/strands_runtime_gpt_v0.0.3.zip
+```powershell
+.\build_agentcore_bundle.ps1 `
+  -OutputPath .\dist\strands_runtime_gpt_v0.0.4.zip `
+  -Force
 ```
 
-The script creates a Linux ARM64/Python 3.13 bundle with entry point
+On macOS, Linux, WSL, or Git Bash:
+
+```bash
+./build_agentcore_bundle.sh ./dist/strands_runtime_gpt_v0.0.4.zip
+```
+
+Both scripts create a Linux ARM64/Python 3.13 bundle with entry point
 `strands_agent/main.py`.
