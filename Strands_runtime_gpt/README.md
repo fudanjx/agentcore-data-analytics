@@ -47,6 +47,33 @@ All remaining environment variables are copied from the active
 and Code Interpreter settings. Do not set the Singapore application inference
 profile here: GPT-5.6 Luna requires the Mantle Responses API, not Converse.
 
+## Versioned Agent Skill snapshots
+
+When `SKILLS_BUCKET` is configured, this runtime now supports the same
+versioned ZIP snapshot layout as `Strands_runtime`:
+
+```text
+skills/
+  domain-specialist/
+    20260915T101112123Z-a1b2c3d4.zip
+
+# Loose files remain supported:
+skills/domain-specialist/SKILL.md
+skills/domain-specialist/references/schema.md
+```
+
+For each skill directory, startup selects the newest ZIP by S3 `LastModified`,
+validates it, and extracts it into the local skill cache. A ZIP can contain
+`SKILL.md` at its root or inside one enclosing folder. If the newest snapshot
+is invalid, the runtime tries older snapshots and then falls back to loose
+files. Code Interpreter downloads the selected snapshot and extracts only the
+requested resource. A new snapshot becomes active after a runtime restart or
+redeploy.
+
+The defaults are 52,428,800 bytes for `SKILLS_MAX_OBJECT_BYTES` and
+262,144,000 bytes for `SKILLS_MAX_SYNC_BYTES`. The Code Interpreter execution
+role still needs `s3:GetObject` for the configured skills prefix.
+
 ## Bounded S3 Tables exports (GPT pilot)
 
 The shared S3 Tables Gateway continues to return small SQL results directly,
