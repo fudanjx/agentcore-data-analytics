@@ -364,7 +364,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                 code_interpreter.build_tools(
                     interpreter_session,
                     skill_resource_uri=(
-                        skills_sync.skill_resource_s3_uri if skills_enabled else None
+                        skills_sync.skill_resource_s3_location if skills_enabled else None
                     ),
                 )
             )

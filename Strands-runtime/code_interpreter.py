@@ -184,9 +184,31 @@ def _skill_resource_destination(skill_name: str, resource_path: str) -> str:
     return f"/tmp/skill-resource-{digest}-{filename or 'resource'}"
 
 
+def _zip_member_extract_code(archive_path: str, member_path: str, destination: str) -> str:
+    """Build Python code with JSON-quoted paths for one bounded ZIP member."""
+    return (
+        "import os, zipfile\n"
+        f"archive_path = {json.dumps(archive_path)}\n"
+        f"member_path = {json.dumps(member_path)}\n"
+        f"destination = {json.dumps(destination)}\n"
+        "try:\n"
+        "    with zipfile.ZipFile(archive_path) as archive, archive.open(member_path) as source, open(destination, 'wb') as target:\n"
+        "        copied = 0\n"
+        "        while chunk := source.read(1024 * 1024):\n"
+        "            copied += len(chunk)\n"
+        "            if copied > 52_428_800:\n"
+        "                raise ValueError('skill ZIP member exceeds 50 MiB')\n"
+        "            target.write(chunk)\n"
+        "    print('Skill resource extracted')\n"
+        "finally:\n"
+        "    if os.path.exists(archive_path):\n"
+        "        os.remove(archive_path)\n"
+    )
+
+
 def build_tools(
     session_id: str,
-    skill_resource_uri: Callable[[str, str], str] | None = None,
+    skill_resource_uri: Callable[[str, str], str | tuple[str, str | None]] | None = None,
 ) -> list:
     """Create Strands tools bound to one managed interpreter session."""
 
@@ -237,13 +259,15 @@ def build_tools(
         )
         async def stage_skill_resource(skill_name: str, resource_path: str) -> str:
             try:
-                uri = skill_resource_uri(skill_name, resource_path)
+                location = skill_resource_uri(skill_name, resource_path)
             except (OSError, ValueError) as error:
                 return f"Unable to stage skill resource: {error}"
+            uri, member_path = location if isinstance(location, tuple) else (location, None)
             destination = _skill_resource_destination(skill_name, resource_path)
+            archive_path = f"{destination}.snapshot.zip" if member_path else destination
             command = (
                 "aws s3 cp --only-show-errors "
-                f"{shlex.quote(uri)} {shlex.quote(destination)}"
+                f"{shlex.quote(uri)} {shlex.quote(archive_path)}"
             )
             result = await _invoke_tool(
                 session_id,
@@ -252,6 +276,13 @@ def build_tools(
             )
             if _tool_result_is_error(result):
                 return f"Unable to stage skill resource from {uri}: {result}"
+            if member_path:
+                extraction = await _invoke_tool(
+                    session_id, "executeCode",
+                    {"language": "python", "code": _zip_member_extract_code(archive_path, member_path, destination)},
+                )
+                if _tool_result_is_error(extraction):
+                    return f"Unable to extract skill resource from {uri}: {extraction}"
             return f"Skill resource staged at {destination}"
 
         tools.append(stage_skill_resource)

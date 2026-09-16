@@ -104,8 +104,8 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `SKILLS_BUCKET` | Empty | S3 bucket holding complete Agent Skill packages; required to enable skills |
 | `SKILLS_PREFIX` | Empty | Optional S3 skills prefix; empty means skills are stored at the bucket root |
 | `SKILLS_LOCAL_DIR` | `/tmp/strands-agent-skills` | Writable runtime cache |
-| `SKILLS_MAX_OBJECT_BYTES` | `50000000` | Maximum size of one downloaded skill object |
-| `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined size downloaded during one startup sync |
+| `SKILLS_MAX_OBJECT_BYTES` | `52428800` | Maximum compressed ZIP or individual extracted/loose resource size |
+| `SKILLS_MAX_SYNC_BYTES` | `262144000` | Maximum combined local skill resource size during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 `MODEL_ID` or `MODEL_ARN` must be configured. Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that optional capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
@@ -169,20 +169,19 @@ When memory is enabled, AgentCore Memory is the source of truth for prior conver
 
 ## Skills
 
-When `SKILLS_BUCKET` is configured, the startup lifespan syncs every S3 object beneath `SKILLS_PREFIX` into `SKILLS_LOCAL_DIR`, preserving the hierarchy and enforcing per-object and total size limits. An empty prefix means the bucket root. Each skill must use the Agent Skills directory format:
+When `SKILLS_BUCKET` is configured, the startup lifespan lists objects beneath `SKILLS_PREFIX`. For each skill directory with direct-child ZIP snapshots, it selects the newest by S3 `LastModified` object time, validates and unpacks it into `SKILLS_LOCAL_DIR/<skill-name>/`. A timestamp in the filename is used only if S3 listing metadata lacks `LastModified`; other names are accepted. If the newest ZIP is invalid, it tries earlier snapshots; if none work, loose skill files remain the fallback. A selected snapshot replaces that skill's loose files locally, so stale resources are not mixed into the new version. Other skills still sync their loose files. An empty prefix means the bucket root. The supported S3 layouts are:
 
 ```text
 skills/
   hospital-data-analyst-nuh/
-    SKILL.md
-    references/
-      emd.md
-      schema.json
-    scripts/
-      validate.py
-    assets/
-      report-template.xlsx
+    20260915T101112123Z-a1b2c3d4.zip
+
+# Or a loose-file skill:
+skills/hospital-data-analyst-nuh/SKILL.md
+skills/hospital-data-analyst-nuh/references/emd.md
 ```
+
+Each ZIP contains `SKILL.md` at its root or beneath one enclosing folder. The Runtime strips that folder when extracting and aligns the local frontmatter `name` with the S3 skill directory. Compressed objects and extracted resources have size limits; ZIP members with traversal, links, encryption, or corrupt data are rejected. The ZIP is selected once at container startup, so a new snapshot requires a Runtime restart or redeploy.
 
 Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a useful `description`; the name should match its directory. The request-scoped agent registers Strands' `AgentSkills` plugin against the local parent directory. Strands places only skill metadata in the system prompt and adds its native `skills` activation tool. When the model activates a relevant skill, that tool returns the complete `SKILL.md` instructions.
 
@@ -190,7 +189,7 @@ If `SKILLS_BUCKET` is empty or unset, the Runtime skips synchronization and does
 
 Gateway MCP clients and managed Code Interpreter remain operational tools. They are not registered as skills. Runtime guidance directs the model to activate a matching skill before using its related domain tools. When the activated instructions require a UTF-8 text resource, the bounded `read_skill_resource` tool reads it from the local skill cache without allowing access outside that skill's directory.
 
-When Code Interpreter is enabled, the request-scoped `stage_skill_resource` tool validates a selected resource against the synchronized skill package, derives its URI beneath the configured S3 skills prefix, and copies it into the active interpreter session. The custom Code Interpreter execution role therefore needs `s3:GetObject` on `arn:aws:s3:::<SKILLS_BUCKET>/<SKILLS_PREFIX>*`, plus `kms:Decrypt` when the objects use a customer-managed KMS key. Scripts are downloaded and can be staged, but they are never executed automatically. Restart or redeploy the Runtime after changing S3 content because synchronization occurs once during container startup.
+When Code Interpreter is enabled, the request-scoped `stage_skill_resource` tool validates a selected resource against the synchronized skill package. Loose resources are copied directly from S3; ZIP resources are copied from the selected snapshot and extracted inside the interpreter session. The custom Code Interpreter execution role therefore needs `s3:GetObject` on `arn:aws:s3:::<SKILLS_BUCKET>/<SKILLS_PREFIX>*`, plus `kms:Decrypt` when the objects use a customer-managed KMS key. Scripts are downloaded and can be staged, but they are never executed automatically.
 
 To customize the base prompt without rebuilding the ZIP, upload a UTF-8 text
 file and configure, for example:

@@ -263,8 +263,8 @@ Memory is used only when the invocation includes both an actor ID and session ID
 | `SKILLS_BUCKET` | Empty | Set a bucket owned by your deployment when enabling skills |
 | `SKILLS_PREFIX` | Empty | Optional prefix containing one directory per skill; empty means the bucket root |
 | `SKILLS_LOCAL_DIR` | `/tmp/strands-agent-skills` | Keep this writable `/tmp` path |
-| `SKILLS_MAX_OBJECT_BYTES` | `50000000` | Maximum downloaded size of one skill object, minimum `1000` |
-| `SKILLS_MAX_SYNC_BYTES` | `250000000` | Maximum combined startup download; never lower than the per-object limit |
+| `SKILLS_MAX_OBJECT_BYTES` | `52428800` | Maximum compressed ZIP or individual extracted/loose resource size, minimum `1000` |
+| `SKILLS_MAX_SYNC_BYTES` | `262144000` | Maximum combined local skill resource size; never lower than the per-object limit |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 characters returned by `read_skill_resource`, minimum `1000` |
 
 Skills are enabled when `SKILLS_BUCKET` is non-empty. `SKILLS_PREFIX` is optional; an empty or unset prefix means skill directories are stored at the bucket root. If the bucket is empty or unset, the Runtime performs no S3 skill sync and omits the skill prompt guidance, `AgentSkills` plugin, `read_skill_resource`, and `stage_skill_resource` tools.
@@ -301,19 +301,19 @@ You may still leave `BASE_SYSTEM_PROMPT` empty when Dify supplies the system pro
 
 ## 5. Add Agent Skills to S3
 
-Each skill is a directory directly below `SKILLS_PREFIX` and must contain `SKILL.md`:
+Each skill is a directory directly below `SKILLS_PREFIX`. You may store loose files or timestamped ZIP snapshots under that directory. With ZIP snapshots, the Runtime loads the newest valid ZIP at container startup and unpacks it into a local skill directory:
 
 ```text
 skills/
   domain-specialist/
-    SKILL.md
-    references/
-      schema.md
-    scripts/
-      validate.py
-    assets/
-      report-template.xlsx
+    20260915T101112123Z-a1b2c3d4.zip
+
+# Loose files also remain supported:
+skills/domain-specialist/SKILL.md
+skills/domain-specialist/references/schema.md
 ```
+
+The ZIP must contain `SKILL.md` at its root or inside one enclosing folder, with all files beneath that folder. The Runtime strips the enclosing folder and aligns the local skill name to `domain-specialist`. S3 `LastModified` determines version order for every ZIP, including names without a timestamp. A filename timestamp is used only when S3 listing metadata lacks that time. If a newer ZIP fails validation, the Runtime tries an older snapshot, then falls back to loose files if no ZIP is usable. Code Interpreter stages a ZIP resource by downloading the selected snapshot and extracting only that member within the active session. Uploading a new version requires a Runtime restart or redeploy before it becomes active.
 
 Minimum `SKILL.md`:
 
