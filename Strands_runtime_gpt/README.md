@@ -51,8 +51,9 @@ profile here: GPT-5.6 Luna requires the Mantle Responses API, not Converse.
 
 The shared S3 Tables Gateway continues to return small SQL results directly,
 but it now fails closed when a result exceeds 1,000 rows. It also exposes
-`s3tables_execute_sql_export`, which runs the same read-only AH/NUH query and
-returns only the Athena result CSV URI plus compact execution metadata.
+`s3tables_execute_sql_export`, which runs the same read-only query against the
+S3 Tables table bucket supplied as `s3_bucket_name` and returns only the Athena
+result CSV URI plus compact execution metadata.
 
 This runtime alone has a stable instruction to use the export operation for
 large or multi-month dashboard and mapping work. Code Interpreter downloads the

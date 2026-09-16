@@ -41,12 +41,8 @@ TARGET_NAME = "ah-s3tables-tools"
 HARNESS_ID = "harness_e52fs-Du2DM0RxvF"
 HARNESS_GATEWAY_POLICY_ARN = "arn:aws:iam::964340114883:policy/service-role/AmazonBedrockAgentCoreHarnessGatewayPolicy_bd7bg"
 
-TABLE_BUCKET_ARN = f"arn:aws:s3tables:{REGION}:{ACCOUNT_ID}:bucket/ah-analytics"
 ATHENA_WORKGROUP = "ah-s3tables-wg"
-ATHENA_CATALOG = "s3tablescatalog/ah-analytics"
-ATHENA_DATABASE = "ah"
-NUH_ATHENA_CATALOG = "s3tablescatalog/nuh-analytics"
-NUH_ATHENA_DATABASE = "nuh"
+TABLE_BUCKET_RESOURCE = f"arn:aws:s3tables:{REGION}:{ACCOUNT_ID}:bucket/*"
 
 ATHENA_RESULTS_BUCKET = f"agentcore-tmp-{ACCOUNT_ID}"
 ATHENA_RESULTS_PREFIX = "athena-results/"
@@ -56,66 +52,86 @@ lambda_client = boto3.client("lambda", region_name=REGION)
 agentcore = boto3.client("bedrock-agentcore-control", region_name=REGION)
 
 
-SOURCE_PROPERTY = {
-    "type": "string",
-    "description": "Which S3 Tables source to use: 'ah' (default) or 'nuh'.",
-}
-
-TOOL_SCHEMA = [
-    {
-        "name": "execute_sql",
-        "description": (
-            "Run a read-only SELECT/WITH query against the selected AH or NUH S3 "
-            "Tables (Iceberg) backend via Athena and return a small JSON result. "
-            "For results that may exceed 1,000 rows, use execute_sql_export instead."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "A valid Athena SELECT/WITH statement"},
-                "source": SOURCE_PROPERTY,
-            },
-            "required": ["query"],
+# Copy everything between the triple quotes into the AgentCore Gateway target's
+# inline tool-schema field when deploying through the AWS console.
+TOOL_SCHEMA_JSON = r"""
+[
+  {
+    "name": "execute_sql",
+    "description": "Run a read-only SELECT/WITH query against the selected S3 Tables (Iceberg) table bucket via Athena and return a small JSON result. For results that may exceed 1,000 rows, use execute_sql_export instead.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "A valid Athena SELECT/WITH statement"
         },
-    },
-    {
-        "name": "list_tables",
-        "description": "List all tables in the selected AH or NUH S3 Tables namespace with column names and types.",
-        "inputSchema": {"type": "object", "properties": {"source": SOURCE_PROPERTY}},
-    },
-    {
-        "name": "describe_table",
-        "description": "Get column details and 3 sample rows for a table in the selected AH or NUH S3 Tables namespace.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "table_name": {"type": "string", "description": "Name of the table to describe"},
-                "source": SOURCE_PROPERTY,
-            },
-            "required": ["table_name"],
+        "s3_bucket_name": {
+          "type": "string",
+          "description": "S3 Tables table bucket name, for example 'ah-analytics'. The bucket must contain exactly one namespace."
+        }
+      },
+      "required": ["query", "s3_bucket_name"]
+    }
+  },
+  {
+    "name": "list_tables",
+    "description": "List all tables in the selected S3 Tables table bucket's namespace with column names and types.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "s3_bucket_name": {
+          "type": "string",
+          "description": "S3 Tables table bucket name, for example 'ah-analytics'. The bucket must contain exactly one namespace."
+        }
+      },
+      "required": ["s3_bucket_name"]
+    }
+  },
+  {
+    "name": "describe_table",
+    "description": "Get column details and 3 sample rows for a table in the selected S3 Tables table bucket.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "table_name": {
+          "type": "string",
+          "description": "Name of the table to describe"
         },
-    },
-    {
-        "name": "execute_sql_export",
-        "description": (
-            "Run a read-only SELECT/WITH query against AH or NUH S3 Tables and return "
-            "only Athena result metadata, including an S3 CSV URI. Use for large or "
-            "multi-month queries; download and process the CSV in Code Interpreter."
-        ),
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "A valid Athena SELECT/WITH statement"},
-                "source": SOURCE_PROPERTY,
-                "export": {
-                    "type": "boolean",
-                    "description": "Must be true. Identifies this call as the metadata-only export operation.",
-                },
-            },
-            "required": ["query", "export"],
+        "s3_bucket_name": {
+          "type": "string",
+          "description": "S3 Tables table bucket name, for example 'ah-analytics'. The bucket must contain exactly one namespace."
+        }
+      },
+      "required": ["table_name", "s3_bucket_name"]
+    }
+  },
+  {
+    "name": "execute_sql_export",
+    "description": "Run a read-only SELECT/WITH query against the selected S3 Tables table bucket and return only Athena result metadata, including an S3 CSV URI. Use for large queries; download and process the CSV in Code Interpreter.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "description": "A valid Athena SELECT/WITH statement"
         },
-    },
+        "s3_bucket_name": {
+          "type": "string",
+          "description": "S3 Tables table bucket name, for example 'ah-analytics'. The bucket must contain exactly one namespace."
+        },
+        "export": {
+          "type": "boolean",
+          "description": "Must be true. Identifies this call as the metadata-only export operation."
+        }
+      },
+      "required": ["query", "s3_bucket_name", "export"]
+    }
+  }
 ]
+""".strip()
+
+TOOL_SCHEMA = json.loads(TOOL_SCHEMA_JSON)
 
 
 # ---------------------------------------------------------------------------
@@ -188,7 +204,7 @@ def ensure_lambda_role() -> str:
                  "s3tables:GetTableMetadataLocation",
                  "s3tables:GetTableData",
              ],
-             "Resource": [TABLE_BUCKET_ARN, f"{TABLE_BUCKET_ARN}/*"]},
+             "Resource": TABLE_BUCKET_RESOURCE},
             # Athena result location — read/write query outputs
             {"Effect": "Allow",
              "Action": [
@@ -256,11 +272,6 @@ def deploy_lambda(role_arn: str) -> str:
 
     env = {"Variables": {
         "ATHENA_WORKGROUP": ATHENA_WORKGROUP,
-        "ATHENA_CATALOG": ATHENA_CATALOG,
-        "ATHENA_DATABASE": ATHENA_DATABASE,
-        "NUH_ATHENA_WORKGROUP": ATHENA_WORKGROUP,
-        "NUH_ATHENA_CATALOG": NUH_ATHENA_CATALOG,
-        "NUH_ATHENA_DATABASE": NUH_ATHENA_DATABASE,
     }}
 
     try:
@@ -352,7 +363,7 @@ def ensure_gateway_target(gateway_id: str, lambda_arn: str):
                     gatewayIdentifier=gateway_id,
                     targetId=tgt["targetId"],
                     name=TARGET_NAME,
-                    description="Lambda: ah-analytics-s3tables-mcp — 4 read-only S3 Tables tools for AH and NUH",
+                    description="Lambda: ah-analytics-s3tables-mcp — 4 dynamic read-only S3 Tables tools",
                     credentialProviderConfigurations=existing.get("credentialProviderConfigurations", []),
                     targetConfiguration={
                         "mcp": {"lambda": {"lambdaArn": lambda_arn, "toolSchema": {"inlinePayload": TOOL_SCHEMA}}}
@@ -365,7 +376,7 @@ def ensure_gateway_target(gateway_id: str, lambda_arn: str):
     response = agentcore.create_gateway_target(
         gatewayIdentifier=gateway_id,
         name=TARGET_NAME,
-        description="Lambda: ah-analytics-s3tables-mcp — 4 read-only S3 Tables tools for AH and NUH",
+        description="Lambda: ah-analytics-s3tables-mcp — 4 dynamic read-only S3 Tables tools",
         credentialProviderConfigurations=[{"credentialProviderType": "GATEWAY_IAM_ROLE"}],
         targetConfiguration={
             "mcp": {
@@ -416,7 +427,7 @@ def add_gateway_to_harness_policy(gateway_arn: str):
         PolicyDocument=json.dumps(doc),
         SetAsDefault=True,
     )
-    print(f"  Harness policy updated with new default version")
+    print("  Harness policy updated with new default version")
 
 
 def add_gateway_to_harness(gateway_id: str):
@@ -482,7 +493,7 @@ def main():
     print("\nDone.")
     print(f"\n  Lambda ARN : {lambda_arn}")
     print(f"  Gateway ID : {gateway_id}")
-    print(f"\nRemember: re-run 'python infra/ah_s3tables_bootstrap.py' so the")
+    print("\nRemember: re-run 'python infra/ah_s3tables_bootstrap.py' so the")
     print(f"Lake Formation grant picks up the new role '{LAMBDA_ROLE_NAME}'.")
 
 

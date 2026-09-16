@@ -55,7 +55,7 @@ def update_gateway_target(agentcore) -> None:
         gatewayIdentifier=GATEWAY_ID,
         targetId=TARGET_ID,
         name=TARGET_NAME,
-        description="Lambda: ah-analytics-s3tables-mcp — 4 read-only S3 Tables tools for AH and NUH",
+        description="Lambda: ah-analytics-s3tables-mcp — 4 dynamic read-only S3 Tables tools",
         credentialProviderConfigurations=current["credentialProviderConfigurations"],
         targetConfiguration={
             "mcp": {

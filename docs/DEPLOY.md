@@ -299,7 +299,7 @@ Creates:
 - Lambda `ah-analytics-s3tables-mcp` (zip, boto3-only, no VPC — Athena is a public API)
 - IAM role `ah-analytics-s3tables-mcp-role` (Athena + Glue + s3tables read + Lake Formation `GetDataAccess`)
 - Gateway `ah-analytics-s3tables` (MCP, AWS_IAM auth)
-- Gateway target `ah-s3tables-tools` — same 3 tools as `ah-rds-tools`: `execute_sql`, `list_tables`, `describe_table`
+- Gateway target `ah-s3tables-tools` — 4 tools: `execute_sql`, `execute_sql_export`, `list_tables`, `describe_table`; each accepts a dynamic `s3_bucket_name`
 - Added to `harness_e52fs` alongside the RDS gateway
 
 Tool names in Strands become `ah-s3tables-tools___execute_sql`, etc — no collision with `ah-rds-tools___execute_sql`.
@@ -308,7 +308,7 @@ Tool names in Strands become `ah-s3tables-tools___execute_sql`, etc — no colli
 
 ```bash
 # List tables
-echo '{}' | aws lambda invoke --function-name ah-analytics-s3tables-mcp \
+echo '{"s3_bucket_name":"ah-analytics"}' | aws lambda invoke --function-name ah-analytics-s3tables-mcp \
   --payload fileb:///dev/stdin --cli-binary-format raw-in-base64-out \
   --region ap-southeast-1 /dev/stdout
 
@@ -317,7 +317,7 @@ aws athena start-query-execution \
   --query-string "SELECT year(visit_date) y, month(visit_date) m, COUNT(*) c FROM outpatient \
                   WHERE visit_date >= TIMESTAMP '2024-01-01' GROUP BY 1,2 ORDER BY 1,2" \
   --work-group ah-s3tables-wg \
-  --query-execution-context Catalog=s3tablescatalog/ah-analytics,Database=ah_analytics \
+  --query-execution-context Catalog=s3tablescatalog/ah-analytics,Database=ah \
   --region ap-southeast-1
 ```
 
