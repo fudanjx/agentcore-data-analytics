@@ -406,7 +406,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
             callback_handler=null_callback_handler,
             name=AGENT_NAME,
             description=AGENT_DESCRIPTION,
-            hooks=[DataToolsPermissionGate()]
+            hooks=[]
         )
         invocation_state: dict[str, Any] = {"user_gateway_permissions": request.user_gateway_permissions}
         return (
