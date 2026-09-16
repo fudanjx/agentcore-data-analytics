@@ -142,13 +142,6 @@ def _update_lambda_function(
     zip_bytes: bytes,
 ) -> dict:
     logger.info("Updating Lambda function %s code and configuration", function_name)
-    lambda_client.update_function_code(
-        FunctionName=function_name,
-        ZipFile=zip_bytes,
-        Publish=True,
-    )
-    lambda_client.get_waiter("function_updated").wait(FunctionName=function_name)
-
     response = lambda_client.update_function_configuration(
         FunctionName=function_name,
         Role=role_arn,
@@ -164,6 +157,13 @@ def _update_lambda_function(
         Resource=response["FunctionArn"],
         Tags=RESOURCE_TAGS,
     )
+    
+    lambda_client.update_function_code(
+            FunctionName=function_name,
+            ZipFile=zip_bytes,
+            Publish=True,
+        )
+    lambda_client.get_waiter("function_updated").wait(FunctionName=function_name)
     return response
 
 
