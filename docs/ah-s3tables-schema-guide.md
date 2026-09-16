@@ -4,9 +4,9 @@
 
 ## Scope
 
-- **Source / namespace:** `ah`
+- **S3 Tables table bucket / namespace:** `ah-analytics` / `ah`
 - **Tables:** 6
-- **Schema source:** MCP `list_tables(source="ah")`
+- **Schema source:** MCP `list_tables(s3_bucket_name="ah-analytics")`
 - **Nullability:** the schema listing exposes field names and types but does not include nullability. Use `describe_table` when a nullable/not-null check is required for a specific table.
 
 ## Type conventions

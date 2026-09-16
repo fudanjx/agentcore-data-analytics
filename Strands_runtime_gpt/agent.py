@@ -121,11 +121,12 @@ RUNTIME_STREAM_HEARTBEAT_SECONDS = _bounded_int_env(
 S3TABLES_EXPORT_GUIDANCE = """
 ## Large S3 Tables query workflow (GPT pilot)
 
-For AH or NUH S3 Tables work that can return many rows—especially multi-month
-dashboard, mapping, or department-level analysis—use the Gateway tool
+For S3 Tables work that can return many rows—especially multi-month dashboard,
+mapping, or department-level analysis—use the Gateway tool
 `s3tables_execute_sql_export` rather than `s3tables_execute_sql`. Supply the
-correct `source` (`ah` or `nuh`) and `export: true`. The export tool returns a
-compact result containing `result_s3_uri`, not database rows.
+correct S3 Tables table bucket as `s3_bucket_name` (for example,
+`ah-analytics` or `nuh-analytics`) and set `export: true`. The export tool
+returns a compact result containing `result_s3_uri`, not database rows.
 
 Then use Code Interpreter to download that exact `result_s3_uri`, load the CSV
 locally, apply any approved mapping resources, perform validation and

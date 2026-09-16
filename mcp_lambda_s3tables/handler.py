@@ -1,9 +1,10 @@
 """MCP Lambda handler for AgentCore Gateway -> Athena over S3 Tables.
 
-The Gateway exposes read-only AH and NUH analytics tools. Small SQL results
-can be returned to an agent directly. Larger results must use the export tool:
-Athena writes the CSV to its result location and this Lambda returns only
-compact metadata, never a partial row set.
+The caller selects an S3 Tables table bucket by name. The Lambda derives its
+Athena catalog from that name and discovers the bucket's namespace through the
+S3 Tables API. Small SQL results can be returned to an agent directly. Larger
+results must use the export tool: Athena writes the CSV to its result location
+and this Lambda returns only compact metadata, never a partial row set.
 """
 
 import datetime
@@ -22,19 +23,7 @@ logger.setLevel(logging.INFO)
 
 REGION = os.environ.get("AWS_REGION", "ap-southeast-1")
 
-# AH remains the default for backwards compatibility with existing callers.
 ATHENA_WORKGROUP = os.environ.get("ATHENA_WORKGROUP", "ah-s3tables-wg")
-ATHENA_CATALOG = os.environ.get("ATHENA_CATALOG", "s3tablescatalog/ah-analytics")
-ATHENA_DATABASE = os.environ.get("ATHENA_DATABASE", "ah")
-NUH_ATHENA_WORKGROUP = os.environ.get("NUH_ATHENA_WORKGROUP", ATHENA_WORKGROUP)
-NUH_ATHENA_CATALOG = os.environ.get("NUH_ATHENA_CATALOG", "s3tablescatalog/nuh-analytics")
-NUH_ATHENA_DATABASE = os.environ.get("NUH_ATHENA_DATABASE", "nuh")
-DEFAULT_SOURCE = os.environ.get("DEFAULT_SOURCE", "ah").strip().lower()
-
-SOURCES = {
-    "ah": {"label": "AH", "workgroup": ATHENA_WORKGROUP, "catalog": ATHENA_CATALOG, "database": ATHENA_DATABASE},
-    "nuh": {"label": "NUH", "workgroup": NUH_ATHENA_WORKGROUP, "catalog": NUH_ATHENA_CATALOG, "database": NUH_ATHENA_DATABASE},
-}
 
 # One extra row is requested below so this is a hard safety limit, not a
 # silent truncation point. The export path has no row-return limit.
@@ -44,6 +33,7 @@ POLL_MAX_SEC = 60.0
 
 athena = boto3.client("athena", region_name=REGION)
 glue = boto3.client("glue", region_name=REGION)
+s3tables = boto3.client("s3tables", region_name=REGION)
 
 
 def _json_default(obj: Any):
@@ -54,11 +44,52 @@ def _json_default(obj: Any):
     raise TypeError(f"Object of type {type(obj)} is not JSON serializable")
 
 
-def _resolve_source(arguments: dict) -> str:
-    source = str(arguments.get("source") or DEFAULT_SOURCE).strip().lower()
-    if source not in SOURCES:
-        raise ValueError("source must be 'ah' or 'nuh'")
-    return source
+def _table_bucket_arn(bucket_name: str) -> str:
+    return f"arn:aws:s3tables:{REGION}:{_account_id()}:bucket/{bucket_name}"
+
+
+def _list_namespaces(table_bucket_arn: str) -> list[str]:
+    namespaces: list[str] = []
+    request = {"tableBucketARN": table_bucket_arn}
+    while True:
+        response = s3tables.list_namespaces(**request)
+        for item in response.get("namespaces", []):
+            parts = item.get("namespace", [])
+            if len(parts) != 1 or not parts[0]:
+                raise ValueError(f"Unsupported namespace returned for table bucket: {parts!r}")
+            namespaces.append(parts[0])
+        continuation_token = response.get("continuationToken")
+        if not continuation_token:
+            return namespaces
+        request = {
+            "tableBucketARN": table_bucket_arn,
+            "continuationToken": continuation_token,
+        }
+
+
+def _resolve_data_source(arguments: dict) -> dict[str, str]:
+    bucket_name = str(arguments.get("s3_bucket_name") or "").strip().lower()
+    if not bucket_name:
+        raise ValueError("s3_bucket_name is required")
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,61}[a-z0-9]", bucket_name):
+        raise ValueError("s3_bucket_name must be a valid S3 Tables table bucket name")
+
+    table_bucket_arn = _table_bucket_arn(bucket_name)
+    namespaces = _list_namespaces(table_bucket_arn)
+    if not namespaces:
+        raise ValueError(f"S3 Tables table bucket '{bucket_name}' has no namespace")
+    if len(namespaces) > 1:
+        raise ValueError(
+            f"S3 Tables table bucket '{bucket_name}' has multiple namespaces: "
+            f"{', '.join(sorted(namespaces))}. A bucket name alone is ambiguous."
+        )
+    return {
+        "bucket_name": bucket_name,
+        "table_bucket_arn": table_bucket_arn,
+        "workgroup": ATHENA_WORKGROUP,
+        "catalog": f"s3tablescatalog/{bucket_name}",
+        "database": namespaces[0],
+    }
 
 
 def _validate_select_query(arguments: dict) -> str:
@@ -70,13 +101,15 @@ def _validate_select_query(arguments: dict) -> str:
     return query.rstrip(";").rstrip()
 
 
-def _start_and_wait(sql: str, source: str) -> tuple[str, dict]:
+def _start_and_wait(sql: str, data_source: dict[str, str]) -> tuple[str, dict]:
     """Run a query and return its Athena execution identifier and metadata."""
-    cfg = SOURCES[source]
     response = athena.start_query_execution(
         QueryString=sql,
-        WorkGroup=cfg["workgroup"],
-        QueryExecutionContext={"Catalog": cfg["catalog"], "Database": cfg["database"]},
+        WorkGroup=data_source["workgroup"],
+        QueryExecutionContext={
+            "Catalog": data_source["catalog"],
+            "Database": data_source["database"],
+        },
     )
     query_execution_id = response["QueryExecutionId"]
     deadline = time.time() + POLL_MAX_SEC
@@ -119,19 +152,20 @@ def _read_direct_rows(query_execution_id: str, max_rows: int) -> list[dict]:
     return rows
 
 
-def _run_direct_query(sql: str, source: str, max_rows: int = MAX_DIRECT_ROWS) -> list[dict]:
-    query_execution_id, _ = _start_and_wait(sql, source)
+def _run_direct_query(sql: str, data_source: dict[str, str], max_rows: int = MAX_DIRECT_ROWS) -> list[dict]:
+    query_execution_id, _ = _start_and_wait(sql, data_source)
     return _read_direct_rows(query_execution_id, max_rows)
 
 
-def _export_metadata(query_execution_id: str, source: str, execution: dict) -> dict:
+def _export_metadata(query_execution_id: str, data_source: dict[str, str], execution: dict) -> dict:
     output_location = execution.get("ResultConfiguration", {}).get("OutputLocation", "").strip()
     if not output_location.startswith("s3://"):
         raise RuntimeError("Athena did not provide an S3 result location")
     statistics = execution.get("Statistics", {})
     return {
         "query_execution_id": query_execution_id,
-        "source": source,
+        "s3_bucket_name": data_source["bucket_name"],
+        "namespace": data_source["database"],
         "result_s3_uri": output_location,
         "status": "SUCCEEDED",
         "data_scanned_bytes": statistics.get("DataScannedInBytes", 0),
@@ -142,15 +176,15 @@ def _export_metadata(query_execution_id: str, source: str, execution: dict) -> d
 
 def execute_sql(arguments: dict) -> list[dict]:
     """Return a small SQL result, rejecting oversized results rather than truncating."""
-    source = _resolve_source(arguments)
-    return _run_direct_query(_validate_select_query(arguments), source)
+    data_source = _resolve_data_source(arguments)
+    return _run_direct_query(_validate_select_query(arguments), data_source)
 
 
 def execute_sql_export(arguments: dict) -> dict:
     """Run read-only SQL and return only Athena's S3 CSV result metadata."""
-    source = _resolve_source(arguments)
-    query_execution_id, execution = _start_and_wait(_validate_select_query(arguments), source)
-    return _export_metadata(query_execution_id, source, execution)
+    data_source = _resolve_data_source(arguments)
+    query_execution_id, execution = _start_and_wait(_validate_select_query(arguments), data_source)
+    return _export_metadata(query_execution_id, data_source, execution)
 
 
 def _glue_catalog_id(catalog: str) -> str:
@@ -158,11 +192,13 @@ def _glue_catalog_id(catalog: str) -> str:
 
 
 def list_tables(arguments: dict) -> dict:
-    source = _resolve_source(arguments)
-    cfg = SOURCES[source]
+    data_source = _resolve_data_source(arguments)
     tables: dict[str, list] = {}
     paginator = glue.get_paginator("get_tables")
-    for page in paginator.paginate(CatalogId=_glue_catalog_id(cfg["catalog"]), DatabaseName=cfg["database"]):
+    for page in paginator.paginate(
+        CatalogId=_glue_catalog_id(data_source["catalog"]),
+        DatabaseName=data_source["database"],
+    ):
         for table in page.get("TableList", []):
             tables[table["Name"]] = [
                 {"column": column["Name"], "type": column["Type"]}
@@ -172,22 +208,29 @@ def list_tables(arguments: dict) -> dict:
 
 
 def describe_table(arguments: dict) -> dict:
-    source = _resolve_source(arguments)
-    cfg = SOURCES[source]
+    data_source = _resolve_data_source(arguments)
     table_name = (arguments.get("table_name") or "").strip()
     if not table_name:
         raise ValueError("table_name is required")
     if not re.match(r"^[a-zA-Z_][a-zA-Z0-9_]*$", table_name):
         raise ValueError("Invalid table name")
     try:
-        table = glue.get_table(CatalogId=_glue_catalog_id(cfg["catalog"]), DatabaseName=cfg["database"], Name=table_name)["Table"]
+        table = glue.get_table(
+            CatalogId=_glue_catalog_id(data_source["catalog"]),
+            DatabaseName=data_source["database"],
+            Name=table_name,
+        )["Table"]
     except glue.exceptions.EntityNotFoundException:
-        raise ValueError(f"Table '{table_name}' not found in {cfg['database']}")
+        raise ValueError(f"Table '{table_name}' not found in {data_source['database']}")
     columns = [
         {"column": column["Name"], "type": column["Type"], "nullable": True}
         for column in table.get("StorageDescriptor", {}).get("Columns", [])
     ]
-    samples = _run_direct_query(f'SELECT * FROM "{table_name}" LIMIT 3', source=source, max_rows=3)
+    samples = _run_direct_query(
+        f'SELECT * FROM "{table_name}" LIMIT 3',
+        data_source=data_source,
+        max_rows=3,
+    )
     return {"columns": columns, "sample_rows": samples}
 
 
