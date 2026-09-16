@@ -38,7 +38,9 @@ him_scripts/
 .code-workspace
 #Strands-runtime
 Strands-runtime/.bundle-build/
+Strands_runtime_gpt/.bundle-build/
 Strands-runtime/dist/
+Strands_runtime_gpt/dist/
 /tests/
 docs/architecture/
 nuh_s3tables_migration/_build/
