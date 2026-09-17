@@ -103,10 +103,18 @@ DIFY_OFFICE_ARTIFACTS_PREFIX = (
     os.environ.get("DIFY_OFFICE_ARTIFACTS_PREFIX", "harness_dev/").strip("/")
     + "/"
 )
+DIFY_OFFICE_OUTPUT_EXTENSIONS = {
+    extension.strip().lower()
+    for extension in os.environ.get(
+        "DIFY_OFFICE_OUTPUT_EXTENSIONS",
+        "csv,docx,html,xlsx,pptx,pdf,zip",
+    ).split(",")
+    if extension.strip()
+}
 DIFY_OFFICE_SOURCE_PROFILE = {
     "bucket": DIFY_OFFICE_ARTIFACTS_BUCKET,
     "output_prefix": DIFY_OFFICE_ARTIFACTS_PREFIX,
-    "output_extensions": {"csv", "docx", "html", "xlsx", "pptx", "pdf","md"},
+    "output_extensions": DIFY_OFFICE_OUTPUT_EXTENSIONS,
 }
 
 MAX_ARTIFACT_BYTES = 50 * 1024 * 1024
