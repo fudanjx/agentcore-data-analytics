@@ -47,7 +47,7 @@ class Settings:
     contract_prefix: str
 
     @classmethod
-    def from_environ(cls, environ: dict[str, str] | None = None) -> "Settings":
+    def from_environ(cls, environ: dict[str, str] | None = None) -> Settings:
         env = dict(os.environ if environ is None else environ)
         environment = env.get("S3_UPLOADER_ENV", "production").lower()
         cookie_secure = _boolean("S3_UPLOADER_COOKIE_SECURE", env, True)
@@ -88,7 +88,7 @@ class WorkerSettings:
     contract_prefix: str
 
     @classmethod
-    def from_environ(cls, environ: dict[str, str] | None = None) -> "WorkerSettings":
+    def from_environ(cls, environ: dict[str, str] | None = None) -> WorkerSettings:
         env = dict(os.environ if environ is None else environ)
         return cls(
             region=_required("AWS_REGION", env),
