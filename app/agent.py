@@ -10,11 +10,12 @@ Phase 2 refactor:
 """
 
 import asyncio
+import json
 import logging
 import os
 import re
 from dataclasses import dataclass
-from typing import AsyncIterator
+from typing import Any, AsyncIterator
 
 from claude_agent_sdk import ClaudeAgentOptions, ClaudeSDKClient, ResultMessage
 from claude_agent_sdk.types import (
@@ -30,17 +31,40 @@ from app import code_interpreter, gateway_proxy, memory, skills_sync
 
 logger = logging.getLogger(__name__)
 
+ENABLE_TOOL_DETAILS = os.environ.get(
+    "ENABLE_TOOL_DETAILS", "false"
+).lower() in {"1", "true", "yes", "on"}
+TOOL_DETAIL_MAX_CHARS = min(
+    1_000_000,
+    max(1_000, int(os.environ.get("TOOL_DETAIL_MAX_CHARS", "200000"))),
+)
+
 
 @dataclass(frozen=True)
 class AgentStep:
-    """Sanitized user-visible lifecycle event for one skill or tool call."""
+    """Bounded user-visible lifecycle event for one skill or tool call."""
 
     kind: str
     name: str
     status: str
+    tool_id: str = ""
+    details: dict[str, Any] | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        step: dict[str, Any] = {
+            "type": self.kind,
+            "name": self.name,
+            "status": self.status,
+        }
+        if self.tool_id:
+            step["id"] = self.tool_id[:200]
+        if self.details:
+            step["details"] = self.details
+        return step
 
 
 _STEP_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9 ._:/()\-]")
+_DETAIL_MISSING = object()
 
 
 def _safe_step_name(value: object, fallback: str) -> str:
@@ -49,8 +73,53 @@ def _safe_step_name(value: object, fallback: str) -> str:
     return (normalized or fallback)[:120]
 
 
+def _json_safe_detail(value: Any) -> Any:
+    """Return a JSON-safe copy without placing binary data in the event stream."""
+
+    def fallback(item: Any) -> Any:
+        if isinstance(item, (bytes, bytearray, memoryview)):
+            return {"type": "binary", "bytes": len(item)}
+        return str(item)
+
+    return json.loads(json.dumps(value, ensure_ascii=False, default=fallback))
+
+
+def _bounded_detail(value: Any) -> tuple[Any, bool]:
+    """Bound one frontend detail while retaining structured JSON when it fits."""
+    safe_value = _json_safe_detail(value)
+    rendered = json.dumps(safe_value, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) <= TOOL_DETAIL_MAX_CHARS:
+        return safe_value, False
+    return {
+        "preview": rendered[:TOOL_DETAIL_MAX_CHARS],
+        "original_chars": len(rendered),
+    }, True
+
+
+def _step_details(
+    *,
+    tool_input: Any = _DETAIL_MISSING,
+    output: Any = _DETAIL_MISSING,
+) -> dict[str, Any] | None:
+    """Build opt-in, bounded input/output details for one lifecycle event."""
+    if not ENABLE_TOOL_DETAILS:
+        return None
+
+    details: dict[str, Any] = {}
+    truncated = False
+    if tool_input is not _DETAIL_MISSING:
+        details["input"], input_truncated = _bounded_detail(tool_input)
+        truncated = truncated or input_truncated
+    if output is not _DETAIL_MISSING:
+        details["output"], output_truncated = _bounded_detail(output)
+        truncated = truncated or output_truncated
+    if truncated:
+        details["truncated"] = True
+    return details or None
+
+
 def _tool_step(block: ToolUseBlock) -> AgentStep:
-    """Convert an SDK tool-use block into safe display metadata."""
+    """Convert an SDK tool-use block into bounded display metadata."""
     raw_name = str(block.name or "")
     if raw_name.lower() == "skill":
         skill_name = (block.input or {}).get("skill") or (block.input or {}).get("name")
@@ -58,6 +127,8 @@ def _tool_step(block: ToolUseBlock) -> AgentStep:
             kind="skill",
             name=_safe_step_name(skill_name, "Agent skill"),
             status="started",
+            tool_id=str(block.id or ""),
+            details=_step_details(tool_input=block.input),
         )
 
     if raw_name.startswith("mcp__"):
@@ -75,6 +146,25 @@ def _tool_step(block: ToolUseBlock) -> AgentStep:
         kind="tool",
         name=_safe_step_name(display_name, "Agent tool"),
         status="started",
+        tool_id=str(block.id or ""),
+        details=_step_details(tool_input=block.input),
+    )
+
+
+def _terminal_step(
+    started: AgentStep,
+    status: str,
+    *,
+    tool_input: Any = _DETAIL_MISSING,
+    output: Any = _DETAIL_MISSING,
+) -> AgentStep:
+    """Create a terminal event correlated with its started event."""
+    return AgentStep(
+        kind=started.kind,
+        name=started.name,
+        status=status,
+        tool_id=started.tool_id,
+        details=_step_details(tool_input=tool_input, output=output),
     )
 
 MAX_SDK_BUFFER_BYTES = int(
@@ -227,7 +317,7 @@ async def stream(
 
     any_text = False
     assistant_buffer: list[str] = []  # accumulated final text for memory.save_turn
-    active_steps: dict[str, AgentStep] = {}
+    active_steps: dict[str, tuple[AgentStep, Any]] = {}
     try:
         async with ClaudeSDKClient(options=options) as client:
             await client.query(prompt)
@@ -245,12 +335,12 @@ async def stream(
                                 assistant_buffer.append(text)
                                 yield text
                 elif isinstance(message, AssistantMessage):
-                    # Assistant messages also carry tool-use blocks. Emit only safe
-                    # names; raw tool inputs may contain SQL, file paths, or secrets.
+                    # Assistant messages also carry tool-use blocks. Inputs are
+                    # exposed only when the deployment explicitly enables details.
                     for block in message.content:
                         if isinstance(block, ToolUseBlock):
                             step = _tool_step(block)
-                            active_steps[block.id] = step
+                            active_steps[block.id] = (step, block.input)
                             yield step
                         elif not any_text and isinstance(block, TextBlock) and block.text:
                             any_text = True
@@ -258,16 +348,21 @@ async def stream(
                             yield block.text
                 elif isinstance(message, UserMessage) and isinstance(message.content, list):
                     # Claude Agent SDK returns tool results as user-message content.
-                    # Report only lifecycle state, never result content.
                     for block in message.content:
                         if not isinstance(block, ToolResultBlock):
                             continue
-                        started = active_steps.pop(block.tool_use_id, None)
-                        if started:
-                            yield AgentStep(
-                                kind=started.kind,
-                                name=started.name,
-                                status="failed" if block.is_error else "completed",
+                        active = active_steps.pop(block.tool_use_id, None)
+                        if active:
+                            started, tool_input = active
+                            output = block.content
+                            message_result = getattr(message, "tool_use_result", None)
+                            if output is None and message_result is not None:
+                                output = message_result
+                            yield _terminal_step(
+                                started,
+                                "failed" if block.is_error else "completed",
+                                tool_input=tool_input,
+                                output=output,
                             )
                 elif isinstance(message, ResultMessage):
                     logger.info(
@@ -282,6 +377,23 @@ async def stream(
                         yield message.result
                     elif message.is_error and message.result:
                         yield f"\n\n[error] {message.result}"
+        # Compatibility fallback if the SDK omits a tool-result message but the
+        # response otherwise finishes normally.
+        for started, tool_input in active_steps.values():
+            yield _terminal_step(started, "completed", tool_input=tool_input)
+        active_steps.clear()
+    except asyncio.CancelledError:
+        raise
+    except Exception as error:
+        for started, tool_input in active_steps.values():
+            yield _terminal_step(
+                started,
+                "failed",
+                tool_input=tool_input,
+                output={"error": str(error)},
+            )
+        active_steps.clear()
+        raise
     finally:
         await code_interpreter.stop_session(code_interpreter_session_id)
 

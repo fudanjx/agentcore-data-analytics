@@ -44,9 +44,9 @@ class FakeToolUseBlock:
 
 
 class FakeToolResultBlock:
-    def __init__(self, tool_use_id, *, is_error=False):
+    def __init__(self, tool_use_id, content=None, *, is_error=False):
         self.tool_use_id = tool_use_id
-        self.content = None
+        self.content = content
         self.is_error = is_error
 
 
@@ -56,8 +56,9 @@ class FakeAssistantMessage:
 
 
 class FakeUserMessage:
-    def __init__(self, content):
+    def __init__(self, content, tool_use_result=None):
         self.content = content
+        self.tool_use_result = tool_use_result
 
 
 sdk.ResultMessage = FakeResultMessage
@@ -308,10 +309,79 @@ def test_agent_emits_sanitized_skill_and_tool_lifecycle_events(monkeypatch):
     items = asyncio.run(invoke())
 
     assert items == [
-        agent.AgentStep("skill", "admission-analysis", "started"),
-        agent.AgentStep("skill", "admission-analysis", "completed"),
-        agent.AgentStep("tool", "NUH: query data", "started"),
-        agent.AgentStep("tool", "NUH: query data", "failed"),
+        agent.AgentStep("skill", "admission-analysis", "started", "skill-1"),
+        agent.AgentStep("skill", "admission-analysis", "completed", "skill-1"),
+        agent.AgentStep("tool", "NUH: query data", "started", "tool-1"),
+        agent.AgentStep("tool", "NUH: query data", "failed", "tool-1"),
         "Final answer",
     ]
     assert "sensitive_data" not in repr(items)
+
+
+def test_agent_emits_bounded_skill_and_tool_details_when_enabled(monkeypatch):
+    class FakeClaudeSDKClient:
+        def __init__(self, *, options):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def query(self, _prompt):
+            return None
+
+        async def receive_response(self):
+            yield FakeAssistantMessage(
+                [FakeToolUseBlock("skill-1", "Skill", {"skill": "admission-analysis"})]
+            )
+            yield FakeUserMessage(
+                [FakeToolResultBlock("skill-1", "Complete SKILL.md instructions")]
+            )
+            yield FakeAssistantMessage(
+                [FakeToolUseBlock("tool-1", "mcp__nuh__query_data", {"sql": "SELECT 1"})]
+            )
+            yield FakeUserMessage(
+                [FakeToolResultBlock("tool-1", "x" * 1200, is_error=True)]
+            )
+            yield FakeResultMessage()
+
+    async def fake_start_session(_runtime_session_id):
+        return "code-interpreter-session-id"
+
+    async def fake_stop_session(_code_interpreter_session_id):
+        return None
+
+    monkeypatch.setattr(agent, "ClaudeSDKClient", FakeClaudeSDKClient)
+    monkeypatch.setattr(agent, "ENABLE_TOOL_DETAILS", True)
+    monkeypatch.setattr(agent, "TOOL_DETAIL_MAX_CHARS", 1000)
+    monkeypatch.setattr(agent.code_interpreter, "start_session", fake_start_session)
+    monkeypatch.setattr(agent.code_interpreter, "stop_session", fake_stop_session)
+    monkeypatch.setattr(
+        agent.code_interpreter,
+        "build_mcp_server",
+        lambda session_id: {"session_id": session_id},
+    )
+
+    async def invoke():
+        return [item async for item in agent.stream([{"role": "user", "content": "hi"}])]
+
+    items = asyncio.run(invoke())
+    steps = [item for item in items if isinstance(item, agent.AgentStep)]
+
+    assert steps[0].as_dict() == {
+        "id": "skill-1",
+        "type": "skill",
+        "name": "admission-analysis",
+        "status": "started",
+        "details": {"input": {"skill": "admission-analysis"}},
+    }
+    assert steps[1].details == {
+        "input": {"skill": "admission-analysis"},
+        "output": "Complete SKILL.md instructions",
+    }
+    assert steps[2].details == {"input": {"sql": "SELECT 1"}}
+    assert steps[3].status == "failed"
+    assert steps[3].details["truncated"] is True
+    assert steps[3].details["output"]["original_chars"] == 1202

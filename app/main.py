@@ -85,11 +85,7 @@ async def _sse_stream(messages: list[dict], model_slug: str,
                 yield "data: " + json.dumps(
                     {
                         "event": "agent_step",
-                        "step": {
-                            "type": item.kind,
-                            "name": item.name,
-                            "status": item.status,
-                        },
+                        "step": item.as_dict(),
                     }
                 ) + "\n\n"
                 continue

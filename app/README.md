@@ -62,7 +62,7 @@ app/agent.py
 4. `main.py` accepts either an OpenAI-style `messages` array or a simple `prompt`, `input`, or `inputText` field.
 5. It obtains the conversation identity from AgentCore headers, with request-body fallbacks, and pads session IDs shorter than 33 characters.
 6. `agent.stream()` retrieves memory, builds the prompt, starts a Code Interpreter session, registers all MCP servers, and starts `ClaudeSDKClient`.
-7. Text deltas are returned immediately as OpenAI-compatible SSE chunks. Skill and tool lifecycle events are emitted as sanitized `agent_step` sideband events; raw SQL, tool inputs, file paths, and tool results are not exposed in these events.
+7. Text deltas are returned immediately as OpenAI-compatible SSE chunks. Skill and tool lifecycle events are emitted as sanitized `agent_step` sideband events. Inputs and results are omitted by default; when `ENABLE_TOOL_DETAILS=true`, bounded details are included for trusted frontends.
 8. In a `finally` block, the runtime stops the Code Interpreter session.
 9. When an actor ID is present, the completed user/assistant turn is saved to AgentCore Memory before the stream finishes.
 
@@ -109,8 +109,12 @@ Simple body:
 The response media type is always `text/event-stream`. Normal text uses OpenAI `chat.completion.chunk` objects, followed by `data: [DONE]`. A tool or skill status uses this sideband shape:
 
 ```text
-data: {"event":"agent_step","step":{"type":"tool","name":"NUH: execute sql","status":"started"}}
+data: {"event":"agent_step","step":{"id":"tool-1","type":"tool","name":"NUH: execute sql","status":"started","details":{"input":{"sql":"SELECT ..."}}}}
 ```
+
+The Dify proxy forwards the structured step as an `agent_step` response extension. When `details` is present, it also embeds the same JSON as a base64-encoded `<!--agentcore-step:...-->` content marker so Dify's text-only model-provider path retains it.
+
+Tool details can contain SQL, file paths, skill instructions, or returned data. Enable them only for trusted projects and frontends; the base64 marker preserves data but does not encrypt it.
 
 The `/stream-test` endpoint, or an invocation body of `{"test":"stream"}`, bypasses the model and emits timed chunks for diagnosing transport buffering.
 
@@ -287,6 +291,8 @@ To expose another interpreter operation, add a decorated tool in `build_mcp_serv
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Maximum interpreter result text returned to the model |
 | `CODE_INTERPRETER_BOOTSTRAP_PACKAGES` | Empty | Space-separated safe package names installed at session start, e.g. `geopandas==1.1.4 folium==0.20.0` |
 | `CLAUDE_AGENT_MAX_BUFFER_BYTES` | `10485760` | Claude SDK receive buffer size |
+| `ENABLE_TOOL_DETAILS` | `false` | Include bounded tool/skill inputs and results in streamed `agent_step` events |
+| `TOOL_DETAIL_MAX_CHARS` | `200000` | Maximum serialized characters exposed for each tool input or result, constrained to 1,000-1,000,000 |
 | `AWS_DEFAULT_REGION` | Set by deployment | Default AWS region |
 | `CLAUDE_CODE_USE_BEDROCK` | `1` | Makes the Claude SDK use Amazon Bedrock with IAM credentials |
 

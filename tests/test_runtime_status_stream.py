@@ -7,7 +7,13 @@ from app import main as runtime_main
 
 def test_runtime_encodes_agent_steps_as_sideband_sse(monkeypatch):
     async def fake_agent_stream(*_args, **_kwargs):
-        yield agent.AgentStep("skill", "admission-analysis", "started")
+        yield agent.AgentStep(
+            "skill",
+            "admission-analysis",
+            "started",
+            "skill-1",
+            {"input": {"skill": "admission-analysis"}},
+        )
         yield agent.AgentStep("tool", "NUH: query data", "completed")
         yield "Final answer"
 
@@ -37,6 +43,8 @@ def test_runtime_encodes_agent_steps_as_sideband_sse(monkeypatch):
             "type": "skill",
             "name": "admission-analysis",
             "status": "started",
+            "id": "skill-1",
+            "details": {"input": {"skill": "admission-analysis"}},
         },
     }
     assert payloads[1]["step"] == {
