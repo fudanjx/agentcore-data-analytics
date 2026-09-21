@@ -1,4 +1,4 @@
-"""Versioned, serialisable S3-backed session and job records."""
+"""Worker-owned job request, status and per-file source records."""
 
 from __future__ import annotations
 
@@ -7,23 +7,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-
-class Destination(BaseModel):
-    table_bucket_arn: str = Field(min_length=1)
-    namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
-    table: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
-
-
-class UploadSession(BaseModel):
-    schema_version: Literal[1] = 1
-    session_id: str
-    owner_user_id: str
-    file_name: str = Field(min_length=1, max_length=512)
-    content_type: str = Field(min_length=1, max_length=255)
-    source_key: str
-    multipart_upload_id: str
-    expected_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+from .destination import Destination
 
 
 class JobSource(BaseModel):
@@ -71,39 +55,18 @@ class JobRequest(BaseModel):
 class JobStatus(BaseModel):
     schema_version: Literal[1] = 1
     job_id: str
-    phase: Literal["QUEUED", "CLAIMED", "PROFILING", "PREPARING", "READY_FOR_MUTATION", "STARTING_GLUE", "RUNNING_GLUE", "SUCCEEDED", "FAILED"]
+    phase: Literal[
+        "QUEUED",
+        "CLAIMED",
+        "PROFILING",
+        "PREPARING",
+        "READY_FOR_MUTATION",
+        "STARTING_GLUE",
+        "RUNNING_GLUE",
+        "SUCCEEDED",
+        "FAILED",
+    ]
     message: str
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     error_code: str | None = None
     glue_run_id: str | None = None
-
-
-class MutationCommand(BaseModel):
-    """Durable command consumed by the per-table FIFO Glue dispatcher.
-
-    Upload jobs retain their existing immutable ``JobRequest`` records.  This
-    envelope gives the dispatcher one shape for those jobs and for rollback,
-    which has no uploaded source object.
-    """
-
-    schema_version: Literal[1] = 1
-    mutation_id: str
-    request_id: str = Field(min_length=1, max_length=128)
-    owner_user_id: str = Field(min_length=1)
-    operation: Literal["create", "append", "rollback"]
-    destination: Destination
-    upload_id: str = Field(default="", max_length=128)
-    source_job_id: str | None = None
-    rollback_snapshot_id: str | None = None
-    original_uploaded_by: str | None = None
-    original_uploaded_at: str | None = None
-    reporting_month: str = Field(default="", max_length=128)
-    filenames_json: str = Field(default="[]", max_length=8192)
-    created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
-
-
-class JobEvent(BaseModel):
-    schema_version: Literal[1] = 1
-    job_id: str
-    sequence: int = Field(ge=1)
-    status: JobStatus
