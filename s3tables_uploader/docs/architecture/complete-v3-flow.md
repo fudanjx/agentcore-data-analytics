@@ -67,6 +67,107 @@ checks (`enforce_ownership`) run in every environment — the calling
 application controls WHO can act, this API controls WHICH RECORDS they can
 touch.
 
+## Queue producers, consumers, and launch models
+
+Three SQS FIFO queues carry work between components. The API is the **only**
+producer for all three; nothing outside this repository writes to them.
+
+| Queue | Producer | Message body | Consumer model |
+| --- | --- | --- | --- |
+| `s3-uploader-base.fifo` | API — [`LeaseService.dispatch`](../../services/leases.py:83) after a lease is created or rebound | `lease:<lease_id>` | EventBridge Pipe → one-shot Fargate task per message |
+| `s3-uploader-large.fifo` | API — same helper, routed by `worker_size` | `lease:<lease_id>` | Same as base, larger task definition |
+| `s3-uploader-mutations.fifo` | API — [`MutationEnqueuerService.enqueue`](../../services/mutations.py:19) at ingestion acceptance | mutation id | **Long-running** `s3-uploader-mutation-dispatcher` ECS service long-polls with `sqs.receive_message` |
+
+The worker itself never calls `send_message`; grep for `send_message` in
+`worker.py` returns zero hits. All fan-out originates in the API.
+
+### Two consumer models — why the asymmetry
+
+The base/large queues and the mutation queue use **different launch models**
+on purpose, which is the reason there's still polling in the system even
+though EventBridge Pipes launches workers on-the-fly.
+
+**Base/large queues → per-message Fargate task (no polling).** The API
+enqueues one `lease:<id>` message; an EventBridge Pipe converts that message
+into an ECS `RunTask` call against the `s3-uploader-worker` task family. The
+container starts, does exactly one job, and exits. There is nothing to poll
+because the message *is* the task launch. Each worker sees exactly one job in
+its lifetime.
+
+**Mutation queue → dispatcher polls.** No Pipe is attached. A single
+long-running ECS service (`s3-uploader-mutation-dispatcher`, desired count
+= 1) calls `sqs.receive_message` in a loop. It needs polling — not
+per-message task launch — because mutation processing requires **stateful
+coordination** across multiple in-flight messages:
+
+- **Per-table FIFO ordering.** A same-table successor must wait until the
+  previous mutation reaches terminal state. A one-shot task per message
+  cannot see the other in-flight mutations.
+- **Glue capacity throttling.** The dispatcher caps concurrent Glue runs
+  (`max_concurrent_glue`, default 5). A per-message launch model would need
+  every task to re-read shared state to decide whether to start Glue.
+- **Terminal-state authority.** The dispatcher is the single writer of
+  mutation terminal state (see below). Long-polling keeps that ownership
+  in one process.
+
+So "polling vs. no polling" isn't a contradiction — it's the split between
+work that fans out cleanly (workers) and work that needs a coordinator
+(mutations).
+
+## Worker launch flow
+
+The full chain from lease creation to a running worker process:
+
+```text
+POST /api/v3/worker-leases
+  -> LeaseService.create_lease writes lease JSON to S3
+  -> LeaseService.dispatch calls sqs.send_message
+        QueueUrl = base_worker_queue_url or large_worker_queue_url
+        MessageBody = "lease:<lease_id>"
+        MessageGroupId = "<lease_id>"          (per-lease FIFO)
+  -> EventBridge Pipe (source: base/large FIFO queue)
+       target = ECS RunTask against s3-uploader-worker task family
+       target parameters override the container env:
+         containerOverrides.environment = [
+           { name: "S3_UPLOADER_JOB_ID", value: <message body> }
+         ]
+  -> Fargate schedules a new task
+       image: s3-uploader-worker (Dockerfile.worker)
+       CMD:   python3 -m s3tables_uploader.worker
+  -> worker.main() runs:
+       - reads os.environ["S3_UPLOADER_JOB_ID"]          (worker.py:670)
+       - WorkerSettings.from_environ() picks up deployment config
+       - dispatches to run_leased_worker(...) or process_job(...)
+  -> worker exits when the job completes
+       Fargate reaps the task; the next message launches a fresh task
+```
+
+Key properties:
+
+- **One-shot, stateless.** The worker owns no listening socket, no long-lived
+  in-memory state, and no queue polling. Its filesystem is disposable; S3 is
+  the source of truth.
+- **The message body is the payload.** EventBridge Pipes injects the SQS
+  message body verbatim as `S3_UPLOADER_JOB_ID` at task-launch time. There
+  is no other channel between the queue and the worker — no shared memory,
+  no on-disk state, no environment inherited from the API.
+- **`WorkerSettings` carries deployment config only.** Region, buckets,
+  prefixes, Glue job name, encryption secret ARN — everything static per
+  environment. Per-invocation payload (`S3_UPLOADER_JOB_ID`) stays outside
+  `WorkerSettings` because it changes per message; adding it there would
+  falsely imply it's deployment-scoped.
+- **No queue URL on `WorkerSettings`.** The worker never talks to SQS, so
+  the three queue URLs live only on the API-side `Settings` and (for the
+  mutation queue) `MutationDispatcherSettings`. Adding queue URLs to
+  `WorkerSettings` would only make sense if the launch model ever changed
+  from "Pipe launches one task" to "worker polls" — which would defeat the
+  point of the current architecture.
+
+The dispatcher's launch model is the opposite of all of the above: it runs
+as a normal ECS service with desired count = 1, holds boto3 clients across
+requests, and its own `MutationDispatcherSettings` includes
+`queue_url` because it DOES poll.
+
 ## Ordering properties
 
 The mutation queue uses the table identity hash as its FIFO message group. A
