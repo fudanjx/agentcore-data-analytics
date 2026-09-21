@@ -145,8 +145,8 @@ def get_audit_reader(s3: S3Dep, settings: SettingsDep) -> ScopedS3AuditReader:
 AuditReaderDep = Annotated[ScopedS3AuditReader, Depends(get_audit_reader)]
 
 
-def get_skill_service() -> SkillService:
-    return SkillService()
+def get_skill_service(settings: SettingsDep) -> SkillService:
+    return SkillService(settings)
 
 
 SkillServiceDep = Annotated[SkillService, Depends(get_skill_service)]

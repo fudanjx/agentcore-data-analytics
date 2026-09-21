@@ -85,7 +85,6 @@ class Settings:
     cookie_secure: bool
     session_ttl_seconds: int
     raw_retention_days: int
-    api_base_url: str
     glue_job_name: str
     contract_bucket: str
     contract_prefix: str
@@ -97,6 +96,9 @@ class Settings:
     bearer_refresh_min_interval_seconds: int = 300
     history_bucket: str = ""
     history_prefix: str = ""
+    skill_bundle_bucket: str = ""
+    skill_bundle_prefix: str = ""
+    api_base_url: str = ""
 
     # ------------------------------------------------------------------
     # Computed properties — the ONLY way consumers should branch on env.
@@ -183,6 +185,25 @@ class Settings:
         else:
             history_bucket = history_bucket or "ah-data-analytics"
             history_prefix = history_prefix or "temp_s3_update/web_ingest/upload_history"
+
+        # Skill-bundle destination follows the same rule: default in
+        # LOCAL/DEV so operators can boot without extra config; hardened
+        # envs must set the destination explicitly so uploaded skills
+        # never land in the DEV bucket by accident.
+        skill_bundle_bucket = _optional("S3_UPLOADER_SKILL_BUNDLE_BUCKET", env)
+        skill_bundle_prefix = _optional("S3_UPLOADER_SKILL_BUNDLE_PREFIX", env)
+        if environment in _HARDENED_ENVIRONMENTS:
+            if not skill_bundle_bucket:
+                raise ConfigurationError(
+                    "S3_UPLOADER_SKILL_BUNDLE_BUCKET is required in STG/PRD"
+                )
+            if not skill_bundle_prefix:
+                raise ConfigurationError(
+                    "S3_UPLOADER_SKILL_BUNDLE_PREFIX is required in STG/PRD"
+                )
+        else:
+            skill_bundle_bucket = skill_bundle_bucket or "agentcore-harness-dev"
+            skill_bundle_prefix = skill_bundle_prefix or "skills"
         return cls(
             region=_required("AWS_REGION", env),
             landing_bucket=_required("S3_UPLOADER_LANDING_BUCKET", env),
@@ -197,7 +218,7 @@ class Settings:
                 "S3_UPLOADER_SESSION_TTL_SECONDS", env, 43200
             ),
             raw_retention_days=raw_retention_days,
-            api_base_url=_required("S3_UPLOADER_API_BASE_URL", env).rstrip("/"),
+            api_base_url=_optional("S3_UPLOADER_API_BASE_URL", env).rstrip("/"),
             glue_job_name=_required("S3_UPLOADER_GLUE_JOB_NAME", env),
             contract_bucket=_required("S3_UPLOADER_CONTRACT_BUCKET", env),
             contract_prefix=_required("S3_UPLOADER_CONTRACT_PREFIX", env).strip("/"),
@@ -213,6 +234,8 @@ class Settings:
             ),
             history_bucket=history_bucket,
             history_prefix=history_prefix.strip("/"),
+            skill_bundle_bucket=skill_bundle_bucket,
+            skill_bundle_prefix=skill_bundle_prefix.strip("/"),
         )
 
 

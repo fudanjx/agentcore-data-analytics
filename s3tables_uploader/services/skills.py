@@ -1,15 +1,16 @@
 """API-facing skill-bundle operations.
 
-Thin wrapper around :mod:`skill_bundle` that converts its raw
+Thin wrapper around :mod:`skill_bundle` that converts raw
 ``SkillBundleError`` into the typed exception hierarchy exposed through
-``core.exceptions``. The bundle validation and S3 layout stay in
-``skill_bundle.py`` so the worker-side callers do not need to import from
-services.
+``core.exceptions`` and threads the Settings-driven skill-bundle destination
+(bucket + prefix) into every call so hardened envs never fall back to the
+DEV defaults.
 """
 
 from __future__ import annotations
 
 from .. import skill_bundle
+from ..config import Settings
 from ..core.exceptions import UploaderError
 
 
@@ -22,15 +23,25 @@ def _wrap(error: skill_bundle.SkillBundleError) -> UploaderError:
 class SkillService:
     """List, publish and remove skill files/versions for a table bucket."""
 
+    def __init__(self, settings: Settings):
+        self._settings = settings
+
+    @property
+    def _dest(self) -> dict[str, str]:
+        return {
+            "destination_bucket": self._settings.skill_bundle_bucket,
+            "destination_prefix": self._settings.skill_bundle_prefix,
+        }
+
     def list_files(self, table_bucket_arn: str) -> dict[str, object]:
         try:
-            return skill_bundle.list_skill_files(table_bucket_arn)
+            return skill_bundle.list_skill_files(table_bucket_arn, **self._dest)
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
 
     def list_versions(self, table_bucket_arn: str) -> dict[str, object]:
         try:
-            return skill_bundle.list_skill_versions(table_bucket_arn)
+            return skill_bundle.list_skill_versions(table_bucket_arn, **self._dest)
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
 
@@ -43,7 +54,7 @@ class SkillService:
     ) -> dict[str, object]:
         try:
             return skill_bundle.publish_version(
-                table_bucket_arn, user_id, filename, content
+                table_bucket_arn, user_id, filename, content, **self._dest
             )
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
@@ -55,7 +66,9 @@ class SkillService:
         payload: list[tuple[str, bytes]],
     ) -> dict[str, object]:
         try:
-            return skill_bundle.publish_files(table_bucket_arn, user_id, payload)
+            return skill_bundle.publish_files(
+                table_bucket_arn, user_id, payload, **self._dest
+            )
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
 
@@ -68,7 +81,9 @@ class SkillService:
 
     def version_location(self, table_bucket_arn: str, filename: str) -> tuple[str, str]:
         try:
-            return skill_bundle.version_location(table_bucket_arn, filename)
+            return skill_bundle.version_location(
+                table_bucket_arn, filename, **self._dest
+            )
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
 
@@ -76,7 +91,9 @@ class SkillService:
         self, table_bucket_arn: str, path: str
     ) -> tuple[str, str, str]:
         try:
-            return skill_bundle.skill_file_location(table_bucket_arn, path)
+            return skill_bundle.skill_file_location(
+                table_bucket_arn, path, **self._dest
+            )
         except skill_bundle.SkillBundleError as error:
             raise _wrap(error) from error
 

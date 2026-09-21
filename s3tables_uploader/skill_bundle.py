@@ -61,9 +61,27 @@ def table_bucket_name(table_bucket_arn: str) -> str:
     return name
 
 
-def _destination(bucket_name: str) -> tuple[str, str, str]:
-    bucket = os.environ.get("S3_UPLOADER_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET).strip()
-    raw_prefix = os.environ.get("S3_UPLOADER_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX).strip()
+def _destination(
+    bucket_name: str,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> tuple[str, str, str]:
+    """Return the S3 destination for this table bucket's skill files.
+
+    ``destination_bucket`` / ``destination_prefix`` are the Settings-driven
+    values threaded through from the API layer. Env-var fallbacks are kept
+    so existing worker/test paths that call this module directly continue
+    to work; new API-side callers should always pass the explicit values.
+    """
+    bucket = (
+        destination_bucket
+        or os.environ.get("S3_UPLOADER_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET)
+    ).strip()
+    raw_prefix = (
+        destination_prefix
+        or os.environ.get("S3_UPLOADER_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX)
+    ).strip()
     prefix_parts = [part for part in raw_prefix.replace("\\", "/").split("/") if part]
     if not bucket or any(part in {".", ".."} for part in prefix_parts):
         raise SkillBundleError("The skill-bundle destination configuration is invalid", 503)
@@ -167,10 +185,19 @@ def _existing_object_keys(destination_bucket: str, destination_prefix: str) -> s
     return existing
 
 
-def list_skill_files(table_bucket_arn: str) -> dict:
+def list_skill_files(
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> dict:
     """Return safe, relative object metadata for one table bucket's skill area."""
     bucket_name = table_bucket_name(table_bucket_arn)
-    destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
+    destination_bucket, destination_prefix, destination_uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     try:
         files: list[dict] = []
         paginator = s3.get_paginator("list_objects_v2")
@@ -245,11 +272,21 @@ def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -
         raise SkillBundleError("The uploaded file is not a valid ZIP archive") from error
 
 
-def version_location(table_bucket_arn: str, filename: str) -> tuple[str, str]:
+def version_location(
+    table_bucket_arn: str,
+    filename: str,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> tuple[str, str]:
     if not _FLAT_ZIP_RE.fullmatch(filename):
         raise SkillBundleError("Invalid skill version filename")
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, _ = _destination(bucket_name)
+    bucket, prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     return bucket, f"{prefix}/{filename}"
 
 
@@ -269,9 +306,18 @@ def _version_upload_time(filename: str, last_modified) -> datetime | None:
     return last_modified
 
 
-def list_skill_versions(table_bucket_arn: str) -> dict:
+def list_skill_versions(
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> dict:
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(bucket_name)
+    bucket, prefix, uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     versions = []
     try:
         for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
@@ -286,10 +332,22 @@ def list_skill_versions(table_bucket_arn: str) -> dict:
     return {"skill_name": bucket_name, "destination_uri": uri, "versions": sorted(versions, key=lambda item: (item["uploaded_at"] or "", item["filename"]), reverse=True)}
 
 
-def publish_version(table_bucket_arn: str, user_id: str, filename: str, content: bytes) -> dict:
+def publish_version(
+    table_bucket_arn: str,
+    user_id: str,
+    filename: str,
+    content: bytes,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> dict:
     validate_version_zip(table_bucket_arn, filename, content)
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(bucket_name)
+    bucket, prefix, uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     uploaded = datetime.now(timezone.utc)
     snapshot = f"{uploaded.strftime('%Y%m%dT%H%M%S')}{uploaded.microsecond // 1000:03d}Z-{uuid.uuid4().hex[:8]}.zip"
     try:
@@ -303,18 +361,39 @@ def publish_version(table_bucket_arn: str, user_id: str, filename: str, content:
     return {"skill_name": bucket_name, "destination_uri": uri, "filename": snapshot, "uploaded_at": uploaded.isoformat(), "size": len(content)}
 
 
-def skill_file_location(table_bucket_arn: str, path: str) -> tuple[str, str, str]:
+def skill_file_location(
+    table_bucket_arn: str,
+    path: str,
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> tuple[str, str, str]:
     """Return the configured S3 bucket/key after validating a relative path."""
     bucket_name = table_bucket_name(table_bucket_arn)
     safe_path = _safe_relative_path(path)
-    destination_bucket, destination_prefix, _ = _destination(bucket_name)
+    destination_bucket, destination_prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     return destination_bucket, f"{destination_prefix}/{safe_path}", safe_path
 
 
-def publish_files(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+def publish_files(
+    table_bucket_arn: str,
+    user_id: str,
+    files: list[tuple[str, bytes]],
+    *,
+    destination_bucket: str | None = None,
+    destination_prefix: str | None = None,
+) -> dict:
     """Add or overwrite only the supplied skill files; retain all other files."""
     bucket_name, bundle = validate_upload_files(table_bucket_arn, files)
-    destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
+    destination_bucket, destination_prefix, destination_uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     try:
         existing = _existing_object_keys(destination_bucket, destination_prefix)
         ordered = sorted(bundle, key=lambda item: (item.path == "SKILL.md", item.path))
