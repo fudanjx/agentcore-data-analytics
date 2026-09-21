@@ -106,7 +106,7 @@ async function loadSkillFiles() {
   setChildren(explorer);
   try {
     const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
-    const response = await apiFetch(`/api/skills/versions?${query}`); const result = await response.json();
+    const response = await apiFetch(`/api/v3/skills/versions?${query}`); const result = await response.json();
     if (!response.ok) throw new Error(result.detail || 'Unable to list skill versions.');
     $('skill-location').textContent = result.destination_uri;
     if (!result.versions?.length) {
@@ -136,7 +136,7 @@ async function downloadSkillFile(path) {
   const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Downloading ${path}…`;
   try {
     const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, filename: path });
-    const response = await apiFetch(`/api/skills/versions/download?${query}`);
+    const response = await apiFetch(`/api/v3/skills/versions/download?${query}`);
     if (!response.ok) { const result = await response.json(); throw new Error(result.detail || 'Skill version download failed.'); }
     const blob = await response.blob(); const url = URL.createObjectURL(blob);
     const link = document.createElement('a'); link.href = url; link.download = path;
@@ -152,7 +152,7 @@ async function deleteSkillFile(path) {
   if (!confirm(`Delete skill ZIP version “${path}”?`)) return;
   const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Deleting ${path}…`;
   try {
-    const response = await apiFetch('/api/skills/versions', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: state.bucket.table_bucket_arn, path, confirm: true }) });
+    const response = await apiFetch('/api/v3/skills/versions', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: state.bucket.table_bucket_arn, path, confirm: true }) });
     const result = await response.json();
     if (!response.ok) throw new Error(result.detail || 'Skill version deletion failed.');
     status.className = 'operation-status complete'; status.textContent = `Deleted ${result.deleted_filename}.`;
@@ -172,7 +172,7 @@ async function uploadSkillBundle() {
     const form = new FormData();
     form.append('table_bucket_arn', state.bucket.table_bucket_arn);
     form.append('file', files[0], files[0].name);
-    const response = await apiFetch('/api/skills/versions', { method: 'POST', body: form });
+    const response = await apiFetch('/api/v3/skills/versions', { method: 'POST', body: form });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill ZIP upload failed.'; return; }
     status.className = 'operation-status complete'; status.textContent = `Uploaded new skill version ${result.filename}.`;
@@ -201,7 +201,7 @@ function clearDestination() {
 }
 async function loadEffectiveIdentity() {
   renderOutgoingIdentity();
-  const response = await apiFetch('/api/identity'); const data = await response.json();
+  const response = await apiFetch('/api/v3/identity'); const data = await response.json();
   if (!response.ok) {
     $('effective-identity').textContent = JSON.stringify({ authorization: 'DENIED', detail: data.detail || 'No configured scope for this user.' }, null, 2);
     return null;
@@ -210,7 +210,7 @@ async function loadEffectiveIdentity() {
   return data;
 }
 async function loadIdentityProfiles() {
-  const response = await fetch('/api/dev/identity-profiles', { credentials: 'same-origin' }); const data = await response.json();
+  const response = await fetch('/api/v3/dev/identity-profiles', { credentials: 'same-origin' }); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load local identity profiles');
   state.identityProfiles = data.profiles || [];
   setChildren($('emulated-user'), ...state.identityProfiles.map(profile => {
@@ -227,7 +227,7 @@ async function loadBuckets(preferredBucket = null, { preserveSession = false, pr
   const previousBucketArn = state.bucket?.table_bucket_arn || null;
   const identity = await loadEffectiveIdentity();
   if (!identity) { clearDestination(); return; }
-  const response = await apiFetch('/api/buckets'); const data = await response.json();
+  const response = await apiFetch('/api/v3/buckets'); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load assigned buckets');
   state.isAdmin = data.is_admin;
   state.userId = data.user_id;
@@ -258,7 +258,7 @@ async function loadNamespaces(preferredNamespace = null, { preserveSession = fal
   setChildren($('namespace')); setChildren($('tables')); clearPreflight({ forgetSession: !preserveSession });
   if (!state.bucket) { $('namespace').disabled = true; $('scope').textContent = state.isAdmin ? 'Create an S3 Tables bucket to begin.' : 'No assigned S3 Tables bucket.'; renderAdminProvisioning(); valid(); return; }
   const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn });
-  const response = await apiFetch(`/api/namespaces?${query}`); const data = await response.json();
+  const response = await apiFetch(`/api/v3/buckets/namespaces?${query}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load namespaces');
   const namespaces = [...data.namespaces];
   if (preferredNamespace && !namespaces.includes(preferredNamespace)) namespaces.push(preferredNamespace);
@@ -277,7 +277,7 @@ async function createTableBucket() {
   const name = $('new-bucket').value.trim(); const button = $('create-bucket'); const status = $('create-bucket-status');
   button.disabled = true; button.classList.add('is-busy'); status.className = 'operation-status'; status.textContent = `Creating ${name}…`;
   try {
-    const response = await apiFetch('/api/buckets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
+    const response = await apiFetch('/api/v3/buckets', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name }) });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Bucket creation failed.'; return; }
     $('new-bucket').value = '';
@@ -296,7 +296,7 @@ async function createSelectedNamespace() {
   const namespace = $('new-namespace').value.trim(); const bucket = state.bucket; const button = $('create-namespace'); const status = $('create-namespace-status');
   button.disabled = true; button.classList.add('is-busy'); status.className = 'operation-status'; status.textContent = `Creating ${namespace}…`;
   try {
-    const response = await apiFetch('/api/namespaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: bucket.table_bucket_arn, namespace }) });
+    const response = await apiFetch('/api/v3/buckets/namespaces', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: bucket.table_bucket_arn, namespace }) });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Namespace creation failed.'; return; }
     $('new-namespace').value = '';
@@ -312,7 +312,7 @@ async function createSelectedNamespace() {
 
 async function loadTables() {
   if (!state.bucket || !state.namespace) return;
-  const response = await apiFetch(`/api/tables?${bucketQuery()}`); const data = await response.json();
+  const response = await apiFetch(`/api/v3/buckets/tables?${bucketQuery()}`); const data = await response.json();
   if (!response.ok) throw new Error(data.detail || 'Unable to load tables');
   $('scope').textContent = `Target: ${state.bucket.label} / ${data.namespace}`;
   setChildren($('tables'), ...data.tables.map(table => {
@@ -338,7 +338,7 @@ async function loadTables() {
 async function deleteTable(table) {
   if (!confirm(`Delete table “${table}”? This permanently removes the table and its data.`)) return;
   $('activity').textContent = `Deleting ${table}…`;
-  const response = await apiFetch('/api/tables', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table, table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace }) });
+  const response = await apiFetch('/api/v3/buckets/tables', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table, table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace }) });
   const result = await response.json(); if (!response.ok) return alert(result.detail || 'Table deletion failed');
   if (state.table === table) { state.table = null; state.tableManaged = false; }
   $('activity').textContent = `Deleted ${table}.`; await loadTables();
@@ -1064,7 +1064,7 @@ function displayHistory(items, latestRollbackUploadId) {
 async function loadHistory() {
   if (!state.canViewHistory || !state.bucket || !state.namespace || !state.table || !state.tableManaged || state.mode !== 'append') { $('history-body').textContent = state.canViewHistory ? state.table && !state.tableManaged ? 'This table is browse-only and has no uploader-managed history.' : 'Select an uploader-managed table to view its upload history.' : ''; return; }
   const query = new URLSearchParams({ ...Object.fromEntries(bucketQuery()), table: state.table });
-  const response = await apiFetch(`/api/upload-history?${query}`); const result = await response.json();
+  const response = await apiFetch(`/api/v3/upload-history?${query}`); const result = await response.json();
   if (!response.ok) { $('history-body').textContent = result.detail || 'Unable to load upload history.'; return; }
   displayHistory(result.history || [], result.latest_rollback_upload_id);
 }
@@ -1073,7 +1073,7 @@ async function rollbackUpload(item) {
   const warning = `Rolling back will restore “${state.table}” to its state immediately before upload ${item.upload_id}. This removes that upload’s data. Continue?`;
   if (!confirm(warning)) return;
   $('outcome').hidden = false; $('activity').textContent = `Starting rollback for ${item.upload_id}…`; $('status').textContent = 'Rollback is starting…'; $('status').className = 'running';
-  const response = await apiFetch('/api/rollbacks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: state.table, table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace, upload_id: item.upload_id, confirm: true }) });
+  const response = await apiFetch('/api/v3/rollbacks', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table: state.table, table_bucket_arn: state.bucket.table_bucket_arn, namespace: state.namespace, upload_id: item.upload_id, confirm: true }) });
   const result = await response.json();
   if (!response.ok) { $('status').textContent = 'Rollback was not started.'; $('status').className = 'failed'; $('status-body').textContent = JSON.stringify(result, null, 2); return; }
   $('status-body').textContent = JSON.stringify(result, null, 2); pollMutation(result.mutation_id);
@@ -1193,7 +1193,7 @@ async function poll(id, qcUri, operation, retryCount = 0) {
   if (state.activeJobRunId && state.activeJobRunId !== id) return;
   state.activeJobRunId = id;
   try {
-    const response = await apiFetch(`/api/ingestions/${id}?operation=${operation}`);
+    const response = await apiFetch(`/api/v3/ingestions/${id}?operation=${operation}`);
     const result = await response.json();
     if (!response.ok) throw new Error(responseDetail(result, 'AWS Glue status is temporarily unavailable.'));
     const terminal = terminalStates.includes(result.state);
@@ -1245,7 +1245,7 @@ async function pollMutation(mutationId, retryCount = 0) {
   if (state.activeJobRunId && state.activeJobRunId !== activeId) return;
   state.activeJobRunId = activeId;
   try {
-    const response = await apiFetch(`/api/mutations/${encodeURIComponent(mutationId)}`);
+    const response = await apiFetch(`/api/v3/mutations/${encodeURIComponent(mutationId)}`);
     const result = await response.json();
     if (!response.ok) throw new Error(responseDetail(result, 'Mutation status is temporarily unavailable.'));
     const status = result.status || {};
