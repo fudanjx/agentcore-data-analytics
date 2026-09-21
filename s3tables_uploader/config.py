@@ -141,9 +141,13 @@ class Settings:
         env = dict(os.environ if environ is None else environ)
         environment = _environment(env)
         cookie_secure = _boolean("S3_UPLOADER_COOKIE_SECURE", env, True)
-        if environment in _HARDENED_ENVIRONMENTS and not cookie_secure:
+        # Cookies are only issued in envs where the temporary frontend is
+        # served. LOCAL is typically HTTP so the developer keeps the choice;
+        # STG/PRD do not serve cookies at all; DEV is a real HTTPS deploy
+        # so cookie_secure=false there is almost certainly a misconfig.
+        if environment is Environment.DEV and not cookie_secure:
             raise ConfigurationError(
-                "S3_UPLOADER_COOKIE_SECURE must be true in STG/PRD"
+                "S3_UPLOADER_COOKIE_SECURE must be true in DEV"
             )
         secret = _required("S3_UPLOADER_LOGIN_SECRET", env)
         if len(secret) < 32:

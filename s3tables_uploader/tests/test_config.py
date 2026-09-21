@@ -22,13 +22,18 @@ class SettingsTests(unittest.TestCase):
         with self.assertRaisesRegex(ConfigurationError, "LANDING_BUCKET"):
             Settings.from_environ(env)
 
-    def test_production_requires_secure_cookie(self):
+    def test_dev_requires_secure_cookie(self):
         env = self.valid()
-        env["S3_UPLOADER_ENVIRONMENT"] = "PRD"
-        env["S3_UPLOADER_BEARER_SECRET_ARN"] = "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:test"
+        env["S3_UPLOADER_ENVIRONMENT"] = "DEV"
         env["S3_UPLOADER_COOKIE_SECURE"] = "false"
         with self.assertRaisesRegex(ConfigurationError, "COOKIE_SECURE"):
             Settings.from_environ(env)
+
+    def test_hardened_does_not_require_secure_cookie(self):
+        env = self._hardened()
+        env["S3_UPLOADER_COOKIE_SECURE"] = "false"
+        # STG/PRD never issue cookies, so cookie_secure is irrelevant there.
+        Settings.from_environ(env)
 
     def test_defaults_to_short_raw_retention(self):
         self.assertEqual(Settings.from_environ(self.valid()).raw_retention_days, 1)
