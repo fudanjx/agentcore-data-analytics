@@ -3,7 +3,26 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+
+
+class Environment(str, Enum):
+    """Deployment environments recognised by the API service.
+
+    Behaviour flags (frontend surface, docs, bearer auth, log level, uvicorn
+    access log) are derived from this value through computed properties on
+    :class:`Settings` — consumers must never branch on the raw enum.
+    """
+
+    LOCAL = "LOCAL"
+    DEV = "DEV"
+    STG = "STG"
+    PRD = "PRD"
+
+
+_DEBUG_ENVIRONMENTS = frozenset({Environment.LOCAL, Environment.DEV})
+_HARDENED_ENVIRONMENTS = frozenset({Environment.STG, Environment.PRD})
 
 
 class ConfigurationError(ValueError):
@@ -17,6 +36,10 @@ def _required(name: str, environ: dict[str, str]) -> str:
     return value
 
 
+def _optional(name: str, environ: dict[str, str], default: str = "") -> str:
+    return environ.get(name, default).strip()
+
+
 def _boolean(name: str, environ: dict[str, str], default: bool) -> bool:
     value = environ.get(name)
     if value is None:
@@ -26,6 +49,27 @@ def _boolean(name: str, environ: dict[str, str], default: bool) -> bool:
     if value.lower() in {"0", "false", "no"}:
         return False
     raise ConfigurationError(f"{name} must be true or false")
+
+
+def _integer(name: str, environ: dict[str, str], default: int) -> int:
+    raw = environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError as error:
+        raise ConfigurationError(f"{name} must be an integer") from error
+
+
+def _environment(environ: dict[str, str]) -> Environment:
+    raw = environ.get("S3_UPLOADER_ENVIRONMENT", Environment.LOCAL.value).strip().upper()
+    try:
+        return Environment(raw)
+    except ValueError as error:
+        allowed = ", ".join(item.value for item in Environment)
+        raise ConfigurationError(
+            f"S3_UPLOADER_ENVIRONMENT must be one of: {allowed}"
+        ) from error
 
 
 @dataclass(frozen=True)
@@ -45,20 +89,79 @@ class Settings:
     glue_job_name: str
     contract_bucket: str
     contract_prefix: str
+    environment: Environment = Environment.LOCAL
+    log_level: str = "INFO"
+    serve_local_frontend: bool = True
+    bearer_secret_arn: str | None = None
+    bearer_cache_ttl_seconds: int = 3600
+    bearer_refresh_min_interval_seconds: int = 300
+
+    # ------------------------------------------------------------------
+    # Computed properties — the ONLY way consumers should branch on env.
+    # ------------------------------------------------------------------
+
+    @property
+    def frontend_surface_enabled(self) -> bool:
+        """Whether the temporary frontend (static + cookie + profile switcher) is served."""
+        if self.environment is Environment.DEV:
+            return True
+        if self.environment is Environment.LOCAL:
+            return self.serve_local_frontend
+        return False  # STG, PRD
+
+    @property
+    def bearer_auth_required(self) -> bool:
+        """Whether requests must present an Authorization: Bearer header."""
+        if self.environment in _HARDENED_ENVIRONMENTS:
+            return True
+        if self.environment is Environment.LOCAL and not self.serve_local_frontend:
+            return True
+        return False
+
+    @property
+    def docs_enabled(self) -> bool:
+        """Whether FastAPI's /docs and /redoc endpoints are exposed."""
+        return self.environment is Environment.LOCAL
+
+    @property
+    def debug_logging_enabled(self) -> bool:
+        return self.environment in _DEBUG_ENVIRONMENTS
+
+    @property
+    def access_log_enabled(self) -> bool:
+        """Whether uvicorn should emit request access logs."""
+        return self.environment in _DEBUG_ENVIRONMENTS
 
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> Settings:
         env = dict(os.environ if environ is None else environ)
-        environment = env.get("S3_UPLOADER_ENV", "production").lower()
+        environment = _environment(env)
         cookie_secure = _boolean("S3_UPLOADER_COOKIE_SECURE", env, True)
-        if environment == "production" and not cookie_secure:
-            raise ConfigurationError("S3_UPLOADER_COOKIE_SECURE must be true in production")
+        if environment in _HARDENED_ENVIRONMENTS and not cookie_secure:
+            raise ConfigurationError(
+                "S3_UPLOADER_COOKIE_SECURE must be true in STG/PRD"
+            )
         secret = _required("S3_UPLOADER_LOGIN_SECRET", env)
         if len(secret) < 32:
-            raise ConfigurationError("S3_UPLOADER_LOGIN_SECRET must be at least 32 characters")
-        raw_retention_days = int(env.get("S3_UPLOADER_RAW_RETENTION_DAYS", "1"))
+            raise ConfigurationError(
+                "S3_UPLOADER_LOGIN_SECRET must be at least 32 characters"
+            )
+        raw_retention_days = _integer("S3_UPLOADER_RAW_RETENTION_DAYS", env, 1)
         if not 1 <= raw_retention_days <= 30:
-            raise ConfigurationError("S3_UPLOADER_RAW_RETENTION_DAYS must be 1 through 30")
+            raise ConfigurationError(
+                "S3_UPLOADER_RAW_RETENTION_DAYS must be 1 through 30"
+            )
+        serve_local_frontend = _boolean(
+            "S3_UPLOADER_SERVE_LOCAL_FRONTEND", env, True
+        )
+        bearer_secret_arn = _optional("S3_UPLOADER_BEARER_SECRET_ARN", env) or None
+        bearer_required = environment in _HARDENED_ENVIRONMENTS or (
+            environment is Environment.LOCAL and not serve_local_frontend
+        )
+        if bearer_required and not bearer_secret_arn:
+            raise ConfigurationError(
+                "S3_UPLOADER_BEARER_SECRET_ARN is required when bearer auth is enforced"
+            )
         return cls(
             region=_required("AWS_REGION", env),
             landing_bucket=_required("S3_UPLOADER_LANDING_BUCKET", env),
@@ -69,12 +172,24 @@ class Settings:
             login_password=_required("S3_UPLOADER_LOGIN_PASSWORD", env),
             login_secret=secret,
             cookie_secure=cookie_secure,
-            session_ttl_seconds=int(env.get("S3_UPLOADER_SESSION_TTL_SECONDS", "43200")),
+            session_ttl_seconds=_integer(
+                "S3_UPLOADER_SESSION_TTL_SECONDS", env, 43200
+            ),
             raw_retention_days=raw_retention_days,
             api_base_url=_required("S3_UPLOADER_API_BASE_URL", env).rstrip("/"),
             glue_job_name=_required("S3_UPLOADER_GLUE_JOB_NAME", env),
             contract_bucket=_required("S3_UPLOADER_CONTRACT_BUCKET", env),
             contract_prefix=_required("S3_UPLOADER_CONTRACT_PREFIX", env).strip("/"),
+            environment=environment,
+            log_level=_optional("S3_UPLOADER_LOG_LEVEL", env, "INFO").upper(),
+            serve_local_frontend=serve_local_frontend,
+            bearer_secret_arn=bearer_secret_arn,
+            bearer_cache_ttl_seconds=_integer(
+                "S3_UPLOADER_BEARER_CACHE_TTL_SECONDS", env, 3600
+            ),
+            bearer_refresh_min_interval_seconds=_integer(
+                "S3_UPLOADER_BEARER_REFRESH_MIN_INTERVAL_SECONDS", env, 300
+            ),
         )
 
 

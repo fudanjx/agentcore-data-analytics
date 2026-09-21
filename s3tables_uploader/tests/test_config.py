@@ -23,7 +23,10 @@ class SettingsTests(unittest.TestCase):
             Settings.from_environ(env)
 
     def test_production_requires_secure_cookie(self):
-        env = self.valid(); env["S3_UPLOADER_COOKIE_SECURE"] = "false"
+        env = self.valid()
+        env["S3_UPLOADER_ENVIRONMENT"] = "PRD"
+        env["S3_UPLOADER_BEARER_SECRET_ARN"] = "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:test"
+        env["S3_UPLOADER_COOKIE_SECURE"] = "false"
         with self.assertRaisesRegex(ConfigurationError, "COOKIE_SECURE"):
             Settings.from_environ(env)
 

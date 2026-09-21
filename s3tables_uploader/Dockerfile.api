@@ -30,4 +30,6 @@ USER 65532
 EXPOSE 8090
 
 # Distroless images have no shell; keep the command in exec form.
-CMD ["python3", "-m", "uvicorn", "s3tables_uploader.entrypoint:app", "--host", "0.0.0.0", "--port", "8090"]
+# start_api toggles --access-log / --no-access-log based on
+# S3_UPLOADER_ENVIRONMENT (access log in LOCAL/DEV; no access log in STG/PRD).
+CMD ["python3", "-m", "s3tables_uploader.scripts.start_api"]
