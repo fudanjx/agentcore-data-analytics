@@ -16,6 +16,7 @@ from __future__ import annotations
 import re
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ...core.exceptions import BearerAuthFailed, BearerAuthRequired
@@ -41,7 +42,7 @@ class BearerAuthService:
         *,
         cache_ttl_seconds: int,
         refresh_min_interval_seconds: int,
-        clock: "callable[[], float]" = time.monotonic,
+        clock: Callable[[], float] = time.monotonic,
     ):
         self._source = secret_source
         self._secret_arn = secret_arn

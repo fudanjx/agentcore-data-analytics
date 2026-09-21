@@ -22,6 +22,7 @@ from asgi_correlation_id import CorrelationIdMiddleware
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, RedirectResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.types import ASGIApp
 
 from ..config import Settings
 from ..core.exceptions import LoginRequired
@@ -39,7 +40,7 @@ class FrontendCookieGate(BaseHTTPMiddleware):
         {"/login", "/healthz", "/docs", "/redoc", "/openapi.json"}
     )
 
-    def __init__(self, app: FastAPI, settings: Settings):
+    def __init__(self, app: ASGIApp, settings: Settings):
         super().__init__(app)
         self._settings = settings
 

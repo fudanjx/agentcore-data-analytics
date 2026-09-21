@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 
 
-class Environment(str, Enum):
+class Environment(StrEnum):
     """Deployment environments recognised by the API service.
 
     Behaviour flags (frontend surface, docs, bearer auth, log level, uvicorn
@@ -119,12 +119,12 @@ class Settings:
         if self.environment in _HARDENED_ENVIRONMENTS:
             return True
         if self.environment is Environment.LOCAL and not self.serve_local_frontend:
-            return True
+            return bool(self.environment)
         return False
 
     @property
     def docs_enabled(self) -> bool:
-        """Whether FastAPI's /docs and /redoc endpoints are exposed."""
+        """Whether FastAPI's /docs, /redoc and /openapi.json endpoints are exposed."""
         return self.environment is Environment.LOCAL
 
     @property

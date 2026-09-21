@@ -54,6 +54,7 @@ def create_app(
     app = FastAPI(
         title="S3 Tables Uploader",
         version="3.1.0",
+        openapi_url="/openapi.json" if settings.docs_enabled else None,
         docs_url="/docs" if settings.docs_enabled else None,
         redoc_url="/redoc" if settings.docs_enabled else None,
         lifespan=make_lifespan(
