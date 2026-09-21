@@ -134,8 +134,12 @@ def get_mutation_service(sqs: SqsDep, settings: SettingsDep) -> MutationEnqueuer
 MutationServiceDep = Annotated[MutationEnqueuerService, Depends(get_mutation_service)]
 
 
-def get_audit_reader(s3: S3Dep) -> ScopedS3AuditReader:
-    return ScopedS3AuditReader(s3)
+def get_audit_reader(s3: S3Dep, settings: SettingsDep) -> ScopedS3AuditReader:
+    return ScopedS3AuditReader(
+        s3,
+        history_bucket=settings.history_bucket,
+        history_prefix=settings.history_prefix,
+    )
 
 
 AuditReaderDep = Annotated[ScopedS3AuditReader, Depends(get_audit_reader)]

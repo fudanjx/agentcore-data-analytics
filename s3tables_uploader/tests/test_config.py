@@ -44,3 +44,38 @@ class SettingsTests(unittest.TestCase):
             env = self.valid(); del env[name]
             with self.assertRaisesRegex(ConfigurationError, name):
                 Settings.from_environ(env)
+
+    def _hardened(self) -> dict[str, str]:
+        env = self.valid()
+        env["S3_UPLOADER_ENVIRONMENT"] = "PRD"
+        env["S3_UPLOADER_COOKIE_SECURE"] = "true"
+        env["S3_UPLOADER_BEARER_SECRET_ARN"] = (
+            "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:test"
+        )
+        env["S3_UPLOADER_HISTORY_BUCKET"] = "prd-history-bucket"
+        env["S3_UPLOADER_HISTORY_PREFIX"] = "history"
+        return env
+
+    def test_hardened_requires_history_bucket(self):
+        env = self._hardened()
+        del env["S3_UPLOADER_HISTORY_BUCKET"]
+        with self.assertRaisesRegex(ConfigurationError, "HISTORY_BUCKET"):
+            Settings.from_environ(env)
+
+    def test_hardened_requires_history_prefix(self):
+        env = self._hardened()
+        del env["S3_UPLOADER_HISTORY_PREFIX"]
+        with self.assertRaisesRegex(ConfigurationError, "HISTORY_PREFIX"):
+            Settings.from_environ(env)
+
+    def test_local_defaults_history_bucket_and_prefix_when_absent(self):
+        settings = Settings.from_environ(self.valid())
+        self.assertEqual(settings.history_bucket, "ah-data-analytics")
+        self.assertEqual(
+            settings.history_prefix, "temp_s3_update/web_ingest/upload_history"
+        )
+
+    def test_hardened_accepts_explicit_history_values(self):
+        settings = Settings.from_environ(self._hardened())
+        self.assertEqual(settings.history_bucket, "prd-history-bucket")
+        self.assertEqual(settings.history_prefix, "history")

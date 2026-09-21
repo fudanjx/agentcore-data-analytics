@@ -217,7 +217,7 @@ class S3JobStore:
             Key=key,
             Body=json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
             ContentType="application/json",
-            ServerSideEncryption="aws:kms",
+            ServerSideEncryption="AES256",
             **kwargs,
         )
 

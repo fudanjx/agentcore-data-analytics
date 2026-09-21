@@ -417,7 +417,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             row_count += file_rows
             audits.append(audit)
             key = _prepared_key(settings, job_id, number if len(local_sources) > 1 else None)
-            s3.upload_file(str(prepared), settings.landing_bucket, key, ExtraArgs={"ServerSideEncryption": "aws:kms", "ContentType": "application/octet-stream"})
+            s3.upload_file(str(prepared), settings.landing_bucket, key, ExtraArgs={"ServerSideEncryption": "AES256", "ContentType": "application/octet-stream"})
             prepared_keys.append(key)
         if schema is None:
             raise WorkerError("empty uploads are not accepted")
@@ -442,7 +442,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             "sanitization": audits,
         }
         manifest_key = _manifest_key(settings, job_id)
-        s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="aws:kms")
+        s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="AES256")
     store.put_status(JobStatus(
         job_id=job_id, phase="READY_FOR_MUTATION",
         message="Sanitised staging is ready; waiting for the per-table FIFO Glue dispatcher.",

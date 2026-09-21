@@ -95,6 +95,8 @@ class Settings:
     bearer_secret_arn: str | None = None
     bearer_cache_ttl_seconds: int = 3600
     bearer_refresh_min_interval_seconds: int = 300
+    history_bucket: str = ""
+    history_prefix: str = ""
 
     # ------------------------------------------------------------------
     # Computed properties — the ONLY way consumers should branch on env.
@@ -162,6 +164,25 @@ class Settings:
             raise ConfigurationError(
                 "S3_UPLOADER_BEARER_SECRET_ARN is required when bearer auth is enforced"
             )
+
+        # History bucket / prefix. LOCAL and DEV fall back to the well-known
+        # values so developers can boot without extra config; STG and PRD
+        # must set them explicitly so a staging deploy never accidentally
+        # writes to the production history bucket.
+        history_bucket = _optional("S3_UPLOADER_HISTORY_BUCKET", env)
+        history_prefix = _optional("S3_UPLOADER_HISTORY_PREFIX", env)
+        if environment in _HARDENED_ENVIRONMENTS:
+            if not history_bucket:
+                raise ConfigurationError(
+                    "S3_UPLOADER_HISTORY_BUCKET is required in STG/PRD"
+                )
+            if not history_prefix:
+                raise ConfigurationError(
+                    "S3_UPLOADER_HISTORY_PREFIX is required in STG/PRD"
+                )
+        else:
+            history_bucket = history_bucket or "ah-data-analytics"
+            history_prefix = history_prefix or "temp_s3_update/web_ingest/upload_history"
         return cls(
             region=_required("AWS_REGION", env),
             landing_bucket=_required("S3_UPLOADER_LANDING_BUCKET", env),
@@ -190,6 +211,8 @@ class Settings:
             bearer_refresh_min_interval_seconds=_integer(
                 "S3_UPLOADER_BEARER_REFRESH_MIN_INTERVAL_SECONDS", env, 300
             ),
+            history_bucket=history_bucket,
+            history_prefix=history_prefix.strip("/"),
         )
 
 

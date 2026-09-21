@@ -2,8 +2,11 @@
 
 Replaces the previous ``_history_entries`` which read three prefixes on every
 request and filtered client-side. This reader only touches the canonical
-scoped prefix (``<HISTORY_PREFIX>/<scope>/<table>/``), so listing cost stays
+scoped prefix (``<history_prefix>/<scope>/<table>/``), so listing cost stays
 proportional to the target table, not to the account-wide audit trail.
+
+Bucket and prefix are both settings-driven so staging and production can
+point at different history stores.
 """
 
 from __future__ import annotations
@@ -18,9 +21,15 @@ from ..utils.hashing import scope_key
 class ScopedS3AuditReader:
     """Return audit entries for a specific table from the canonical prefix."""
 
-    def __init__(self, s3_client: Any, history_bucket: str = HISTORY_BUCKET):
+    def __init__(
+        self,
+        s3_client: Any,
+        history_bucket: str = HISTORY_BUCKET,
+        history_prefix: str = HISTORY_PREFIX,
+    ):
         self._s3 = s3_client
         self._bucket = history_bucket
+        self._prefix_root = history_prefix.strip("/")
 
     def read_entries(
         self,
@@ -56,6 +65,5 @@ class ScopedS3AuditReader:
             reverse=True,
         )
 
-    @staticmethod
-    def _prefix(table_bucket_arn: str, namespace: str, table: str) -> str:
-        return f"{HISTORY_PREFIX}/{scope_key(table_bucket_arn, namespace)}/{table}/"
+    def _prefix(self, table_bucket_arn: str, namespace: str, table: str) -> str:
+        return f"{self._prefix_root}/{scope_key(table_bucket_arn, namespace)}/{table}/"
