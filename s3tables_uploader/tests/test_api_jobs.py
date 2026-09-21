@@ -8,7 +8,7 @@ from unittest.mock import patch
 from botocore.exceptions import ClientError
 from fastapi.testclient import TestClient
 
-from s3tables_uploader.api import create_app
+from s3tables_uploader.app.factory import create_app
 from s3tables_uploader.config import Settings
 from s3tables_uploader.job_store import S3JobStore
 from s3tables_uploader.models import JobStatus
@@ -81,6 +81,11 @@ class FakeS3Tables:
         self.metadata_location = "s3://example--table-s3/metadata/test.metadata.json"
 
     def list_table_buckets(self, **kwargs): return {"tableBuckets": self.buckets}
+    def list_tags_for_resource(self, resourceARN):
+        # Fake every known bucket as belonging to this app.
+        return {"tags": [{"key": "APP", "value": "Data-Insights"}]}
+    def tag_resource(self, resourceARN, tags):
+        return {}
     def create_table_bucket(self, name):
         arn = f"arn:aws:s3tables:ap-southeast-1:964340114883:bucket/{name}"
         self.buckets.append({"arn": arn, "name": name, "type": "customer"})
@@ -100,7 +105,8 @@ class FakeS3Tables:
 class ApiTests(unittest.TestCase):
     def setUp(self):
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
-        self.s3 = FakeS3(); self.s3tables = FakeS3Tables(); self.glue = FakeGlue(); self.sqs = FakeSqs(); self.client = TestClient(create_app(Settings.from_environ(env), self.s3, self.sqs, self.s3tables, self.glue))
+        self.s3 = FakeS3(); self.s3tables = FakeS3Tables(); self.glue = FakeGlue(); self.sqs = FakeSqs()
+        self.client = self.enterContext(TestClient(create_app(Settings.from_environ(env), self.s3, self.sqs, self.s3tables, self.glue)))
 
     def test_v2_upload_session_route_is_not_exposed(self):
         self.client.post("/login", json={"password": "password"})
@@ -145,10 +151,10 @@ class ApiTests(unittest.TestCase):
             "uploaded_by": "shared-operator", "previous_snapshot_id": "123", "target_table": table,
             "namespace": namespace, "table_bucket_arn": bucket, "reporting_month": "202609", "filenames": "[\"source.parquet\"]",
         }).encode()
-        history = self.client.get("/api/upload-history", params={"table_bucket_arn": bucket, "namespace": namespace, "table": table})
+        history = self.client.get("/api/v3/upload-history", params={"table_bucket_arn": bucket, "namespace": namespace, "table": table})
         self.assertEqual(history.status_code, 200, history.text)
         self.assertEqual(history.json()["latest_rollback_upload_id"], "UPLOAD-ABCDEF123456")
-        rollback = self.client.post("/api/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
+        rollback = self.client.post("/api/v3/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
         self.assertEqual(rollback.status_code, 202, rollback.text)
         mutation_id = rollback.json()["mutation_id"]
         self.assertEqual(rollback.json()["phase"], "READY_FOR_MUTATION")
@@ -158,34 +164,34 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(command.rollback_snapshot_id, "123")
         self.assertEqual(command.destination.table, table)
         self.assertEqual(self.sqs.messages[-1]["MessageBody"], mutation_id)
-        repeated = self.client.post("/api/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
+        repeated = self.client.post("/api/v3/rollbacks", json={"table_bucket_arn": bucket, "namespace": namespace, "table": table, "upload_id": "UPLOAD-ABCDEF123456", "confirm": True})
         self.assertEqual(repeated.status_code, 202, repeated.text)
         self.assertEqual(repeated.json()["mutation_id"], mutation_id)
 
     def test_administrator_can_create_namespace_and_delete_table(self):
         self.client.post("/login", json={"password":"password"})
-        bucket = self.client.post("/api/buckets", json={"name": "new-analytics"})
+        bucket = self.client.post("/api/v3/buckets", json={"name": "new-analytics"})
         self.assertEqual(bucket.status_code, 201, bucket.text)
-        namespace = self.client.post("/api/namespaces", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "reporting"})
+        namespace = self.client.post("/api/v3/buckets/namespaces", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "reporting"})
         self.assertEqual(namespace.status_code, 201, namespace.text)
         scope = hashlib.sha256(f"{self.s3tables.bucket_arn}|pilot".encode()).hexdigest()[:16]
         self.s3.items[f"temp_s3_update/web_ingest/table_contracts/{scope}/test_table.json"] = b"{}"
-        deleted = self.client.request("DELETE", "/api/tables", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "table": "test_table"})
+        deleted = self.client.request("DELETE", "/api/v3/buckets/tables", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "table": "test_table"})
         self.assertEqual(deleted.status_code, 200, deleted.text)
         self.assertEqual(deleted.json()["deleted"], "test_table")
         self.assertEqual(self.s3tables.deleted, (self.s3tables.bucket_arn, "pilot", "test_table"))
 
     def test_v1_local_identity_emulation_exposes_admin_editor_and_unassigned_profiles(self):
         self.client.post("/login", json={"password":"password"})
-        profiles = self.client.get("/api/dev/identity-profiles")
+        profiles = self.client.get("/api/v3/dev/identity-profiles")
         self.assertEqual(profiles.status_code, 200, profiles.text)
         self.assertEqual([item["user_id"] for item in profiles.json()["profiles"]], ["local-admin", "local-editor", "local-unassigned"])
 
-        editor = self.client.get("/api/identity", headers={"X-Pilot-User-Id": "local-editor"})
+        editor = self.client.get("/api/v3/identity", headers={"X-Pilot-User-Id": "local-editor"})
         self.assertEqual(editor.status_code, 200, editor.text)
         self.assertFalse(editor.json()["is_admin"])
         self.assertEqual(editor.json()["buckets"][0]["table_bucket_arn"], "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-soc-delta-pilot")
-        denied = self.client.get("/api/buckets", headers={"X-Pilot-User-Id": "local-unassigned"})
+        denied = self.client.get("/api/v3/buckets", headers={"X-Pilot-User-Id": "local-unassigned"})
         self.assertEqual(denied.status_code, 403, denied.text)
 
     def test_table_cards_restore_v1_iceberg_metadata_row_count(self):
@@ -199,7 +205,7 @@ class ApiTests(unittest.TestCase):
             "current-snapshot-id": 9,
             "snapshots": [{"snapshot-id": 9, "summary": {"total-records": "42"}}],
         }).encode()
-        response = self.client.get("/api/tables", params={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot"})
+        response = self.client.get("/api/v3/buckets/tables", params={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot"})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["tables"][0]["row_count"], 42)
         self.assertEqual(response.json()["tables"][0]["deduplication_columns"], ["id"])
@@ -278,7 +284,7 @@ class ApiTests(unittest.TestCase):
         bucket = "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/future-bucket"
         self.s3tables.buckets.append({"arn": bucket, "name": "future-bucket", "type": "customer"})
         self.s3tables.namespaces[bucket] = ["future"]
-        response = self.client.get("/api/namespaces", params={"table_bucket_arn": bucket})
+        response = self.client.get("/api/v3/buckets/namespaces", params={"table_bucket_arn": bucket})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(response.json()["namespaces"], ["future"])
 
@@ -290,7 +296,7 @@ class ApiTests(unittest.TestCase):
         skill = b"---\ndescription: test skill\n---\n# Test\n"
         with patch.object(skill_bundle, "s3", self.s3):
             uploaded = self.client.post(
-                "/api/skills/files",
+                "/api/v3/skills/files",
                 data={"table_bucket_arn": bucket, "paths_json": '["SKILL.md"]'},
                 files={"files": ("SKILL.md", skill, "text/markdown")},
             )
@@ -300,14 +306,14 @@ class ApiTests(unittest.TestCase):
             self.assertIn(key, self.s3.items)
             self.assertIn(b"name: ah-soc-delta-pilot", self.s3.items[key])
 
-            downloaded = self.client.get("/api/skills/files/download", params={"table_bucket_arn": bucket, "path": "SKILL.md"})
+            downloaded = self.client.get("/api/v3/skills/files/download", params={"table_bucket_arn": bucket, "path": "SKILL.md"})
             self.assertEqual(downloaded.status_code, 200, downloaded.text)
             self.assertEqual(downloaded.content, self.s3.items[key])
             self.assertIn("attachment", downloaded.headers["content-disposition"])
 
-            rejected = self.client.request("DELETE", "/api/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": False})
+            rejected = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": False})
             self.assertEqual(rejected.status_code, 422, rejected.text)
-            deleted = self.client.request("DELETE", "/api/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": True})
+            deleted = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": True})
             self.assertEqual(deleted.status_code, 200, deleted.text)
             self.assertEqual(deleted.json()["deleted_path"], "SKILL.md")
             self.assertNotIn(key, self.s3.items)
@@ -323,16 +329,16 @@ class ApiTests(unittest.TestCase):
             zipped.writestr("skill-folder/references/data.md", b"facts")
         content = archive.getvalue()
 
-        self.assertEqual(self.client.get("/api/skills/versions", params={"table_bucket_arn": bucket}).status_code, 401)
+        self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).status_code, 401)
         self.client.post("/login", json={"password": "password"})
         with patch.object(skill_bundle, "s3", self.s3):
             rejected = self.client.post(
-                "/api/skills/versions", data={"table_bucket_arn": bucket},
+                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
                 files={"file": ("wrong.txt", content, "text/plain")},
             )
             self.assertEqual(rejected.status_code, 422, rejected.text)
             corrupt = self.client.post(
-                "/api/skills/versions", data={"table_bucket_arn": bucket},
+                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
                 files={"file": ("broken.zip", b"not a zip", "application/zip")},
             )
             self.assertEqual(corrupt.status_code, 422, corrupt.text)
@@ -341,7 +347,7 @@ class ApiTests(unittest.TestCase):
                 zipped.writestr("skill-folder/SKILL.md", skill)
                 zipped.writestr("../outside.md", b"unsafe")
             unsafe_upload = self.client.post(
-                "/api/skills/versions", data={"table_bucket_arn": bucket},
+                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
                 files={"file": ("unsafe.zip", unsafe_archive.getvalue(), "application/zip")},
             )
             self.assertEqual(unsafe_upload.status_code, 422, unsafe_upload.text)
@@ -350,32 +356,32 @@ class ApiTests(unittest.TestCase):
                 zipped.writestr("skill-folder/SKILL.md", skill)
                 zipped.writestr("../outside/", b"")
             directory_upload = self.client.post(
-                "/api/skills/versions", data={"table_bucket_arn": bucket},
+                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
                 files={"file": ("unsafe-dir.zip", unsafe_directory.getvalue(), "application/zip")},
             )
             self.assertEqual(directory_upload.status_code, 422, directory_upload.text)
             for _ in range(2):
                 uploaded = self.client.post(
-                    "/api/skills/versions", data={"table_bucket_arn": bucket},
+                    "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
                     files={"file": ("wrapped-skill.zip", content, "application/zip")},
                 )
                 self.assertEqual(uploaded.status_code, 201, uploaded.text)
-            versions = self.client.get("/api/skills/versions", params={"table_bucket_arn": bucket})
+            versions = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
             self.assertEqual(versions.status_code, 200, versions.text)
             names = [item["filename"] for item in versions.json()["versions"]]
             self.assertEqual(len(names), 2)
             self.assertNotEqual(names[0], names[1])
             self.assertTrue(all(name.endswith(".zip") and item["uploaded_at"] for name, item in zip(names, versions.json()["versions"])))
-            downloaded = self.client.get("/api/skills/versions/download", params={"table_bucket_arn": bucket, "filename": names[0]})
+            downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": names[0]})
             self.assertEqual(downloaded.status_code, 200, downloaded.text)
             self.assertEqual(downloaded.content, content)
-            unsafe = self.client.get("/api/skills/versions/download", params={"table_bucket_arn": bucket, "filename": "../other.zip"})
+            unsafe = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": "../other.zip"})
             self.assertEqual(unsafe.status_code, 422, unsafe.text)
-            unconfirmed = self.client.request("DELETE", "/api/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": False})
+            unconfirmed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": False})
             self.assertEqual(unconfirmed.status_code, 422, unconfirmed.text)
-            removed = self.client.request("DELETE", "/api/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": True})
+            removed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": True})
             self.assertEqual(removed.status_code, 200, removed.text)
-            self.assertEqual(self.client.get("/api/skills/versions", params={"table_bucket_arn": bucket}).json()["versions"][0]["filename"], names[1])
+            self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).json()["versions"][0]["filename"], names[1])
 
     def test_skill_zip_version_list_includes_existing_timestamp_zip(self):
         from s3tables_uploader import skill_bundle
@@ -385,7 +391,7 @@ class ApiTests(unittest.TestCase):
         self.s3.items["skills/ah-soc-delta-pilot/SKILL.md"] = b"loose skill file"
         self.client.post("/login", json={"password": "password"})
         with patch.object(skill_bundle, "s3", self.s3):
-            response = self.client.get("/api/skills/versions", params={"table_bucket_arn": bucket})
+            response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(response.json()["versions"]), 1)
         self.assertEqual(response.json()["versions"][0]["filename"], "20260913112233.zip")
@@ -443,7 +449,7 @@ class ApiTests(unittest.TestCase):
 
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         buffer = io.BytesIO(); pq.write_table(pa.table({"id": ["1"]}), buffer)
         payload = buffer.getvalue()
@@ -466,7 +472,7 @@ class ApiTests(unittest.TestCase):
 
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         buffer = io.BytesIO(); pq.write_table(pa.table({"id": ["1"]}), buffer)
         payload = buffer.getvalue()
@@ -485,7 +491,7 @@ class ApiTests(unittest.TestCase):
     def test_unattached_same_size_lease_is_reused_when_file_selection_changes(self):
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "first.parquet", "size_bytes": 1}]}).json()
         replacement = client.put(f"/api/v3/worker-leases/{first['lease_id']}", json={"files": [{"name": "corrected.parquet", "size_bytes": 2}]})
@@ -498,7 +504,7 @@ class ApiTests(unittest.TestCase):
         import json
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "rejected.xlsx", "size_bytes": 1}]}).json()
         store = S3JobStore(s3, "landing", "s3-uploader")
@@ -521,7 +527,7 @@ class ApiTests(unittest.TestCase):
     def test_unattached_base_lease_is_replaced_when_new_selection_routes_large(self):
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "first.parquet", "size_bytes": 1}]}).json()
         replacement = client.put(f"/api/v3/worker-leases/{first['lease_id']}", json={"files": [{"name": "large.parquet", "size_bytes": 129 * 1024 * 1024}]})
@@ -582,7 +588,7 @@ class ApiTests(unittest.TestCase):
             "S3_UPLOADER_ENV": "development", "S3_UPLOADER_COOKIE_SECURE": "false",
         }
         s3, sqs, tables = FakeS3(), FakeSqs(), FakeS3Tables()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, tables))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, tables)))
         client.post("/login", json={"password": "password"})
         store = S3JobStore(s3, "landing", "s3-uploader")
         store.put_compat_session({
@@ -609,7 +615,7 @@ class ApiTests(unittest.TestCase):
         import json
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables()))
+        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
         client.post("/login", json={"password":"password"})
         lease = client.post("/api/v3/worker-leases", json={"files": [{"name": "source.parquet", "size_bytes": 1}]}).json()
         lease_key = f"s3-uploader/worker-leases/{lease['lease_id']}/lease.json"

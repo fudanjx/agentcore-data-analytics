@@ -179,16 +179,18 @@ _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 def resolve_frontend_user(
     request: Request, profiles: ProfileServiceDep
 ) -> UserContext:
-    """Cookie modes: read ``X-Pilot-User-Id`` and resolve against profiles."""
+    """Cookie modes: read ``X-Pilot-User-Id`` and resolve against profiles.
+
+    Missing header defaults to ``local-admin`` — the profile switcher may
+    not be set on the browser's first request, and forcing a 401 there
+    would break the initial page load. Hardened modes have no such
+    fallback: ``User-ID`` is strictly required.
+    """
     if profiles is None:
         raise IdentityHeaderInvalid(
             "Frontend identity resolver called in hardened mode"
         )
-    user_id = request.headers.get(FRONTEND_IDENTITY_HEADER)
-    if not user_id:
-        raise IdentityHeaderRequired(
-            f"Header {FRONTEND_IDENTITY_HEADER} is required"
-        )
+    user_id = request.headers.get(FRONTEND_IDENTITY_HEADER, "local-admin")
     return profiles.resolve(user_id)
 
 
