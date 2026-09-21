@@ -27,7 +27,7 @@ import pyarrow.parquet as pq
 
 from .config import WorkerSettings
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
-from .job_store import JobAlreadyClaimed, RecordStateConflict, S3JobStore
+from .job_store import JobAlreadyClaimed, MissingRecord, RecordStateConflict, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
 from .ingest_contract import normalise_names, temporal_array
