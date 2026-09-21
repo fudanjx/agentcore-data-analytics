@@ -54,6 +54,8 @@ class SettingsTests(unittest.TestCase):
         )
         env["S3_UPLOADER_HISTORY_BUCKET"] = "prd-history-bucket"
         env["S3_UPLOADER_HISTORY_PREFIX"] = "history"
+        env["S3_UPLOADER_SKILL_BUNDLE_BUCKET"] = "prd-skill-bucket"
+        env["S3_UPLOADER_SKILL_BUNDLE_PREFIX"] = "skills"
         return env
 
     def test_hardened_requires_history_bucket(self):
@@ -79,3 +81,20 @@ class SettingsTests(unittest.TestCase):
         settings = Settings.from_environ(self._hardened())
         self.assertEqual(settings.history_bucket, "prd-history-bucket")
         self.assertEqual(settings.history_prefix, "history")
+
+    def test_hardened_requires_skill_bundle_bucket(self):
+        env = self._hardened()
+        del env["S3_UPLOADER_SKILL_BUNDLE_BUCKET"]
+        with self.assertRaisesRegex(ConfigurationError, "SKILL_BUNDLE_BUCKET"):
+            Settings.from_environ(env)
+
+    def test_hardened_requires_skill_bundle_prefix(self):
+        env = self._hardened()
+        del env["S3_UPLOADER_SKILL_BUNDLE_PREFIX"]
+        with self.assertRaisesRegex(ConfigurationError, "SKILL_BUNDLE_PREFIX"):
+            Settings.from_environ(env)
+
+    def test_local_defaults_skill_bundle_when_absent(self):
+        settings = Settings.from_environ(self.valid())
+        self.assertEqual(settings.skill_bundle_bucket, "agentcore-harness-dev")
+        self.assertEqual(settings.skill_bundle_prefix, "skills")

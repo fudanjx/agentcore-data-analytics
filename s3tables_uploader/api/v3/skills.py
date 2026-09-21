@@ -1,4 +1,10 @@
-"""Skill bundle upload / download / delete."""
+"""Skill bundle upload / download / delete.
+
+Calls into :mod:`skill_bundle` directly — the module owns validation, S3
+IO and its own error type (a subclass of :class:`UploaderError`, so the
+global exception handler translates it). The router threads the
+Settings-driven destination through as ``**dest`` on every call.
+"""
 
 from __future__ import annotations
 
@@ -11,8 +17,9 @@ from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from ... import skill_bundle
 from ...app.dependencies import (
-    SkillServiceDep,
+    SkillDestinationDep,
     TableBucketServiceDep,
     UserDep,
 )
@@ -53,31 +60,31 @@ def list_files(
     table_bucket_arn: str,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    return skills.list_files(table_bucket_arn)
+    return skill_bundle.list_skill_files(table_bucket_arn, **dest)
 
 
 @router.post("/files")
 async def upload_files(
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
     table_bucket_arn: str = Form(),
     paths_json: str = Form(),
     files: list[UploadFile] = File(),
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    paths = skills.parse_paths_json(paths_json)
+    paths = skill_bundle.parse_paths_json(paths_json)
     if len(paths) != len(files):
         raise HTTPException(422, "Each uploaded skill file must have one matching relative path")
     try:
         payload = [
-            (path, await upload.read(skills.max_file_bytes + 1))
+            (path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1))
             for path, upload in zip(paths, files, strict=True)
         ]
-        return skills.publish_files(table_bucket_arn, user.user_id, payload)
+        return skill_bundle.publish_files(table_bucket_arn, user.user_id, payload, **dest)
     finally:
         for upload in files:
             await upload.close()
@@ -89,12 +96,14 @@ def download_file(
     path: str,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> StreamingResponse:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    destination_bucket, key, safe_path = skills.file_location(table_bucket_arn, path)
+    destination_bucket, key, safe_path = skill_bundle.skill_file_location(
+        table_bucket_arn, path, **dest
+    )
     try:
-        result = skills.s3.get_object(Bucket=destination_bucket, Key=key)
+        result = skill_bundle.s3.get_object(Bucket=destination_bucket, Key=key)
     except ClientError as error:
         raise _not_found_or_gateway(error) from error
     headers = {
@@ -114,17 +123,17 @@ def delete_file(
     payload: DeleteSkillFileRequest,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> dict[str, str]:
     require_table_bucket_access(payload.table_bucket_arn, user, tables)
     if not payload.confirm:
         raise HTTPException(422, "Confirm deletion before removing a skill file")
-    destination_bucket, key, safe_path = skills.file_location(
-        payload.table_bucket_arn, payload.path
+    destination_bucket, key, safe_path = skill_bundle.skill_file_location(
+        payload.table_bucket_arn, payload.path, **dest
     )
     try:
-        skills.s3.head_object(Bucket=destination_bucket, Key=key)
-        skills.s3.delete_object(Bucket=destination_bucket, Key=key)
+        skill_bundle.s3.head_object(Bucket=destination_bucket, Key=key)
+        skill_bundle.s3.delete_object(Bucket=destination_bucket, Key=key)
     except ClientError as error:
         raise _not_found_or_gateway(error) from error
     return {"deleted_path": safe_path}
@@ -139,25 +148,25 @@ def list_versions(
     table_bucket_arn: str,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    return skills.list_versions(table_bucket_arn)
+    return skill_bundle.list_skill_versions(table_bucket_arn, **dest)
 
 
 @router.post("/versions", status_code=201)
 async def upload_version(
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
     table_bucket_arn: str = Form(),
     file: UploadFile = File(),
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
     try:
-        content = await file.read(skills.max_zip_bytes + 1)
-        return skills.publish_version(
-            table_bucket_arn, user.user_id, file.filename or "", content
+        content = await file.read(skill_bundle.MAX_ZIP_BYTES + 1)
+        return skill_bundle.publish_version(
+            table_bucket_arn, user.user_id, file.filename or "", content, **dest
         )
     finally:
         await file.close()
@@ -169,12 +178,12 @@ def download_version(
     filename: str,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> StreamingResponse:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    bucket, key = skills.version_location(table_bucket_arn, filename)
+    bucket, key = skill_bundle.version_location(table_bucket_arn, filename, **dest)
     try:
-        result = skills.s3.get_object(Bucket=bucket, Key=key)
+        result = skill_bundle.s3.get_object(Bucket=bucket, Key=key)
     except ClientError as error:
         raise _not_found_or_gateway(error) from error
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
@@ -188,15 +197,17 @@ def delete_version(
     payload: DeleteSkillFileRequest,
     user: UserDep,
     tables: TableBucketServiceDep,
-    skills: SkillServiceDep,
+    dest: SkillDestinationDep,
 ) -> dict[str, str]:
     require_table_bucket_access(payload.table_bucket_arn, user, tables)
     if not payload.confirm:
         raise HTTPException(422, "Confirm deletion before removing a skill version")
-    bucket, key = skills.version_location(payload.table_bucket_arn, payload.path)
+    bucket, key = skill_bundle.version_location(
+        payload.table_bucket_arn, payload.path, **dest
+    )
     try:
-        skills.s3.head_object(Bucket=bucket, Key=key)
-        skills.s3.delete_object(Bucket=bucket, Key=key)
+        skill_bundle.s3.head_object(Bucket=bucket, Key=key)
+        skill_bundle.s3.delete_object(Bucket=bucket, Key=key)
     except ClientError as error:
         raise _not_found_or_gateway(error) from error
     return {"deleted_filename": payload.path}

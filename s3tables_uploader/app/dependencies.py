@@ -42,7 +42,6 @@ from ..services.contracts import ContractService
 from ..services.leases import LeaseService
 from ..services.mutations import MutationEnqueuerService
 from ..services.profiles import LocalIdentityProfileService
-from ..services.skills import SkillService
 from ..services.tables import TableBucketService
 
 
@@ -145,11 +144,20 @@ def get_audit_reader(s3: S3Dep, settings: SettingsDep) -> ScopedS3AuditReader:
 AuditReaderDep = Annotated[ScopedS3AuditReader, Depends(get_audit_reader)]
 
 
-def get_skill_service(settings: SettingsDep) -> SkillService:
-    return SkillService(settings)
+def get_skill_destination(settings: SettingsDep) -> dict[str, str]:
+    """Return skill-bundle destination kwargs threaded through to ``skill_bundle``.
+
+    Routes spread this dict into ``skill_bundle`` function calls
+    (``**dest``) so the module never has to reach into env vars from
+    inside a request.
+    """
+    return {
+        "destination_bucket": settings.skill_bundle_bucket,
+        "destination_prefix": settings.skill_bundle_prefix,
+    }
 
 
-SkillServiceDep = Annotated[SkillService, Depends(get_skill_service)]
+SkillDestinationDep = Annotated[dict[str, str], Depends(get_skill_destination)]
 
 
 def get_profile_service(settings: SettingsDep) -> LocalIdentityProfileService | None:

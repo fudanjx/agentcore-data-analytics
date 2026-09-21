@@ -17,6 +17,8 @@ from urllib.parse import quote
 import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .core.exceptions import UploaderError
+
 
 DEFAULT_DESTINATION_BUCKET = "agentcore-harness-dev"
 DEFAULT_DESTINATION_PREFIX = "skills"
@@ -40,8 +42,15 @@ s3 = boto3.client(
 )
 
 
-class SkillBundleError(RuntimeError):
-    """Safe client-facing validation or S3 publication failure."""
+class SkillBundleError(UploaderError):
+    """Safe client-facing validation or S3 publication failure.
+
+    Inherits from :class:`UploaderError` so the global exception handler
+    translates it into the standard JSON shape without router-level
+    try/except.
+    """
+
+    error_code = "SKILL_BUNDLE_ERROR"
 
     def __init__(self, message: str, status_code: int = 422):
         super().__init__(message)
