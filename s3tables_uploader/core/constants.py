@@ -90,3 +90,16 @@ ACTIVE_LEASE_MINUTES: Final[int] = 30
 # real user id (profile key in frontend modes, email in hardened).
 
 BEARER_SERVICE_USER_ID: Final[str] = "bearer-service"
+
+
+# ----------------------------------------------------------------------------
+# NRIC detection policy
+#
+# The worker's preflight samples each column and flags it as an NRIC column
+# when at least `NRIC_MATCH_THRESHOLD` of `NRIC_SAMPLE_SIZE` sampled values
+# match the NRIC pattern. `NRIC_POLICY_KIND` is echoed to the API response so
+# clients can distinguish policy revisions.
+
+NRIC_SAMPLE_SIZE: Final[int] = 5
+NRIC_MATCH_THRESHOLD: Final[int] = 3
+NRIC_POLICY_KIND: Final[str] = "sampled-heuristic-v1"

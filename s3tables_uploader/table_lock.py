@@ -15,6 +15,8 @@ from typing import Any
 
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .core.constants import S3_SSE
+
 
 class TableLockError(RuntimeError):
     pass
@@ -98,7 +100,7 @@ class S3TableLockManager:
         try:
             response = self.s3.put_object(
                 Bucket=self.bucket, Key=key, Body=self._body(payload), ContentType="application/json",
-                ServerSideEncryption="AES256", IfNoneMatch="*",
+                ServerSideEncryption=S3_SSE, IfNoneMatch="*",
             )
             return TableLease(key, response.get("ETag", "").strip('"'), owner_token, payload)
         except ClientError as error:
@@ -118,7 +120,7 @@ class S3TableLockManager:
         try:
             response = self.s3.put_object(
                 Bucket=self.bucket, Key=key, Body=self._body(payload), ContentType="application/json",
-                ServerSideEncryption="AES256", IfMatch=etag,
+                ServerSideEncryption=S3_SSE, IfMatch=etag,
             )
             return TableLease(key, response.get("ETag", "").strip('"'), owner_token, payload)
         except ClientError as error:
@@ -135,7 +137,7 @@ class S3TableLockManager:
         try:
             response = self.s3.put_object(
                 Bucket=self.bucket, Key=lease.key, Body=self._body(payload), ContentType="application/json",
-                ServerSideEncryption="AES256", IfMatch=lease.etag,
+                ServerSideEncryption=S3_SSE, IfMatch=lease.etag,
             )
         except ClientError as error:
             raise TableLockError("Unable to renew the table mutation lock") from error
@@ -239,7 +241,7 @@ class S3TableMutationQueue:
         try:
             response = self.s3.put_object(
                 Bucket=self.bucket, Key=key, Body=self._body(payload), ContentType="application/json",
-                ServerSideEncryption="AES256", IfNoneMatch="*",
+                ServerSideEncryption=S3_SSE, IfNoneMatch="*",
             )
             return TableQueueEntry(key, response.get("ETag", "").strip('"'), payload)
         except ClientError as error:
@@ -259,7 +261,7 @@ class S3TableMutationQueue:
     def mark_running(self, entry: TableQueueEntry) -> TableQueueEntry:
         payload = {
             **entry.payload, "state": "RUNNING_GLUE",
-            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=120)).isoformat(),
+            "expires_at": (datetime.now(timezone.utc) + timedelta(minutes=self.expiry_minutes)).isoformat(),
         }
         return self._write(entry, payload)
 
@@ -267,7 +269,7 @@ class S3TableMutationQueue:
         try:
             response = self.s3.put_object(
                 Bucket=self.bucket, Key=entry.key, Body=self._body(payload), ContentType="application/json",
-                ServerSideEncryption="AES256", IfMatch=entry.etag,
+                ServerSideEncryption=S3_SSE, IfMatch=entry.etag,
             )
             return TableQueueEntry(entry.key, response.get("ETag", "").strip('"'), payload)
         except (ClientError, BotoCoreError) as error:

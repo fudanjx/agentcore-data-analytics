@@ -9,12 +9,11 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import random
 import re
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import Any, Iterable
+from typing import Any, Iterable, TYPE_CHECKING
 
 import boto3
 import pandas as pd
@@ -23,12 +22,10 @@ import pyarrow.compute as pc
 from Crypto.Cipher import AES
 from Crypto.Util.Padding import pad, unpad
 
+if TYPE_CHECKING:
+    from .config import WorkerSettings
 
-# Deployment-specific secret identity belongs in the worker task definition,
-# never in source.  Keeping it configurable also makes this package portable
-# to a separate account without changing the sanitisation policy.
-SECRET_ARN = ""
-SECRET_NAME = ""
+
 ENCRYPTED_PREFIX = "enc:v1:"
 NRIC_PATTERN = re.compile(r"^[STFGM][0-9]{7}[A-Z]$", re.IGNORECASE)
 
@@ -207,13 +204,16 @@ def _coerce_material(key: EncryptionMaterial | bytes) -> EncryptionMaterial:
 
 
 @lru_cache(maxsize=1)
-def encryption_key() -> EncryptionMaterial:
-    """Fetch and cache the key without logging its content."""
-    secret_id = os.environ.get("S3_UPLOADER_ENCRYPTION_SECRET_ARN", "").strip()
-    if not secret_id:
-        raise ValueError("S3_UPLOADER_ENCRYPTION_SECRET_ARN is required by the worker")
-    client = boto3.client("secretsmanager", region_name=os.environ.get("AWS_REGION"))
-    response = client.get_secret_value(SecretId=secret_id)
+def encryption_key(settings: "WorkerSettings") -> EncryptionMaterial:
+    """Fetch and cache the key without logging its content.
+
+    Reads ``settings.encryption_secret_arn`` and ``settings.region`` rather
+    than env vars so tests and callers stay explicit about configuration.
+    ``WorkerSettings`` is a frozen dataclass and therefore hashable, which
+    is what ``lru_cache`` requires.
+    """
+    client = boto3.client("secretsmanager", region_name=settings.region)
+    response = client.get_secret_value(SecretId=settings.encryption_secret_arn)
     raw = response.get("SecretString")
     if raw is None:
         raw = base64.b64decode(response["SecretBinary"]).decode("utf-8")
@@ -295,7 +295,7 @@ def postal_prefix(value: Any) -> str | object:
 
 
 def sanitise_table(
-    table: pa.Table, key: EncryptionMaterial | bytes | None = None,
+    table: pa.Table, key: EncryptionMaterial | bytes,
     manual_encryption_columns: Iterable[str] = (), nric_columns: Iterable[str] = (),
 ) -> tuple[pa.Table, dict[str, Any]]:
     """Apply the approved union policy and return a value-free audit summary."""
@@ -307,7 +307,7 @@ def sanitise_table(
     encrypted_values = 0
     encrypted_columns = tuple(name for name in table.schema.names if name in (set(plan.identifier_columns) | additional) and name not in plan.drop_columns)
     if encrypted_columns:
-        active_key = key or encryption_key()
+        active_key = key
     for column in encrypted_columns:
         normalised = frame[column].map(_normalise_value)
         unique_values = [value for value in normalised.dropna().unique().tolist()]

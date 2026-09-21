@@ -125,7 +125,7 @@ class WorkerAnalysisTests(unittest.TestCase):
                 "table_bucket_arn": "arn", "namespace": "pilot", "table": "target", "files": [{"name": "source.parquet", "sha256": "x", "source_key": "landing/raw.parquet"}],
                 "key_analysis_request": {"deduplication_columns": ["key"], "type_overrides": {}},
             })
-            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts")
+            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts", encryption_secret_arn="arn:aws:secretsmanager:ap-southeast-1:000000000000:secret:test")
             process_compat_work("key:session", settings, s3)
             session = store.get_compat_session("session")
         self.assertEqual(session["phase"], "READY_FOR_ACKNOWLEDGEMENT")

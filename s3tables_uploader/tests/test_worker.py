@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import pandas as pd
 
-from s3tables_uploader.worker import WorkerError, _history_prefix, _iceberg_type, _save_lease, _write_create_contract, _write_prepared_parquet, process_job
+from s3tables_uploader.worker import WorkerError, _iceberg_type, _save_lease, _write_create_contract, _write_prepared_parquet, process_job
 from s3tables_uploader.config import WorkerSettings
 from s3tables_uploader.models import Destination, JobRequest, JobSource
 from s3tables_uploader.job_store import S3JobStore
@@ -92,7 +92,7 @@ class WorkerTests(unittest.TestCase):
             s3, glue = FakeS3(), FakeGlue()
             s3.items["prefix/uploads/session/raw/first.parquet"] = first.read_bytes()
             s3.items["prefix/uploads/session/raw/second.parquet"] = second.read_bytes()
-            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts")
+            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts", encryption_secret_arn="arn:aws:secretsmanager:ap-southeast-1:000000000000:secret:test")
             store = S3JobStore(s3, "landing", "prefix")
             store.put_compat_session({
                 "session_id": "session", "table_bucket_arn": "arn", "namespace": "ah", "table": "target",
@@ -144,7 +144,7 @@ class WorkerTests(unittest.TestCase):
             s3 = FakeS3()
             s3.items["prefix/uploads/session/raw/first.parquet"] = first.read_bytes()
             s3.items["prefix/uploads/session/raw/second.parquet"] = second.read_bytes()
-            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts")
+            settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts", encryption_secret_arn="arn:aws:secretsmanager:ap-southeast-1:000000000000:secret:test")
             store = S3JobStore(s3, "landing", "prefix")
             store.put_compat_session({"session_id": "session", "table_bucket_arn": "arn", "namespace": "ah", "table": "target", "preflight": {"table_bucket_arn": "arn", "namespace": "ah", "table": "target", "target_schema": [{"name": "id", "type": "STRING"}, {"name": "value", "type": "STRING"}], "files": [{}, {}]}})
             store.put_request(JobRequest(job_id="job", session_id="session", owner_user_id="owner", operation="create", destination=Destination(table_bucket_arn="arn", namespace="ah", table="target"), source_key="prefix/uploads/session/raw/first.parquet", source_version_id="one", source_size_bytes=1, source_files=[JobSource(name="first.parquet", source_key="prefix/uploads/session/raw/first.parquet", source_version_id="one", source_size_bytes=1), JobSource(name="second.parquet", source_key="prefix/uploads/session/raw/second.parquet", source_version_id="two", source_size_bytes=1)], deduplication_mode="keyed", deduplication_columns=["id"]))
@@ -154,11 +154,6 @@ class WorkerTests(unittest.TestCase):
             manifest = json.loads(s3.items["prefix/jobs/job/prepared/manifest.json"])
         self.assertEqual(len(manifest["files"]), 1)
         self.assertEqual(manifest["prepared_row_count"], 1)
-
-    def test_worker_uses_v1_per_table_history_prefix(self):
-        arn = "arn:aws:s3tables:ap-southeast-1:964340114883:bucket/ah-soc-delta-pilot"
-        scope = __import__("hashlib").sha256(f"{arn}|pilot".encode()).hexdigest()[:16]
-        self.assertEqual(_history_prefix(arn, "pilot", "target"), f"temp_s3_update/web_ingest/upload_history/{scope}/target/")
 
     def test_glue_rollback_verifies_a_fresh_iceberg_table_snapshot(self):
         script = Path(__file__).parents[1] / "glue_job.py"
@@ -283,7 +278,7 @@ class WorkerTests(unittest.TestCase):
             def put_object(self, Bucket, Key, Body, **kwargs): self.written[(Bucket, Key)] = json.loads(Body); return {}
         import json
         request = JobRequest(job_id="job", session_id="session", owner_user_id="owner", operation="create", destination=Destination(table_bucket_arn="arn", namespace="ah", table="target"), source_key="prefix/uploads/session/raw/input.parquet", source_version_id="version", source_size_bytes=1, deduplication_mode="keyed", deduplication_columns=["id"])
-        settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts")
+        settings = WorkerSettings(region="ap-southeast-1", landing_bucket="landing", landing_prefix="prefix", glue_job_name="job", contract_bucket="contracts", contract_prefix="contracts", encryption_secret_arn="arn:aws:secretsmanager:ap-southeast-1:000000000000:secret:test")
         client = FakeS3()
         _write_create_contract(client, settings, request, [{"name": "id", "type": "STRING"}], {"encrypted_columns": [], "postal_columns": [], "age_banded_columns": []})
         record = next(iter(client.written.values()))

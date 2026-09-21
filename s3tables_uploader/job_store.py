@@ -10,6 +10,7 @@ from typing import Any, Callable
 
 from botocore.exceptions import ClientError
 
+from .core.constants import S3_SSE
 from .models import JobEvent, JobRequest, JobStatus, MutationCommand, UploadSession
 
 
@@ -217,7 +218,7 @@ class S3JobStore:
             Key=key,
             Body=json.dumps(payload, sort_keys=True, default=str).encode("utf-8"),
             ContentType="application/json",
-            ServerSideEncryption="AES256",
+            ServerSideEncryption=S3_SSE,
             **kwargs,
         )
 

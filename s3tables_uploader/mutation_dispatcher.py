@@ -17,7 +17,8 @@ from typing import Any, Literal
 import boto3
 from botocore.exceptions import ClientError
 
-from .config import _required
+from .config import ConfigurationError, Environment, WorkerSettings, _optional, _required
+from .core.constants import HISTORY_BUCKET, HISTORY_PREFIX
 from .job_store import MissingRecord, S3JobStore
 from .models import Destination, JobRequest, JobStatus, MutationCommand
 from .table_lock import S3TableLockManager, TableLockError, TableLockedError
@@ -26,8 +27,7 @@ from .table_lock import S3TableLockManager, TableLockError, TableLockedError
 _TERMINAL_GLUE_STATES = {"SUCCEEDED", "FAILED", "ERROR", "TIMEOUT", "STOPPED"}
 _PREPARATION_STATES = {"QUEUED", "CLAIMED", "PROFILING", "PREPARING"}
 _ACTIVE_GLUE_PHASES = {"STARTING_GLUE", "RUNNING_GLUE"}
-_HISTORY_BUCKET = "ah-data-analytics"
-_HISTORY_PREFIX = "temp_s3_update/web_ingest/upload_history"
+_HARDENED_ENVIRONMENTS = frozenset({Environment.STG, Environment.PRD})
 
 
 @dataclass(frozen=True)
@@ -42,21 +42,59 @@ class MutationDispatcherSettings:
     visibility_seconds: int = 120
     visibility_renewal_seconds: int = 30
     poll_seconds: int = 10
+    # History destination defaults to the well-known LOCAL/DEV values from
+    # core.constants. In production `from_environ` enforces STG/PRD to set
+    # both via env so a staging deploy never writes into the prod history
+    # bucket; direct constructors used by tests can rely on these defaults.
+    history_bucket: str = HISTORY_BUCKET
+    history_prefix: str = HISTORY_PREFIX
 
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> "MutationDispatcherSettings":
         env = dict(os.environ if environ is None else environ)
+        worker = WorkerSettings.from_environ(env)
+
+        # History destination follows the same rule as the API-side Settings:
+        # STG/PRD must set both explicitly so a staging deploy never writes
+        # audit records into the production history bucket. LOCAL/DEV fall
+        # back to the core.constants defaults so developers can boot without
+        # extra config.
+        raw_env = env.get("S3_UPLOADER_ENVIRONMENT", Environment.LOCAL.value).strip().upper()
+        try:
+            environment = Environment(raw_env)
+        except ValueError as error:
+            allowed = ", ".join(item.value for item in Environment)
+            raise ConfigurationError(
+                f"S3_UPLOADER_ENVIRONMENT must be one of: {allowed}"
+            ) from error
+        history_bucket = _optional("S3_UPLOADER_HISTORY_BUCKET", env)
+        history_prefix = _optional("S3_UPLOADER_HISTORY_PREFIX", env)
+        if environment in _HARDENED_ENVIRONMENTS:
+            if not history_bucket:
+                raise ConfigurationError(
+                    "S3_UPLOADER_HISTORY_BUCKET is required in STG/PRD"
+                )
+            if not history_prefix:
+                raise ConfigurationError(
+                    "S3_UPLOADER_HISTORY_PREFIX is required in STG/PRD"
+                )
+        else:
+            history_bucket = history_bucket or HISTORY_BUCKET
+            history_prefix = history_prefix or HISTORY_PREFIX
+
         return cls(
-            region=_required("AWS_REGION", env),
-            landing_bucket=_required("S3_UPLOADER_LANDING_BUCKET", env),
-            landing_prefix=env.get("S3_UPLOADER_LANDING_PREFIX", "s3-uploader").strip("/"),
+            region=worker.region,
+            landing_bucket=worker.landing_bucket,
+            landing_prefix=worker.landing_prefix,
             queue_url=_required("S3_UPLOADER_MUTATION_QUEUE_URL", env),
-            glue_job_name=_required("S3_UPLOADER_GLUE_JOB_NAME", env),
+            glue_job_name=worker.glue_job_name,
             max_concurrent_glue=int(env.get("S3_UPLOADER_MAX_CONCURRENT_GLUE", "5")),
             max_tracked_messages=int(env.get("S3_UPLOADER_MAX_TRACKED_MUTATIONS", "50")),
             visibility_seconds=int(env.get("S3_UPLOADER_MUTATION_VISIBILITY_SECONDS", "120")),
             visibility_renewal_seconds=int(env.get("S3_UPLOADER_MUTATION_VISIBILITY_RENEWAL_SECONDS", "30")),
             poll_seconds=int(env.get("S3_UPLOADER_MUTATION_POLL_SECONDS", "10")),
+            history_bucket=history_bucket,
+            history_prefix=history_prefix.strip("/"),
         )
 
 
@@ -67,11 +105,11 @@ class _TrackedMessage:
     last_visibility_at: float
 
 
-def _history_prefix(destination: Destination) -> str:
+def _history_prefix(settings: MutationDispatcherSettings, destination: Destination) -> str:
     import hashlib
 
     scope = hashlib.sha256(f"{destination.table_bucket_arn}|{destination.namespace}".encode("utf-8")).hexdigest()[:16]
-    return f"{_HISTORY_PREFIX}/{scope}/{destination.table}/"
+    return f"{settings.history_prefix}/{scope}/{destination.table}/"
 
 
 def _terminal(state: str) -> bool:
@@ -153,7 +191,7 @@ def _glue_arguments(command: MutationCommand, source: JobRequest | None, setting
         "--UPLOAD_ID": command.upload_id or f"UPLOAD-{command.mutation_id.replace('-', '')[:12].upper()}",
         "--UPLOADED_BY": command.owner_user_id,
         "--QC_PREFIX": f"s3://{settings.landing_bucket}/{settings.landing_prefix}/qc",
-        "--AUDIT_PREFIX": f"s3://{_HISTORY_BUCKET}/{_history_prefix(command.destination)}",
+        "--AUDIT_PREFIX": f"s3://{settings.history_bucket}/{_history_prefix(settings, command.destination)}",
         "--REPORTING_MONTH": command.reporting_month or "not-applicable",
         "--FILENAMES_JSON": filenames or "[]",
         "--ROLLBACK_SNAPSHOT_ID": command.rollback_snapshot_id or "not-applicable",

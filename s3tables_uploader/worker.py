@@ -27,6 +27,7 @@ import pyarrow.parquet as pq
 
 from .config import WorkerSettings
 from .contract import TARGET_COLUMNS, TIMESTAMP_TARGET_COLUMNS
+from .core.constants import ACTIVE_LEASE_MINUTES, S3_SSE
 from .job_store import JobAlreadyClaimed, MissingRecord, RecordStateConflict, S3JobStore
 from .models import JobStatus
 from .sanitization import encryption_key, sanitise_table
@@ -42,8 +43,6 @@ _LEASE_POLL_SECONDS = 2
 _LEASE_HEARTBEAT_SECONDS = 10
 _BASE_RSS_LIMIT_BYTES = 12 * 1024 * 1024 * 1024
 _BASE_STORAGE_PERCENT = 70
-_HISTORY_BUCKET = "ah-data-analytics"
-_HISTORY_PREFIX = "temp_s3_update/web_ingest/upload_history"
 
 
 def _prepared_key(settings: WorkerSettings, job_id: str, number: int | None = None) -> str:
@@ -58,12 +57,6 @@ def _manifest_key(settings: WorkerSettings, job_id: str) -> str:
 def _contract_key(settings: WorkerSettings, table_bucket_arn: str, namespace: str, table: str) -> str:
     scope = hashlib.sha256(f"{table_bucket_arn}|{namespace}".encode()).hexdigest()[:16]
     return f"{settings.contract_prefix}/{scope}/{table}.json"
-
-
-def _history_prefix(table_bucket_arn: str, namespace: str, table: str) -> str:
-    """Return the V1 per-table, value-free audit projection prefix."""
-    scope = hashlib.sha256(f"{table_bucket_arn}|{namespace}".encode()).hexdigest()[:16]
-    return f"{_HISTORY_PREFIX}/{scope}/{table}/"
 
 
 def _now() -> str:
@@ -122,7 +115,7 @@ def _run_compat_action(action: str, store: S3JobStore, s3: Any, settings: Worker
         columns = request.get("deduplication_columns") or []
         _save_compat_session(store, session, phase="KEY_ANALYSING", progress_message="Analysing the selected composite key in the isolated worker.")
         metrics = raw_key_impact_metrics([(path, name) for path, name, _ in paths], columns)
-        expires_at = datetime.now(timezone.utc) + timedelta(minutes=30)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=ACTIVE_LEASE_MINUTES)
         token = uuid.uuid4().hex
         impact = {
             "metrics": metrics, "deduplication_columns": columns, "type_overrides": request.get("type_overrides", {}),
@@ -235,7 +228,7 @@ def _write_create_contract(s3: Any, settings: WorkerSettings, request: Any, targ
     s3.put_object(
         Bucket=settings.contract_bucket,
         Key=_contract_key(settings, request.destination.table_bucket_arn, request.destination.namespace, request.destination.table),
-        Body=json.dumps(payload, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="AES256",
+        Body=json.dumps(payload, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption=S3_SSE,
     )
 
 
@@ -268,6 +261,7 @@ def _write_prepared_parquet(
     source: Path, destination: Path, key: Any | None = None, manual_encryption_columns: list[str] | None = None,
     filename: str | None = None, row_indices: list[int] | None = None,
     target_schema: list[dict[str, str]] | None = None, nric_columns: list[str] | None = None,
+    settings: WorkerSettings | None = None,
 ) -> tuple[pa.Schema, int, dict[str, Any]]:
     """Sanitise supported upload formats inside the disposable large worker."""
     lower = (filename or source.name).lower()
@@ -285,7 +279,12 @@ def _write_prepared_parquet(
     selected_rows = sorted(row_indices) if row_indices is not None else None
     selected_cursor = 0
     audits: list[dict[str, Any]] = []
-    active_key = key or encryption_key()
+    if key is None:
+        if settings is None:
+            raise WorkerError("_write_prepared_parquet requires either an explicit key or WorkerSettings")
+        active_key = encryption_key(settings)
+    else:
+        active_key = key
     try:
         for batch in batches:
             if selected_rows is not None:
@@ -409,6 +408,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
                 source, prepared, manual_encryption_columns=request.manual_encryption_columns,
                 filename=filename, row_indices=selections.get(number), target_schema=target_schema,
                 nric_columns=list((profiles[number] if number < len(profiles) else {}).get("nric_detected_columns") or []),
+                settings=settings,
             )
             if schema is None:
                 schema = file_schema
@@ -417,7 +417,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             row_count += file_rows
             audits.append(audit)
             key = _prepared_key(settings, job_id, number if len(local_sources) > 1 else None)
-            s3.upload_file(str(prepared), settings.landing_bucket, key, ExtraArgs={"ServerSideEncryption": "AES256", "ContentType": "application/octet-stream"})
+            s3.upload_file(str(prepared), settings.landing_bucket, key, ExtraArgs={"ServerSideEncryption": S3_SSE, "ContentType": "application/octet-stream"})
             prepared_keys.append(key)
         if schema is None:
             raise WorkerError("empty uploads are not accepted")
@@ -442,7 +442,7 @@ def process_job(job_id: str, settings: WorkerSettings, s3_client: Any | None = N
             "sanitization": audits,
         }
         manifest_key = _manifest_key(settings, job_id)
-        s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption="AES256")
+        s3.put_object(Bucket=settings.landing_bucket, Key=manifest_key, Body=json.dumps(manifest, sort_keys=True).encode(), ContentType="application/json", ServerSideEncryption=S3_SSE)
     store.put_status(JobStatus(
         job_id=job_id, phase="READY_FOR_MUTATION",
         message="Sanitised staging is ready; waiting for the per-table FIFO Glue dispatcher.",

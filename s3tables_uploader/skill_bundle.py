@@ -5,23 +5,21 @@ from __future__ import annotations
 import json
 import io
 import mimetypes
-import os
 import re
 import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
+from typing import Any
 from urllib.parse import quote
 
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .core.constants import S3_SSE
 from .core.exceptions import UploaderError
 
 
-DEFAULT_DESTINATION_BUCKET = "agentcore-harness-dev"
-DEFAULT_DESTINATION_PREFIX = "skills"
 MAX_FILES = 500
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 250 * 1024 * 1024
@@ -35,11 +33,6 @@ _FRONTMATTER_RE = re.compile(
 )
 _NAME_RE = re.compile(r"(?m)^name\s*:.*$")
 _DESCRIPTION_RE = re.compile(r"(?m)^description\s*:\s*(?P<value>.*)$")
-
-s3 = boto3.client(
-    "s3",
-    region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-southeast-1",
-)
 
 
 class SkillBundleError(UploaderError):
@@ -73,24 +66,18 @@ def table_bucket_name(table_bucket_arn: str) -> str:
 def _destination(
     bucket_name: str,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> tuple[str, str, str]:
     """Return the S3 destination for this table bucket's skill files.
 
     ``destination_bucket`` / ``destination_prefix`` are the Settings-driven
-    values threaded through from the API layer. Env-var fallbacks are kept
-    so existing worker/test paths that call this module directly continue
-    to work; new API-side callers should always pass the explicit values.
+    values threaded through from the API layer (see
+    ``app.dependencies.get_skill_destination``). Both are required — the
+    module does not read env vars directly.
     """
-    bucket = (
-        destination_bucket
-        or os.environ.get("S3_UPLOADER_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET)
-    ).strip()
-    raw_prefix = (
-        destination_prefix
-        or os.environ.get("S3_UPLOADER_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX)
-    ).strip()
+    bucket = destination_bucket.strip()
+    raw_prefix = destination_prefix.strip()
     prefix_parts = [part for part in raw_prefix.replace("\\", "/").split("/") if part]
     if not bucket or any(part in {".", ".."} for part in prefix_parts):
         raise SkillBundleError("The skill-bundle destination configuration is invalid", 503)
@@ -186,19 +173,20 @@ def validate_upload_files(table_bucket_arn: str, files: list[tuple[str, bytes]])
     return bucket_name, normalised
 
 
-def _existing_object_keys(destination_bucket: str, destination_prefix: str) -> set[str]:
+def _existing_object_keys(s3_client: Any, destination_bucket: str, destination_prefix: str) -> set[str]:
     existing: set[str] = set()
-    paginator = s3.get_paginator("list_objects_v2")
+    paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
         existing.update(item["Key"] for item in page.get("Contents", []))
     return existing
 
 
 def list_skill_files(
+    s3_client: Any,
     table_bucket_arn: str,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> dict:
     """Return safe, relative object metadata for one table bucket's skill area."""
     bucket_name = table_bucket_name(table_bucket_arn)
@@ -209,7 +197,7 @@ def list_skill_files(
     )
     try:
         files: list[dict] = []
-        paginator = s3.get_paginator("list_objects_v2")
+        paginator = s3_client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
             for item in page.get("Contents", []):
                 key = item.get("Key", "")
@@ -285,8 +273,8 @@ def version_location(
     table_bucket_arn: str,
     filename: str,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> tuple[str, str]:
     if not _FLAT_ZIP_RE.fullmatch(filename):
         raise SkillBundleError("Invalid skill version filename")
@@ -316,10 +304,11 @@ def _version_upload_time(filename: str, last_modified) -> datetime | None:
 
 
 def list_skill_versions(
+    s3_client: Any,
     table_bucket_arn: str,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> dict:
     bucket_name = table_bucket_name(table_bucket_arn)
     bucket, prefix, uri = _destination(
@@ -329,7 +318,7 @@ def list_skill_versions(
     )
     versions = []
     try:
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
+        for page in s3_client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
             for item in page.get("Contents", []):
                 filename = item.get("Key", "").removeprefix(f"{prefix}/")
                 if not _FLAT_ZIP_RE.fullmatch(filename):
@@ -342,13 +331,14 @@ def list_skill_versions(
 
 
 def publish_version(
+    s3_client: Any,
     table_bucket_arn: str,
     user_id: str,
     filename: str,
     content: bytes,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> dict:
     validate_version_zip(table_bucket_arn, filename, content)
     bucket_name = table_bucket_name(table_bucket_arn)
@@ -360,9 +350,9 @@ def publish_version(
     uploaded = datetime.now(timezone.utc)
     snapshot = f"{uploaded.strftime('%Y%m%dT%H%M%S')}{uploaded.microsecond // 1000:03d}Z-{uuid.uuid4().hex[:8]}.zip"
     try:
-        s3.put_object(
+        s3_client.put_object(
             Bucket=bucket, Key=f"{prefix}/{snapshot}", Body=content,
-            ContentType="application/zip", ServerSideEncryption="AES256", IfNoneMatch="*",
+            ContentType="application/zip", ServerSideEncryption=S3_SSE, IfNoneMatch="*",
             Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256], "original-filename": quote(filename, safe="._-")[:256]},
         )
     except (BotoCoreError, ClientError) as error:
@@ -374,8 +364,8 @@ def skill_file_location(
     table_bucket_arn: str,
     path: str,
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> tuple[str, str, str]:
     """Return the configured S3 bucket/key after validating a relative path."""
     bucket_name = table_bucket_name(table_bucket_arn)
@@ -389,12 +379,13 @@ def skill_file_location(
 
 
 def publish_files(
+    s3_client: Any,
     table_bucket_arn: str,
     user_id: str,
     files: list[tuple[str, bytes]],
     *,
-    destination_bucket: str | None = None,
-    destination_prefix: str | None = None,
+    destination_bucket: str,
+    destination_prefix: str,
 ) -> dict:
     """Add or overwrite only the supplied skill files; retain all other files."""
     bucket_name, bundle = validate_upload_files(table_bucket_arn, files)
@@ -404,7 +395,7 @@ def publish_files(
         destination_prefix=destination_prefix,
     )
     try:
-        existing = _existing_object_keys(destination_bucket, destination_prefix)
+        existing = _existing_object_keys(s3_client, destination_bucket, destination_prefix)
         ordered = sorted(bundle, key=lambda item: (item.path == "SKILL.md", item.path))
         created: list[str] = []
         overwritten: list[str] = []
@@ -417,10 +408,10 @@ def publish_files(
             content_type = mimetypes.guess_type(item.path)[0] or "application/octet-stream"
             if item.path.endswith(".md"):
                 content_type = "text/markdown; charset=utf-8"
-            s3.put_object(
+            s3_client.put_object(
                 Bucket=destination_bucket, Key=key, Body=item.content,
                 ContentType=content_type,
-                ServerSideEncryption="AES256",
+                ServerSideEncryption=S3_SSE,
                 Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256]},
             )
     except (BotoCoreError, ClientError) as error:
@@ -435,8 +426,23 @@ def publish_files(
     }
 
 
-def publish_bundle(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+def publish_bundle(
+    s3_client: Any,
+    table_bucket_arn: str,
+    user_id: str,
+    files: list[tuple[str, bytes]],
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     """Compatibility wrapper; no longer deletes files absent from an upload."""
     validate_bundle(table_bucket_arn, files)
-    result = publish_files(table_bucket_arn, user_id, files)
+    result = publish_files(
+        s3_client,
+        table_bucket_arn,
+        user_id,
+        files,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     return {**result, "deleted_paths": []}

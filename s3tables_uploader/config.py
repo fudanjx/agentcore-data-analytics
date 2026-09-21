@@ -251,6 +251,7 @@ class WorkerSettings:
     glue_job_name: str
     contract_bucket: str
     contract_prefix: str
+    encryption_secret_arn: str
 
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> WorkerSettings:
@@ -262,4 +263,5 @@ class WorkerSettings:
             glue_job_name=_required("S3_UPLOADER_GLUE_JOB_NAME", env),
             contract_bucket=_required("S3_UPLOADER_CONTRACT_BUCKET", env),
             contract_prefix=_required("S3_UPLOADER_CONTRACT_PREFIX", env).strip("/"),
+            encryption_secret_arn=_required("S3_UPLOADER_ENCRYPTION_SECRET_ARN", env),
         )

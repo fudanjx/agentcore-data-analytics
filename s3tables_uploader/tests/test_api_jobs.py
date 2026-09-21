@@ -289,38 +289,33 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(response.json()["namespaces"], ["future"])
 
     def test_skill_file_upload_download_and_confirmed_delete_use_v1_routes(self):
-        from s3tables_uploader import skill_bundle
-
         self.client.post("/login", json={"password": "password"})
         bucket = self.s3tables.bucket_arn
         skill = b"---\ndescription: test skill\n---\n# Test\n"
-        with patch.object(skill_bundle, "s3", self.s3):
-            uploaded = self.client.post(
-                "/api/v3/skills/files",
-                data={"table_bucket_arn": bucket, "paths_json": '["SKILL.md"]'},
-                files={"files": ("SKILL.md", skill, "text/markdown")},
-            )
-            self.assertEqual(uploaded.status_code, 200, uploaded.text)
-            self.assertEqual(uploaded.json()["uploaded_paths"], ["SKILL.md"])
-            key = "skills/ah-soc-delta-pilot/SKILL.md"
-            self.assertIn(key, self.s3.items)
-            self.assertIn(b"name: ah-soc-delta-pilot", self.s3.items[key])
+        uploaded = self.client.post(
+            "/api/v3/skills/files",
+            data={"table_bucket_arn": bucket, "paths_json": '["SKILL.md"]'},
+            files={"files": ("SKILL.md", skill, "text/markdown")},
+        )
+        self.assertEqual(uploaded.status_code, 200, uploaded.text)
+        self.assertEqual(uploaded.json()["uploaded_paths"], ["SKILL.md"])
+        key = "skills/ah-soc-delta-pilot/SKILL.md"
+        self.assertIn(key, self.s3.items)
+        self.assertIn(b"name: ah-soc-delta-pilot", self.s3.items[key])
 
-            downloaded = self.client.get("/api/v3/skills/files/download", params={"table_bucket_arn": bucket, "path": "SKILL.md"})
-            self.assertEqual(downloaded.status_code, 200, downloaded.text)
-            self.assertEqual(downloaded.content, self.s3.items[key])
-            self.assertIn("attachment", downloaded.headers["content-disposition"])
+        downloaded = self.client.get("/api/v3/skills/files/download", params={"table_bucket_arn": bucket, "path": "SKILL.md"})
+        self.assertEqual(downloaded.status_code, 200, downloaded.text)
+        self.assertEqual(downloaded.content, self.s3.items[key])
+        self.assertIn("attachment", downloaded.headers["content-disposition"])
 
-            rejected = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": False})
-            self.assertEqual(rejected.status_code, 422, rejected.text)
-            deleted = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": True})
-            self.assertEqual(deleted.status_code, 200, deleted.text)
-            self.assertEqual(deleted.json()["deleted_path"], "SKILL.md")
-            self.assertNotIn(key, self.s3.items)
+        rejected = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": False})
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        deleted = self.client.request("DELETE", "/api/v3/skills/files", json={"table_bucket_arn": bucket, "path": "SKILL.md", "confirm": True})
+        self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(deleted.json()["deleted_path"], "SKILL.md")
+        self.assertNotIn(key, self.s3.items)
 
     def test_skill_zip_versions_accept_wrapped_skill_and_preserve_previous_snapshot(self):
-        from s3tables_uploader import skill_bundle
-
         bucket = self.s3tables.bucket_arn
         skill = b"---\ndescription: test skill\n---\n# Test\n"
         archive = io.BytesIO()
@@ -331,82 +326,78 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).status_code, 401)
         self.client.post("/login", json={"password": "password"})
-        with patch.object(skill_bundle, "s3", self.s3):
-            rejected = self.client.post(
+        rejected = self.client.post(
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            files={"file": ("wrong.txt", content, "text/plain")},
+        )
+        self.assertEqual(rejected.status_code, 422, rejected.text)
+        corrupt = self.client.post(
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            files={"file": ("broken.zip", b"not a zip", "application/zip")},
+        )
+        self.assertEqual(corrupt.status_code, 422, corrupt.text)
+        unsafe_archive = io.BytesIO()
+        with zipfile.ZipFile(unsafe_archive, "w") as zipped:
+            zipped.writestr("skill-folder/SKILL.md", skill)
+            zipped.writestr("../outside.md", b"unsafe")
+        unsafe_upload = self.client.post(
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            files={"file": ("unsafe.zip", unsafe_archive.getvalue(), "application/zip")},
+        )
+        self.assertEqual(unsafe_upload.status_code, 422, unsafe_upload.text)
+        unsafe_directory = io.BytesIO()
+        with zipfile.ZipFile(unsafe_directory, "w") as zipped:
+            zipped.writestr("skill-folder/SKILL.md", skill)
+            zipped.writestr("../outside/", b"")
+        directory_upload = self.client.post(
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            files={"file": ("unsafe-dir.zip", unsafe_directory.getvalue(), "application/zip")},
+        )
+        self.assertEqual(directory_upload.status_code, 422, directory_upload.text)
+        for _ in range(2):
+            uploaded = self.client.post(
                 "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
-                files={"file": ("wrong.txt", content, "text/plain")},
+                files={"file": ("wrapped-skill.zip", content, "application/zip")},
             )
-            self.assertEqual(rejected.status_code, 422, rejected.text)
-            corrupt = self.client.post(
-                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
-                files={"file": ("broken.zip", b"not a zip", "application/zip")},
-            )
-            self.assertEqual(corrupt.status_code, 422, corrupt.text)
-            unsafe_archive = io.BytesIO()
-            with zipfile.ZipFile(unsafe_archive, "w") as zipped:
-                zipped.writestr("skill-folder/SKILL.md", skill)
-                zipped.writestr("../outside.md", b"unsafe")
-            unsafe_upload = self.client.post(
-                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
-                files={"file": ("unsafe.zip", unsafe_archive.getvalue(), "application/zip")},
-            )
-            self.assertEqual(unsafe_upload.status_code, 422, unsafe_upload.text)
-            unsafe_directory = io.BytesIO()
-            with zipfile.ZipFile(unsafe_directory, "w") as zipped:
-                zipped.writestr("skill-folder/SKILL.md", skill)
-                zipped.writestr("../outside/", b"")
-            directory_upload = self.client.post(
-                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
-                files={"file": ("unsafe-dir.zip", unsafe_directory.getvalue(), "application/zip")},
-            )
-            self.assertEqual(directory_upload.status_code, 422, directory_upload.text)
-            for _ in range(2):
-                uploaded = self.client.post(
-                    "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
-                    files={"file": ("wrapped-skill.zip", content, "application/zip")},
-                )
-                self.assertEqual(uploaded.status_code, 201, uploaded.text)
-            versions = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
-            self.assertEqual(versions.status_code, 200, versions.text)
-            names = [item["filename"] for item in versions.json()["versions"]]
-            self.assertEqual(len(names), 2)
-            self.assertNotEqual(names[0], names[1])
-            self.assertTrue(all(name.endswith(".zip") and item["uploaded_at"] for name, item in zip(names, versions.json()["versions"])))
-            downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": names[0]})
-            self.assertEqual(downloaded.status_code, 200, downloaded.text)
-            self.assertEqual(downloaded.content, content)
-            unsafe = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": "../other.zip"})
-            self.assertEqual(unsafe.status_code, 422, unsafe.text)
-            unconfirmed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": False})
-            self.assertEqual(unconfirmed.status_code, 422, unconfirmed.text)
-            removed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": True})
-            self.assertEqual(removed.status_code, 200, removed.text)
-            self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).json()["versions"][0]["filename"], names[1])
+            self.assertEqual(uploaded.status_code, 201, uploaded.text)
+        versions = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
+        self.assertEqual(versions.status_code, 200, versions.text)
+        names = [item["filename"] for item in versions.json()["versions"]]
+        self.assertEqual(len(names), 2)
+        self.assertNotEqual(names[0], names[1])
+        self.assertTrue(all(name.endswith(".zip") and item["uploaded_at"] for name, item in zip(names, versions.json()["versions"])))
+        downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": names[0]})
+        self.assertEqual(downloaded.status_code, 200, downloaded.text)
+        self.assertEqual(downloaded.content, content)
+        unsafe = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": "../other.zip"})
+        self.assertEqual(unsafe.status_code, 422, unsafe.text)
+        unconfirmed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": False})
+        self.assertEqual(unconfirmed.status_code, 422, unconfirmed.text)
+        removed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": True})
+        self.assertEqual(removed.status_code, 200, removed.text)
+        self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).json()["versions"][0]["filename"], names[1])
 
     def test_skill_zip_version_list_includes_existing_timestamp_zip(self):
-        from s3tables_uploader import skill_bundle
-
         bucket = self.s3tables.bucket_arn
         self.s3.items["skills/ah-soc-delta-pilot/20260913112233.zip"] = b"existing snapshot"
         self.s3.items["skills/ah-soc-delta-pilot/SKILL.md"] = b"loose skill file"
         self.client.post("/login", json={"password": "password"})
-        with patch.object(skill_bundle, "s3", self.s3):
-            response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
+        response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(response.json()["versions"]), 1)
         self.assertEqual(response.json()["versions"][0]["filename"], "20260913112233.zip")
         self.assertEqual(response.json()["versions"][0]["uploaded_at"], "2026-09-13T11:22:33+00:00")
 
-    def test_skill_bundle_uses_only_neutral_destination_configuration(self):
+    def test_skill_bundle_destination_requires_explicit_configuration(self):
         from s3tables_uploader import skill_bundle
 
-        with patch.dict(os.environ, {
-            "PILOT_SKILL_BUNDLE_BUCKET": "ignored-legacy-bucket",
-            "PILOT_SKILL_BUNDLE_PREFIX": "ignored-legacy-prefix",
-            "S3_UPLOADER_SKILL_BUNDLE_BUCKET": "configured-skill-bucket",
-            "S3_UPLOADER_SKILL_BUNDLE_PREFIX": "configured/skills",
-        }, clear=False):
-            destination = skill_bundle._destination("ah-soc-delta-pilot")
+        # Callers must pass destination_bucket / destination_prefix explicitly;
+        # the module no longer reads env vars as a fallback.
+        destination = skill_bundle._destination(
+            "ah-soc-delta-pilot",
+            destination_bucket="configured-skill-bucket",
+            destination_prefix="configured/skills",
+        )
         self.assertEqual(destination, (
             "configured-skill-bucket",
             "configured/skills/ah-soc-delta-pilot",

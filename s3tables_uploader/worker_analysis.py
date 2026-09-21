@@ -23,11 +23,14 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
 
+from .core.constants import (
+    NRIC_MATCH_THRESHOLD,
+    NRIC_POLICY_KIND,
+    NRIC_SAMPLE_SIZE,
+    SUPPORTED_COMPAT_SUFFIXES as SUPPORTED_UPLOAD_SUFFIXES,
+)
 from .ingest_contract import compare_schema, profile_table
 from .sanitization import detect_nric_columns, sanitised_schema
-
-
-SUPPORTED_UPLOAD_SUFFIXES = (".parquet", ".parquet.gzip", ".xlsx", ".xls", ".csv", ".tsv")
 
 
 def normalise_names(names: list[str]) -> list[str]:
@@ -368,5 +371,5 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
             "type_conflicts_stored_as_string": type_mismatches if mode == "create" else {},
         },
         "sensitive_column_scan": "Sanitization is enforced in the isolated worker before temporary S3 staging.",
-        "sanitization_review": {"automatic_encrypted_columns": automatic_encrypted, "manual_encryption_candidates": manual_candidates, "nric_detection_policy": {"sample_size": 5, "match_threshold": 3, "kind": "sampled-heuristic-v1"}},
+        "sanitization_review": {"automatic_encrypted_columns": automatic_encrypted, "manual_encryption_candidates": manual_candidates, "nric_detection_policy": {"sample_size": NRIC_SAMPLE_SIZE, "match_threshold": NRIC_MATCH_THRESHOLD, "kind": NRIC_POLICY_KIND}},
     }

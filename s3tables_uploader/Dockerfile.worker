@@ -7,7 +7,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY s3tables_uploader/requirements.txt ./requirements.txt
+COPY s3tables_uploader/requirements.worker.txt ./requirements.txt
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir --target /app/dependencies -r requirements.txt
 
