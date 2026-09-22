@@ -140,7 +140,7 @@ class TableBucketService:
         try:
             self._s3tables.tag_resource(
                 resourceArn=arn,
-                tags=[{"key": key, "value": value} for key, value in APP_TAGS.items()],
+                tags=APP_TAGS,
             )
         except ClientError as tag_error:
             self._safe_delete(arn)

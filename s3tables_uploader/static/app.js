@@ -228,7 +228,13 @@ async function loadBuckets(preferredBucket = null, { preserveSession = false, pr
   const identity = await loadEffectiveIdentity();
   if (!identity) { clearDestination(); return; }
   const response = await apiFetch('/api/v3/buckets'); const data = await response.json();
-  if (!response.ok) throw new Error(data.detail || 'Unable to load assigned buckets');
+  if (!response.ok) {
+    clearDestination();
+    const detail = data.detail || (response.status === 403 ? 'This user has no S3 Tables bucket assignment.' : 'Unable to load assigned buckets.');
+    $('scope').textContent = detail;
+    $('activity').textContent = detail;
+    return;
+  }
   state.isAdmin = data.is_admin;
   state.userId = data.user_id;
   state.canViewHistory = Boolean(data.can_view_upload_history);
@@ -1062,6 +1068,7 @@ function displayHistory(items, latestRollbackUploadId) {
 }
 
 async function loadHistory() {
+  $('history').hidden = !state.canViewHistory;
   if (!state.canViewHistory || !state.bucket || !state.namespace || !state.table || !state.tableManaged || state.mode !== 'append') { $('history-body').textContent = state.canViewHistory ? state.table && !state.tableManaged ? 'This table is browse-only and has no uploader-managed history.' : 'Select an uploader-managed table to view its upload history.' : ''; return; }
   const query = new URLSearchParams({ ...Object.fromEntries(bucketQuery()), table: state.table });
   const response = await apiFetch(`/api/v3/upload-history?${query}`); const result = await response.json();
@@ -1096,6 +1103,7 @@ $('emulated-user').onchange = async () => {
   state.workerLeaseId = null; state.workerLease = null;
   clearPreflight();
   clearSkillBundle();
+  clearDestination();
   state.emulatedUserId = $('emulated-user').value || null;
   $('activity').textContent = `Testing backend authorization as ${state.emulatedUserId || 'no user'}…`;
   await loadBuckets();
