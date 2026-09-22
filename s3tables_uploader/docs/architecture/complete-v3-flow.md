@@ -36,10 +36,10 @@ four cooperating packages:
 | --- | --- |
 | `api/v3/*.py` | HTTP surface — one router per resource (`buckets.py`, `identity.py`, `upload_sessions.py`, `worker_leases.py`, `jobs.py`, `mutations.py`, `upload_history.py`, `skills.py`, `dev.py`). Decode request, call a service, return response. Never contains business logic or boto3 calls. |
 | `api/static/frontend.py` | Cookie login, `/login`, `/logout`, `/`, `/static/{asset}`. Registered only when `settings.frontend_surface_enabled`. |
-| `app/factory.py` | Single `create_app(settings)` factory — the only place `FastAPI(...)` is constructed. Registers routers with `Depends(require_bearer)` in hardened envs; gates `docs_url`/`redoc_url` on LOCAL. |
-| `app/lifespan.py` | Builds singletons (boto3 clients, `S3JobStore`, `BearerAuthService`) and yields them as ASGI state so every request reads via `request.state`. |
-| `app/dependencies.py` | `SettingsDep`, `UserDep`, `StoreDep`, service-factory Deps, `require_bearer`, `resolve_user`, `enforce_ownership`. |
-| `app/middlewares.py` | `CorrelationIdMiddleware` (always), `FrontendCookieGate` (frontend envs only). |
+| `app/factory.py` | Single `create_app(settings)` factory — the only place `FastAPI(...)` is constructed. Registers every core router (and the frontend `identity` / `dev` routers when enabled) with `Depends(require_auth)`, which dispatches to bearer or cookie per request. Gates `docs_url`/`redoc_url` on LOCAL. |
+| `app/lifespan.py` | Builds singletons (boto3 clients, `S3JobStore`, `BearerAuthService`), raises `anyio`'s default threadpool cap to `settings.async_thread_limit`, and yields the state as ASGI state so every request reads via `request.state`. |
+| `app/dependencies.py` | `SettingsDep`, `UserDep`, `StoreDep`, service-factory Deps, `require_auth`, `resolve_user`, `enforce_ownership`. |
+| `app/middlewares.py` | `CorrelationIdMiddleware` (always), `FrontendCookieGate` (frontend envs only; short-circuits when an `Authorization` header is present so bearer flows through `require_auth`). |
 | `app/exception_handlers.py` | Global `UploaderError` / `ControlPlaneError` / `ClientError` → JSON. |
 | `services/*.py` | Business logic — S3 Tables control plane, contract mutation, lease lifecycle, mutation enqueue, audit read, tag-filtered bucket listing, bearer secret cache. |
 | `worker.py` | Profile, review/key analysis, sanitisation and preparation only. |
@@ -50,22 +50,49 @@ four cooperating packages:
 
 ## Authentication
 
-Two auth strategies coexist, selected by environment. Both flows extract an
-end-user identity that is stamped onto every persisted record.
+Bearer auth is accepted in **every environment**. Cookie auth is a
+second, opt-in path that is only available in the environments that
+serve the temporary frontend (LOCAL when `S3_UPLOADER_SERVE_LOCAL_FRONTEND=true`,
+and DEV). Both flows extract an end-user identity that is stamped onto every
+persisted record.
 
-| Environment | Client auth | Identity header | Enforced at |
-| --- | --- | --- | --- |
-| LOCAL (frontend) | signed cookie (`s3_uploader_session`) | `X-Pilot-User-Id` | `FrontendCookieGate` middleware + `UserDep` |
-| DEV | signed cookie | `X-Pilot-User-Id` | same as LOCAL (frontend) |
-| LOCAL (API-only) | `Authorization: Bearer <secret>` | `User-ID` (email) | router-level `Depends(require_bearer)` + `UserDep` |
-| STG / PRD | `Authorization: Bearer <secret>` | `User-ID` (email) | same as LOCAL (API-only) |
+| Environment | Bearer accepted | Cookie accepted | Identity header used |
+| --- | :---: | :---: | --- |
+| LOCAL (frontend) | ✓ | ✓ | bearer → `User-ID` (email); cookie → `X-Pilot-User-Id` (profile key) |
+| LOCAL (API-only) | ✓ | ✗ | `User-ID` (email) |
+| DEV | ✓ | ✓ | bearer → `User-ID` (email); cookie → `X-Pilot-User-Id` (profile key) |
+| STG / PRD | ✓ | ✗ | `User-ID` (email) |
+
+How the router picks the flow ([`app/dependencies.py`](../../app/dependencies.py),
+[`app/middlewares.py`](../../app/middlewares.py)):
+
+- If the request carries an `Authorization` header, `require_auth`
+  validates it as `Bearer <token>` via `BearerAuthService.verify` and
+  stamps `request.state.auth_method = "bearer"`. `FrontendCookieGate`
+  short-circuits so cookie validation never runs on the same request.
+  **When both flows are possible, bearer wins if the header is
+  present** — there is no silent fallback to cookie.
+- Otherwise, if the environment serves the frontend surface, the
+  cookie gate validates the signed session and `require_auth` stamps
+  `request.state.auth_method = "cookie"`.
+- In bearer-only environments (no frontend surface) a missing
+  `Authorization` header is rejected outright with `BearerAuthRequired`.
+
+`resolve_user` then reads `request.state.auth_method` and picks
+`User-ID` (bearer) or `X-Pilot-User-Id` (cookie) — the identity header
+follows the resolved flow, not the environment.
 
 Bearer secrets live in AWS Secrets Manager and are cached in-process by
-`BearerAuthService` for 1 hour, with an opportunistic refresh-on-miss capped
-at once per 5 minutes (`bearer_refresh_min_interval_seconds`). Ownership
-checks (`enforce_ownership`) run in every environment — the calling
-application controls WHO can act, this API controls WHICH RECORDS they can
-touch.
+`BearerAuthService` for 1 hour (`bearer_cache_ttl_seconds`), with an
+opportunistic refresh-on-miss capped at once per 5 minutes
+(`bearer_refresh_min_interval_seconds`). Because bearer auth is now
+accepted everywhere, `S3_UPLOADER_BEARER_SECRET_ARN` is required at
+startup in every environment (LOCAL included) — see
+[`environment-variables.md`](environment-variables.md).
+
+Ownership checks (`enforce_ownership`) run in every environment — the
+calling application controls WHO can act, this API controls WHICH
+RECORDS they can touch.
 
 ## Queue producers, consumers, and launch models
 
@@ -218,13 +245,33 @@ via `store.get_status(job_id)` directly — no cross-writer race.
 | --- | :---: | :---: | :---: | :---: | :---: |
 | `/`, `/login`, `/static/*`, `/api/v3/dev/*`, `/api/v3/identity` | ✓ | ✗ | ✓ | ✗ | ✗ |
 | `docs_url` / `redoc_url` | ✓ | ✓ | ✗ | ✗ | ✗ |
-| Cookie login | ✓ | ✗ | ✓ | ✗ | ✗ |
-| Bearer auth required | ✗ | ✓ | ✗ | ✓ | ✓ |
+| Bearer auth accepted | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Cookie auth accepted | ✓ | ✗ | ✓ | ✗ | ✗ |
 | History bucket / skill-bundle destination defaults | ✓ | ✓ | ✓ | ✗ (required) | ✗ (required) |
 | Uvicorn `--access-log` | ✓ | ✓ | ✓ | ✗ | ✗ |
 
 Settings validation in `config.py` fails fast at startup for missing
-required values (bearer secret ARN, history bucket/prefix, skill-bundle
-bucket/prefix in STG/PRD; secure cookie in DEV). See
+required values: `S3_UPLOADER_BEARER_SECRET_ARN` is required in every
+environment (bearer auth is universally accepted); history
+bucket/prefix and skill-bundle bucket/prefix are required in STG/PRD
+only (defaulted in LOCAL/DEV); `S3_UPLOADER_COOKIE_SECURE` must be
+`true` in DEV; `S3_UPLOADER_RAW_RETENTION_DAYS` and
+`S3_UPLOADER_ASYNC_THREAD_LIMIT` are bounds-checked (1..30 and
+1..1000 respectively). See
+[`environment-variables.md`](environment-variables.md) for the
+authoritative env-var reference and
 [`../2026-09-21-refactor-conventions.md`](../2026-09-21-refactor-conventions.md)
-for the full config reference.
+for the broader convention overview.
+
+## Runtime tuning
+
+The API lifespan raises `anyio`'s default threadpool cap to
+`settings.async_thread_limit` (default 100) so sync FastAPI handlers
+and `run_in_threadpool` calls in async upload endpoints share one
+tunable ceiling ([`app/lifespan.py`](../../app/lifespan.py)). boto3
+client `max_pool_connections` values are computed as ratios of that
+ceiling — S3 = 1.0×, s3tables = 0.25×, sqs = 0.15×, glue = 0.10×,
+secretsmanager = 0.10× — with a floor of 10 to match botocore's own
+default. Sizing S3 aggressively reflects the hot path: every upload
+endpoint issues at least one S3 request. Change the ceiling with a
+single env var; the per-client caps follow automatically.

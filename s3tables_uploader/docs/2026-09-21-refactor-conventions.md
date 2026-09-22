@@ -90,7 +90,8 @@ branch on the enum directly.
 | `/api/v3/dev/identity-profiles`      | ✓              | ✗              | ✓   | ✗   | ✗   |
 | `/api/v3/identity`                   | ✓              | ✗              | ✓   | ✗   | ✗   |
 | `docs_url` / `redoc_url`             | ✓              | ✓              | ✗   | ✗   | ✗   |
-| Bearer auth required                 | ✗              | ✓              | ✗   | ✓   | ✓   |
+| Bearer auth accepted                 | ✓              | ✓              | ✓   | ✓   | ✓   |
+| Cookie auth accepted                 | ✓              | ✗              | ✓   | ✗   | ✗   |
 | Debug log level                      | ✓              | ✓              | ✓   | ✗   | ✗   |
 | Uvicorn `--no-access-log`            | ✗              | ✗              | ✗   | ✓   | ✓   |
 
@@ -104,27 +105,49 @@ def handler(settings: SettingsDep) -> ...:
 
 ### Configuration env vars
 
+The excerpt below covers the most commonly touched knobs on the API
+`Settings`. It is intentionally short — the full authoritative list
+(covering `Settings`, `WorkerSettings`, and `MutationDispatcherSettings`,
+with MUST-set / SHOULD-set semantics and per-env validation) lives in
+[`architecture/environment-variables.md`](architecture/environment-variables.md).
+
 | Env var                                          | Required in            | Default (LOCAL/DEV)                                     |
 |--------------------------------------------------|------------------------|---------------------------------------------------------|
 | `S3_UPLOADER_ENVIRONMENT`                        | always (default LOCAL) | `LOCAL`                                                 |
 | `S3_UPLOADER_SERVE_LOCAL_FRONTEND`               | LOCAL only             | `true`                                                  |
-| `S3_UPLOADER_BEARER_SECRET_ARN`                  | STG/PRD/LOCAL-API-only | —                                                       |
+| `S3_UPLOADER_BEARER_SECRET_ARN`                  | **always** — bearer auth is accepted in every env | —                                                       |
 | `S3_UPLOADER_BEARER_CACHE_TTL_SECONDS`           | any                    | `3600`                                                  |
 | `S3_UPLOADER_BEARER_REFRESH_MIN_INTERVAL_SECONDS`| any                    | `300`                                                   |
 | `S3_UPLOADER_HISTORY_BUCKET`                     | STG/PRD                | `ah-data-analytics`                                     |
 | `S3_UPLOADER_HISTORY_PREFIX`                     | STG/PRD                | `temp_s3_update/web_ingest/upload_history`              |
 | `S3_UPLOADER_LOG_LEVEL`                          | STG/PRD                | `INFO`                                                  |
+| `S3_UPLOADER_ASYNC_THREAD_LIMIT`                 | any                    | `100` (1..1000; sizes anyio + boto3 pool caps)          |
 
 ---
 
 ## 3. Auth model
 
-| Environment      | Client auth              | Identity header    | Identity format      |
-|------------------|--------------------------|--------------------|----------------------|
-| LOCAL (frontend) | signed cookie            | `X-Pilot-User-Id`  | profile key          |
-| DEV              | signed cookie            | `X-Pilot-User-Id`  | profile key          |
-| LOCAL (API-only) | Bearer                   | `User-ID`          | email                |
-| STG / PRD        | Bearer                   | `User-ID`          | email                |
+Bearer auth is accepted in **every environment**. Cookie auth is a
+second, opt-in path available only where the temporary frontend is
+served (LOCAL with `S3_UPLOADER_SERVE_LOCAL_FRONTEND=true`, and DEV).
+The identity header follows the resolved auth path, not the
+environment.
+
+| Environment      | Bearer accepted | Cookie accepted | Identity header                                          |
+|------------------|:---------------:|:---------------:|----------------------------------------------------------|
+| LOCAL (frontend) | ✓               | ✓               | bearer → `User-ID` (email); cookie → `X-Pilot-User-Id` (profile key) |
+| LOCAL (API-only) | ✓               | ✗               | `User-ID` (email)                                        |
+| DEV              | ✓               | ✓               | bearer → `User-ID` (email); cookie → `X-Pilot-User-Id` (profile key) |
+| STG / PRD        | ✓               | ✗               | `User-ID` (email)                                        |
+
+`require_auth` ([`app/dependencies.py`](../app/dependencies.py))
+selects the flow: if the request carries an `Authorization` header it
+must be a valid `Bearer <token>` (no silent fallback to cookie);
+otherwise, if the frontend surface is served, the cookie flow is
+taken; else the request is rejected outright.
+`FrontendCookieGate` short-circuits when an `Authorization` header is
+present so the two flows never both run on the same request.
+**When both are possible, bearer wins if the header is present.**
 
 - **Bearer secret** is stored in AWS Secrets Manager; `BearerAuthService`
   caches it in-process for `bearer_cache_ttl_seconds` (default 1 hour).
@@ -134,9 +157,9 @@ def handler(settings: SettingsDep) -> ...:
 - **Ownership checks** are enforced in every environment via
   `enforce_ownership(record_owner_id, user)`.
 - **Permission checks** (`is_admin`, `can_view_upload_history`,
-  `can_rollback_uploads`) run only in frontend modes; in hardened modes
-  the values are hard-coded to `True` because the calling application
-  manages permissions externally.
+  `can_rollback_uploads`) run only when the request resolved via the
+  cookie flow; on the bearer flow the values are hard-coded to `True`
+  because the calling application manages permissions externally.
 
 ---
 
@@ -174,20 +197,27 @@ Never store per-request state on `app.state`; **use only lifespan state
 via `request.state`**. Tests must enter the TestClient context manager
 (`self.enterContext(TestClient(app))`) so the lifespan fires.
 
-### 4.3 Router-level bearer
+### 4.3 Router-level auth
 
-Hardened routers get bearer at include-time in the factory, not on every
-route:
+Every core router — and the frontend `identity` / `dev` routers when
+they are registered — picks up `Depends(require_auth)` at
+include-time in the factory, unconditionally:
 
 ```python
 # app/factory.py
-hardened_deps = [Depends(require_bearer)] if settings.bearer_auth_required else []
-app.include_router(buckets.router, dependencies=hardened_deps)
+core_deps = [Depends(require_auth)]
+for router in (buckets.router, upload_history.router, ...):
+    app.include_router(router, dependencies=core_deps)
 ```
 
-Individual routes stay bearer-agnostic. This means **no route file should
-ever import `require_bearer` directly** — inclusion-time wiring is the
-only place it lands.
+`require_auth` dispatches per request to bearer or cookie based on
+whether an `Authorization` header is present (see §3). Individual
+routes stay auth-agnostic. This means **no route file should ever
+import `require_auth` directly** — inclusion-time wiring in
+[`app/factory.py`](../app/factory.py) is the only place it lands.
+The static `frontend` router (`/login`, `/`, `/static/{asset}`) is
+intentionally the sole router without `require_auth`, because it
+serves the login form and unauthenticated assets.
 
 ---
 
@@ -342,9 +372,12 @@ Checklist:
 5. **Raise typed exceptions**, not `HTTPException`, from anything that
    isn't a legacy status-code contract.
 6. **Register the router** in [`app/factory.py:_register_routers`](../app/factory.py).
-   Frontend-only routers go behind the `settings.frontend_surface_enabled`
-   branch; hardened routers pick up `Depends(require_bearer)` from the
-   `hardened_deps` list automatically.
+   Core routers get `Depends(require_auth)` from the `core_deps` list
+   automatically. Frontend-only routers go behind the
+   `settings.frontend_surface_enabled` branch — the authenticated
+   ones (`identity`, `dev`) also pick up `core_deps`; the public
+   static `frontend` router stays without it because it serves the
+   login form and unauthenticated assets.
 7. **Write a test.** Use `self.enterContext(TestClient(create_app(...)))`
    so the lifespan fires.
 
