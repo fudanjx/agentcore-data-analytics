@@ -83,10 +83,10 @@ class FakeS3Tables:
         self.metadata_location = "s3://example--table-s3/metadata/test.metadata.json"
 
     def list_table_buckets(self, **kwargs): return {"tableBuckets": self.buckets}
-    def list_tags_for_resource(self, resourceARN):
+    def list_tags_for_resource(self, resourceArn):
         # Fake every known bucket as belonging to this app.
         return {"tags": [{"key": "APP", "value": "Data-Insights"}]}
-    def tag_resource(self, resourceARN, tags):
+    def tag_resource(self, resourceArn, tags):
         return {}
     def create_table_bucket(self, name):
         arn = f"arn:aws:s3tables:ap-southeast-1:964340114883:bucket/{name}"

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,7 +57,7 @@ class TableBucketService:
         self,
         s3tables_client: Any,
         *,
-        clock: "callable[[], float]" = time.monotonic,
+        clock: Callable[[], float] = time.monotonic,
         cache_ttl_seconds: int = BUCKET_TAG_CACHE_TTL_SECONDS,
     ):
         self._s3tables = s3tables_client
@@ -113,7 +114,7 @@ class TableBucketService:
 
     def _fetch_and_check(self, arn: str) -> bool:
         try:
-            response = self._s3tables.list_tags_for_resource(resourceARN=arn)
+            response = self._s3tables.list_tags_for_resource(resourceArn=arn)
         except ClientError:
             return False
         tags = {tag["key"]: tag["value"] for tag in response.get("tags", [])}
@@ -138,7 +139,7 @@ class TableBucketService:
         arn = result["arn"]
         try:
             self._s3tables.tag_resource(
-                resourceARN=arn,
+                resourceArn=arn,
                 tags=[{"key": key, "value": value} for key, value in APP_TAGS.items()],
             )
         except ClientError as tag_error:

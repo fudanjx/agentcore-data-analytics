@@ -36,9 +36,9 @@ class _FakeS3Tables:
     def list_table_buckets(self, **_kwargs: Any) -> dict[str, Any]:
         return {"tableBuckets": self._buckets}
 
-    def list_tags_for_resource(self, resourceARN: str) -> dict[str, Any]:  # noqa: N803
-        self.list_tag_calls.append(resourceARN)
-        entries = self._tags.get(resourceARN, {})
+    def list_tags_for_resource(self, resourceArn: str) -> dict[str, Any]:  # noqa: N803
+        self.list_tag_calls.append(resourceArn)
+        entries = self._tags.get(resourceArn, {})
         return {"tags": [{"key": k, "value": v} for k, v in entries.items()]}
 
     def create_table_bucket(self, name: str) -> dict[str, str]:
@@ -47,14 +47,14 @@ class _FakeS3Tables:
         self._buckets.append({"arn": arn, "name": name, "type": "customer"})
         return {"arn": arn}
 
-    def tag_resource(self, resourceARN: str, tags: list[dict[str, str]]) -> None:  # noqa: N803
-        self.tag_calls.append({"arn": resourceARN, "tags": tags})
+    def tag_resource(self, resourceArn: str, tags: list[dict[str, str]]) -> None:  # noqa: N803
+        self.tag_calls.append({"arn": resourceArn, "tags": tags})
         if self.raise_on_tag:
             raise ClientError(
                 {"Error": {"Code": "AccessDenied", "Message": "no"}},
                 "TagResource",
             )
-        self._tags[resourceARN] = {tag["key"]: tag["value"] for tag in tags}
+        self._tags[resourceArn] = {tag["key"]: tag["value"] for tag in tags}
 
     def delete_table_bucket(self, tableBucketARN: str) -> None:  # noqa: N803
         self.deleted.append(tableBucketARN)
