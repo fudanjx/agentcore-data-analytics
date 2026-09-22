@@ -3,10 +3,11 @@
 These tests exercise:
 
 - Lifespan state population + ``request.state`` propagation.
-- Environment-driven feature gates (docs/frontend cookie/bearer).
+- Environment-driven feature gates (docs / frontend cookie surface).
 - Identity resolution for both frontend (X-Pilot-User-Id) and hardened
-    (User-ID email) modes.
-- Bearer auth enforcement via ``require_bearer``.
+  (User-ID email) modes.
+- The unified ``require_auth`` guard: bearer works everywhere, cookie is
+  accepted only when the frontend surface is on.
 - Ownership enforcement helper.
 - Global exception handlers translating typed errors into JSON.
 """
@@ -21,13 +22,18 @@ from fastapi.testclient import TestClient
 from s3tables_uploader.app.dependencies import (
     UserDep,
     enforce_ownership,
-    require_bearer,
+    require_auth,
 )
 from s3tables_uploader.app.factory import create_app
 from s3tables_uploader.config import Environment, Settings
 from s3tables_uploader.core.exceptions import OwnershipViolation, UploaderError
 from s3tables_uploader.services.auth.bearer import BearerAuthService
+from s3tables_uploader.services.auth.cookie import COOKIE_NAME, login_cookie
 from s3tables_uploader.services.secret_manager import InMemorySecretSource
+
+
+_TEST_BEARER_ARN = "arn:aws:secretsmanager::0:secret/test"
+_TEST_BEARER_TOKEN = "abcd1234"
 
 
 def _settings(**overrides: object) -> Settings:
@@ -48,6 +54,7 @@ def _settings(**overrides: object) -> Settings:
         contract_bucket="ah-data-analytics",
         contract_prefix="temp/contracts",
         environment=Environment.LOCAL,
+        bearer_secret_arn=_TEST_BEARER_ARN,
     )
     base.update(overrides)
     return Settings(**base)  # type: ignore[arg-type]
@@ -62,9 +69,26 @@ _FAKE_CLIENTS = {
 }
 
 
+def _bearer_service(settings: Settings, token: str = _TEST_BEARER_TOKEN) -> BearerAuthService:
+    return BearerAuthService(
+        InMemorySecretSource({settings.bearer_secret_arn: token}),
+        settings.bearer_secret_arn,
+        cache_ttl_seconds=3600,
+        refresh_min_interval_seconds=300,
+    )
+
+
+def _make_app(settings: Settings, *, token: str = _TEST_BEARER_TOKEN):
+    return create_app(
+        settings,
+        lifespan_clients=_FAKE_CLIENTS,
+        lifespan_bearer_auth=_bearer_service(settings, token),
+    )
+
+
 class HealthzAndDocsTests(unittest.TestCase):
     def test_healthz_is_public(self):
-        app = create_app(_settings(), lifespan_clients=_FAKE_CLIENTS)
+        app = _make_app(_settings())
         with TestClient(app) as client:
             response = client.get("/healthz")
         self.assertEqual(response.status_code, 200)
@@ -78,26 +102,8 @@ class HealthzAndDocsTests(unittest.TestCase):
             (Environment.PRD, 404),
         ]:
             hardened = env in {Environment.STG, Environment.PRD}
-            settings = _settings(
-                environment=env,
-                bearer_secret_arn="arn:aws:secretsmanager::0:secret/test"
-                if hardened
-                else None,
-                cookie_secure=hardened,
-            )
-            bearer = None
-            if hardened:
-                bearer = BearerAuthService(
-                    InMemorySecretSource({settings.bearer_secret_arn: "x"}),
-                    settings.bearer_secret_arn,
-                    cache_ttl_seconds=3600,
-                    refresh_min_interval_seconds=300,
-                )
-            app = create_app(
-                settings,
-                lifespan_clients=_FAKE_CLIENTS,
-                lifespan_bearer_auth=bearer,
-            )
+            settings = _settings(environment=env, cookie_secure=hardened)
+            app = _make_app(settings)
             with TestClient(app) as client:
                 response = client.get("/docs")
             self.assertEqual(response.status_code, expected, msg=f"env={env}")
@@ -106,9 +112,9 @@ class HealthzAndDocsTests(unittest.TestCase):
 class FrontendCookieGateTests(unittest.TestCase):
     def test_api_requests_get_json_401_without_cookie(self):
         settings = _settings()  # LOCAL frontend enabled
-        app = create_app(settings, lifespan_clients=_FAKE_CLIENTS)
+        app = _make_app(settings)
 
-        router = APIRouter()
+        router = APIRouter(dependencies=[Depends(require_auth)])
 
         @router.get("/api/v3/echo")
         def echo(user: UserDep) -> dict[str, str]:
@@ -122,32 +128,49 @@ class FrontendCookieGateTests(unittest.TestCase):
 
     def test_browser_gets_303_redirect_without_cookie(self):
         settings = _settings()
-        app = create_app(settings, lifespan_clients=_FAKE_CLIENTS)
+        app = _make_app(settings)
         with TestClient(app) as client:
             response = client.get("/", follow_redirects=False)
         self.assertEqual(response.status_code, 303)
         self.assertEqual(response.headers["location"], "/login")
 
+    def test_cookie_gate_skips_when_authorization_header_present(self):
+        """Bearer request in a frontend env: cookie gate must NOT block."""
+        settings = _settings()
+        app = _make_app(settings)
+
+        router = APIRouter(dependencies=[Depends(require_auth)])
+
+        @router.get("/api/v3/echo")
+        def echo(user: UserDep) -> dict[str, str]:
+            return {"user_id": user.user_id}
+
+        app.include_router(router)
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v3/echo",
+                headers={
+                    "Authorization": f"Bearer {_TEST_BEARER_TOKEN}",
+                    "User-ID": "svc@example.com",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"user_id": "svc@example.com"})
+
 
 class FrontendIdentityTests(unittest.TestCase):
     def test_frontend_user_dep_resolves_profile(self):
-        app = create_app(_settings(), lifespan_clients=_FAKE_CLIENTS)
+        settings = _settings()
+        app = _make_app(settings)
 
-        router = APIRouter()
+        router = APIRouter(dependencies=[Depends(require_auth)])
 
         @router.get("/api/v3/who")
         def who(user: UserDep) -> dict[str, object]:
             return {"user_id": user.user_id, "is_admin": user.is_admin}
 
         app.include_router(router)
-        # Bypass the cookie gate by hitting an exempt path? We can't — but
-        # the cookie gate returns JSON 401 for /api/*, so we forge a valid
-        # cookie via the existing helper.
-        from s3tables_uploader.services.auth.cookie import (
-            COOKIE_NAME,
-            login_cookie,
-        )
-        cookie_value = login_cookie(_settings())
+        cookie_value = login_cookie(settings)
         with TestClient(app) as client:
             response = client.get(
                 "/api/v3/who",
@@ -158,30 +181,75 @@ class FrontendIdentityTests(unittest.TestCase):
         self.assertEqual(response.json(), {"user_id": "local-editor", "is_admin": False})
 
 
+class BearerEverywhereTests(unittest.TestCase):
+    """Bearer must work in every environment now, not only hardened ones."""
+
+    def _app_with_protected_route(self, settings: Settings):
+        app = _make_app(settings)
+
+        router = APIRouter(dependencies=[Depends(require_auth)])
+
+        @router.get("/api/v3/protected")
+        def protected(user: UserDep) -> dict[str, str]:
+            return {"user_id": user.user_id}
+
+        app.include_router(router)
+        return app
+
+    def test_dev_accepts_bearer(self):
+        settings = _settings(environment=Environment.DEV, cookie_secure=True)
+        app = self._app_with_protected_route(settings)
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v3/protected",
+                headers={
+                    "Authorization": f"Bearer {_TEST_BEARER_TOKEN}",
+                    "User-ID": "svc@example.com",
+                },
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json(), {"user_id": "svc@example.com"})
+
+    def test_dev_accepts_cookie(self):
+        settings = _settings(environment=Environment.DEV, cookie_secure=True)
+        app = self._app_with_protected_route(settings)
+        cookie_value = login_cookie(settings)
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v3/protected",
+                headers={"X-Pilot-User-Id": "local-editor"},
+                cookies={COOKIE_NAME: cookie_value},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["user_id"], "local-editor")
+
+    def test_local_frontend_bad_bearer_rejected(self):
+        """Invalid bearer must 401 — no silent fallback to cookie."""
+        settings = _settings()
+        app = self._app_with_protected_route(settings)
+        cookie_value = login_cookie(settings)
+        with TestClient(app) as client:
+            response = client.get(
+                "/api/v3/protected",
+                headers={
+                    "Authorization": "Bearer wrong-token",
+                    "User-ID": "svc@example.com",
+                },
+                cookies={COOKIE_NAME: cookie_value},  # ignored, bearer wins
+            )
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["code"], "BEARER_AUTH_FAILED")
+
+
 class HardenedBearerTests(unittest.TestCase):
     def _hardened_settings(self) -> Settings:
-        return _settings(
-            environment=Environment.STG,
-            cookie_secure=True,
-            bearer_secret_arn="arn:aws:secretsmanager::0:secret/test",
-        )
+        return _settings(environment=Environment.STG, cookie_secure=True)
 
     def _prepare_app(self):
         settings = self._hardened_settings()
-        secret_source = InMemorySecretSource({settings.bearer_secret_arn: "abcd1234"})
-        service = BearerAuthService(
-            secret_source,
-            settings.bearer_secret_arn,
-            cache_ttl_seconds=3600,
-            refresh_min_interval_seconds=300,
-        )
-        app = create_app(
-            settings,
-            lifespan_clients=_FAKE_CLIENTS,
-            lifespan_bearer_auth=service,
-        )
+        app = _make_app(settings)
 
-        router = APIRouter(dependencies=[Depends(require_bearer)])
+        router = APIRouter(dependencies=[Depends(require_auth)])
 
         @router.get("/api/v3/protected")
         def protected(user: UserDep) -> dict[str, str]:
@@ -215,7 +283,7 @@ class HardenedBearerTests(unittest.TestCase):
             response = client.get(
                 "/api/v3/protected",
                 headers={
-                    "Authorization": "Bearer abcd1234",
+                    "Authorization": f"Bearer {_TEST_BEARER_TOKEN}",
                     "User-ID": "svc@example.com",
                 },
             )
@@ -227,7 +295,7 @@ class HardenedBearerTests(unittest.TestCase):
             response = client.get(
                 "/api/v3/protected",
                 headers={
-                    "Authorization": "Bearer abcd1234",
+                    "Authorization": f"Bearer {_TEST_BEARER_TOKEN}",
                     "User-ID": "not-an-email",
                 },
             )
@@ -238,7 +306,7 @@ class HardenedBearerTests(unittest.TestCase):
         with TestClient(self._prepare_app()) as client:
             response = client.get(
                 "/api/v3/protected",
-                headers={"Authorization": "Bearer abcd1234"},
+                headers={"Authorization": f"Bearer {_TEST_BEARER_TOKEN}"},
             )
         self.assertEqual(response.status_code, 401)
         self.assertEqual(response.json()["code"], "IDENTITY_REQUIRED")
@@ -267,17 +335,17 @@ class OwnershipHelperTests(unittest.TestCase):
 
 class ExceptionHandlerTests(unittest.TestCase):
     def test_uploader_error_translates_to_json(self):
-        app = create_app(_settings(), lifespan_clients=_FAKE_CLIENTS)
+        settings = _settings()
+        app = _make_app(settings)
 
-        router = APIRouter()
+        router = APIRouter(dependencies=[Depends(require_auth)])
 
         @router.get("/api/v3/boom")
         def boom() -> None:
             raise UploaderError("nope", error_code="CUSTOM")
 
         app.include_router(router)
-        from s3tables_uploader.services.auth.cookie import COOKIE_NAME, login_cookie
-        cookie_value = login_cookie(_settings())
+        cookie_value = login_cookie(settings)
         with TestClient(app) as client:
             response = client.get(
                 "/api/v3/boom",

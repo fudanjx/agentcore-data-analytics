@@ -2,11 +2,15 @@
 
 Two concrete implementations exist:
 
-- ``services.auth.cookie.CookieAuthService`` — LOCAL frontend and DEV modes.
-- ``services.auth.bearer.BearerAuthService`` — LOCAL API-only, STG, PRD.
+- ``services.auth.cookie.CookieAuthService`` — used when the frontend surface
+  is on (LOCAL with ``serve_local_frontend=True``, DEV).
+- ``services.auth.bearer.BearerAuthService`` — always available; the sole
+  method in hardened envs and an alternative to cookie auth in the frontend
+  ones.
 
-The service is chosen at dependency-resolution time from
-``settings.bearer_auth_required``.
+Which one authenticates a given request is decided per-request by
+``app.dependencies.require_auth`` (Authorization header present → bearer;
+otherwise → cookie, if the frontend surface is on).
 """
 
 from __future__ import annotations

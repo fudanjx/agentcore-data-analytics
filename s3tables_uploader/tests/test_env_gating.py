@@ -76,12 +76,13 @@ def _client(environment: Environment, *, frontend: bool = True) -> TestClient:
         environment=environment,
         serve_local_frontend=frontend if environment is Environment.LOCAL else True,
         cookie_secure=hardened,
-        bearer_secret_arn="arn:aws:secretsmanager::0:secret/test" if hardened else None,
+        bearer_secret_arn="arn:aws:secretsmanager::0:secret/test",
     )
-    bearer = _bearer_service(settings.bearer_secret_arn) if hardened else None
     return TestClient(
         create_app(
-            settings, lifespan_clients=_FAKE_CLIENTS, lifespan_bearer_auth=bearer
+            settings,
+            lifespan_clients=_FAKE_CLIENTS,
+            lifespan_bearer_auth=_bearer_service(settings.bearer_secret_arn),
         )
     )
 

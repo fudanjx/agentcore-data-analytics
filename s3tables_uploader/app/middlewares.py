@@ -9,9 +9,9 @@
     redirected unauthenticated browser requests to ``/login`` and returned a
     JSON ``LOGIN_REQUIRED`` for API paths.
 
-Bearer auth is enforced router-side via ``Depends(require_bearer)`` on
-hardened routers — not here — so a single global middleware does not have
-to know about the environment matrix.
+Bearer auth is enforced router-side via ``Depends(require_auth)`` on every
+core router — not here. When a request presents an ``Authorization`` header
+the cookie gate steps out of the way and lets ``require_auth`` validate it.
 """
 
 from __future__ import annotations
@@ -50,6 +50,10 @@ class FrontendCookieGate(BaseHTTPMiddleware):
         call_next: Callable[[Request], Awaitable[Response]],
     ) -> Response:
         if request.url.path in self.EXEMPT:
+            return await call_next(request)
+        # A cookie-authed browser request never carries Authorization; if one
+        # is present, this is a bearer client — let require_auth verify it.
+        if request.headers.get("Authorization"):
             return await call_next(request)
         try:
             read_cookie(request.cookies.get(COOKIE_NAME), self._settings)

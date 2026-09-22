@@ -91,7 +91,7 @@ class Settings:
     environment: Environment = Environment.LOCAL
     log_level: str = "INFO"
     serve_local_frontend: bool = True
-    bearer_secret_arn: str | None = None
+    bearer_secret_arn: str = ""
     bearer_cache_ttl_seconds: int = 3600
     bearer_refresh_min_interval_seconds: int = 300
     history_bucket: str = ""
@@ -112,15 +112,6 @@ class Settings:
         if self.environment is Environment.LOCAL:
             return self.serve_local_frontend
         return False  # STG, PRD
-
-    @property
-    def bearer_auth_required(self) -> bool:
-        """Whether requests must present an Authorization: Bearer header."""
-        if self.environment in _HARDENED_ENVIRONMENTS:
-            return True
-        if self.environment is Environment.LOCAL and not self.serve_local_frontend:
-            return bool(self.environment)
-        return False
 
     @property
     def docs_enabled(self) -> bool:
@@ -162,14 +153,7 @@ class Settings:
         serve_local_frontend = _boolean(
             "S3_UPLOADER_SERVE_LOCAL_FRONTEND", env, True
         )
-        bearer_secret_arn = _optional("S3_UPLOADER_BEARER_SECRET_ARN", env) or None
-        bearer_required = environment in _HARDENED_ENVIRONMENTS or (
-            environment is Environment.LOCAL and not serve_local_frontend
-        )
-        if bearer_required and not bearer_secret_arn:
-            raise ConfigurationError(
-                "S3_UPLOADER_BEARER_SECRET_ARN is required when bearer auth is enforced"
-            )
+        bearer_secret_arn = _required("S3_UPLOADER_BEARER_SECRET_ARN", env)
 
         # History bucket / prefix. LOCAL and DEV fall back to the well-known
         # values so developers can boot without extra config; STG and PRD

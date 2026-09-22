@@ -12,7 +12,7 @@ Two layers:
     path.
 
 Also owns the two identity resolvers (cookie / bearer), their dispatcher,
-the router-level ``require_bearer`` guard, and the ``enforce_ownership``
+the router-level ``require_auth`` guard, and the ``enforce_ownership``
 helper called at every ownership check site.
 """
 
@@ -92,10 +92,7 @@ StoreDep = Annotated[S3JobStore, Depends(get_store)]
 
 
 def get_bearer_auth(request: Request) -> BearerAuthService:
-    bearer = getattr(request.state, "bearer_auth", None)
-    if bearer is None:
-        raise BearerAuthRequired("Bearer auth is not configured in this environment")
-    return bearer
+    return request.state.bearer_auth
 
 
 BearerAuthDep = Annotated[BearerAuthService, Depends(get_bearer_auth)]
@@ -173,12 +170,36 @@ ProfileServiceDep = Annotated[
 
 
 # ---------------------------------------------------------------------------
-# Bearer guard (router-level dependency)
+# Auth guard (router-level dependency)
 # ---------------------------------------------------------------------------
 
-def require_bearer(request: Request, bearer: BearerAuthDep) -> None:
-    """Router-level guard. Raises unless a valid Bearer token is presented."""
-    bearer.verify(request.headers.get("Authorization"))
+def require_auth(
+    request: Request,
+    settings: SettingsDep,
+    bearer: BearerAuthDep,
+) -> None:
+    """Router-level guard accepted by every core router.
+
+    - If the request carries an ``Authorization`` header, it must be a valid
+      ``Bearer <token>``. Invalid or malformed values raise 401 — no silent
+      fallback to cookie auth.
+    - Otherwise, if the environment serves the frontend surface the cookie
+      middleware has already validated the session; we tag the request as
+      cookie-authed.
+    - In bearer-only environments (no frontend surface) a missing header is
+      rejected outright.
+
+    The chosen path is stamped on ``request.state.auth_method`` so
+    :func:`resolve_user` can pick the matching identity resolver.
+    """
+    auth_header = request.headers.get("Authorization")
+    if auth_header:
+        bearer.verify(auth_header)
+        request.state.auth_method = "bearer"
+        return
+    if not settings.frontend_surface_enabled:
+        raise BearerAuthRequired("Bearer token required")
+    request.state.auth_method = "cookie"
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +249,17 @@ def resolve_hardened_user(request: Request) -> UserContext:
 
 def resolve_user(
     request: Request,
-    settings: SettingsDep,
     profiles: ProfileServiceDep,
 ) -> UserContext:
-    """Dispatcher: pick the resolver based on ``settings.frontend_surface_enabled``.
+    """Dispatcher: pick the resolver based on how ``require_auth`` authenticated.
 
-    Handlers depend on ``UserDep`` and stay agnostic of the environment.
+    ``require_auth`` stamps ``request.state.auth_method`` (``"bearer"`` or
+    ``"cookie"``); this dep reads that stamp so a bearer client resolves via
+    ``User-ID`` regardless of environment. Handlers depend on ``UserDep`` and
+    stay agnostic of both env and transport.
     """
-    if settings.frontend_surface_enabled:
+    method = getattr(request.state, "auth_method", None)
+    if method == "cookie":
         return resolve_frontend_user(request, profiles)
     return resolve_hardened_user(request)
 

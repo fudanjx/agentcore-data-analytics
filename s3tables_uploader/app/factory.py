@@ -18,7 +18,7 @@ from fastapi import Depends, FastAPI
 
 from ..config import Settings
 from ..services.auth.bearer import BearerAuthService
-from .dependencies import require_bearer
+from .dependencies import require_auth
 from .exception_handlers import install_exception_handlers
 from .lifespan import make_lifespan
 from .middlewares import install_middlewares
@@ -84,7 +84,7 @@ def _register_routers(app: FastAPI, settings: Settings) -> None:
         worker_leases,
     )
 
-    hardened_deps = [Depends(require_bearer)] if settings.bearer_auth_required else []
+    core_deps = [Depends(require_auth)]
 
     # Core routers registered in every environment.
     for router in (
@@ -98,13 +98,15 @@ def _register_routers(app: FastAPI, settings: Settings) -> None:
         jobs.router,
         jobs.ingestions_router,
     ):
-        app.include_router(router, dependencies=hardened_deps)
+        app.include_router(router, dependencies=core_deps)
 
-    # Frontend-only routers.
+    # Frontend-only routers. ``frontend`` serves static assets + /login and
+    # stays public; ``identity`` and ``dev`` handle authenticated calls so
+    # they run through ``require_auth`` like the core routers.
     if settings.frontend_surface_enabled:
         from ..api.static import frontend
         from ..api.v3 import dev, identity
 
         app.include_router(frontend.router)
-        app.include_router(identity.router)
-        app.include_router(dev.router)
+        app.include_router(identity.router, dependencies=core_deps)
+        app.include_router(dev.router, dependencies=core_deps)

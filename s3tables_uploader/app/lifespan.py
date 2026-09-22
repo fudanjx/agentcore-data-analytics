@@ -36,7 +36,7 @@ class AppState(TypedDict):
     s3tables: Any
     secrets_manager: Any
     store: S3JobStore
-    bearer_auth: BearerAuthService | None
+    bearer_auth: BearerAuthService
 
 
 def _boto_clients(settings: Settings) -> dict[str, Any]:
@@ -65,7 +65,7 @@ def build_state(
     store = S3JobStore(
         boto_clients["s3"], settings.landing_bucket, settings.landing_prefix
     )
-    if bearer_auth is None and settings.bearer_auth_required and settings.bearer_secret_arn:
+    if bearer_auth is None:
         bearer_auth = BearerAuthService(
             SecretsManagerSource(boto_clients["secrets_manager"]),
             settings.bearer_secret_arn,
@@ -102,14 +102,12 @@ def make_lifespan(
         configure_logging()
         logger = create_structured_logger("s3tables_uploader.lifespan")
         state = build_state(settings, clients=clients, bearer_auth=bearer_auth)
-        if state["bearer_auth"] is not None:
-            state["bearer_auth"].warm()
-            logger.info("bearer_auth_warmed", environment=settings.environment.value)
+        state["bearer_auth"].warm()
+        logger.info("bearer_auth_warmed", environment=settings.environment.value)
         logger.info(
             "lifespan_started",
             environment=settings.environment.value,
             frontend=settings.frontend_surface_enabled,
-            bearer=settings.bearer_auth_required,
         )
         try:
             yield state

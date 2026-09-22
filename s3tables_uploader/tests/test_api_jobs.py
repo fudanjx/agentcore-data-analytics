@@ -12,6 +12,8 @@ from s3tables_uploader.app.factory import create_app
 from s3tables_uploader.config import Settings
 from s3tables_uploader.job_store import S3JobStore
 from s3tables_uploader.models import JobStatus
+from s3tables_uploader.services.auth.bearer import BearerAuthService
+from s3tables_uploader.services.secret_manager import InMemorySecretSource
 
 
 class FakeS3:
@@ -102,11 +104,27 @@ class FakeS3Tables:
         self.deleted = (tableBucketARN, namespace, name)
 
 
+def _test_bearer_service(settings) -> BearerAuthService:
+    return BearerAuthService(
+        InMemorySecretSource({settings.bearer_secret_arn: "test-token"}),
+        settings.bearer_secret_arn,
+        cache_ttl_seconds=3600,
+        refresh_min_interval_seconds=300,
+    )
+
+
 class ApiTests(unittest.TestCase):
     def setUp(self):
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         self.s3 = FakeS3(); self.s3tables = FakeS3Tables(); self.glue = FakeGlue(); self.sqs = FakeSqs()
-        self.client = self.enterContext(TestClient(create_app(Settings.from_environ(env), self.s3, self.sqs, self.s3tables, self.glue)))
+        settings = Settings.from_environ(env)
+        bearer_service = BearerAuthService(
+            InMemorySecretSource({settings.bearer_secret_arn: "test-token"}),
+            settings.bearer_secret_arn,
+            cache_ttl_seconds=3600,
+            refresh_min_interval_seconds=300,
+        )
+        self.client = self.enterContext(TestClient(create_app(settings, self.s3, self.sqs, self.s3tables, self.glue, lifespan_bearer_auth=bearer_service)))
 
     def test_v2_upload_session_route_is_not_exposed(self):
         self.client.post("/login", json={"password": "password"})
@@ -438,9 +456,10 @@ class ApiTests(unittest.TestCase):
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         buffer = io.BytesIO(); pq.write_table(pa.table({"id": ["1"]}), buffer)
         payload = buffer.getvalue()
@@ -461,9 +480,10 @@ class ApiTests(unittest.TestCase):
         import pyarrow as pa
         import pyarrow.parquet as pq
 
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         buffer = io.BytesIO(); pq.write_table(pa.table({"id": ["1"]}), buffer)
         payload = buffer.getvalue()
@@ -480,9 +500,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(store.get_lease(response.json()["worker_lease"]["lease_id"])["owner_user_id"], "local-admin")
 
     def test_unattached_same_size_lease_is_reused_when_file_selection_changes(self):
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "first.parquet", "size_bytes": 1}]}).json()
         replacement = client.put(f"/api/v3/worker-leases/{first['lease_id']}", json={"files": [{"name": "corrected.parquet", "size_bytes": 2}]})
@@ -493,9 +514,10 @@ class ApiTests(unittest.TestCase):
 
     def test_attached_rejected_review_reuses_the_idle_worker_for_a_new_selection(self):
         import json
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "rejected.xlsx", "size_bytes": 1}]}).json()
         store = S3JobStore(s3, "landing", "s3-uploader")
@@ -516,9 +538,10 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(sqs.messages), 1)
 
     def test_unattached_base_lease_is_replaced_when_new_selection_routes_large(self):
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"job", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         first = client.post("/api/v3/worker-leases", json={"files": [{"name": "first.parquet", "size_bytes": 1}]}).json()
         replacement = client.put(f"/api/v3/worker-leases/{first['lease_id']}", json={"files": [{"name": "large.parquet", "size_bytes": 129 * 1024 * 1024}]})
@@ -577,9 +600,11 @@ class ApiTests(unittest.TestCase):
             "AWS_REGION": "ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET": "landing", "S3_UPLOADER_LANDING_PREFIX": "s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET": "ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX": "temp_s3_update/web_ingest/table_contracts",             "S3_UPLOADER_BASE_QUEUE_URL": "base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation",             "S3_UPLOADER_LOGIN_PASSWORD": "password", "S3_UPLOADER_LOGIN_SECRET": "x" * 32,
             "S3_UPLOADER_API_BASE_URL": "https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME": "job",
             "S3_UPLOADER_ENV": "development", "S3_UPLOADER_COOKIE_SECURE": "false",
+            "S3_UPLOADER_BEARER_SECRET_ARN": "arn:aws:secretsmanager::0:secret/test",
         }
         s3, sqs, tables = FakeS3(), FakeSqs(), FakeS3Tables()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, tables)))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, tables, lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password": "password"})
         store = S3JobStore(s3, "landing", "s3-uploader")
         store.put_compat_session({
@@ -604,9 +629,10 @@ class ApiTests(unittest.TestCase):
 
     def test_resource_limited_base_lease_can_be_manually_retried_as_large(self):
         import json
-        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false"}
+        env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}
         s3, sqs = FakeS3(), FakeSqs()
-        client = self.enterContext(TestClient(create_app(Settings.from_environ(env), s3, sqs, FakeS3Tables())))
+        settings = Settings.from_environ(env)
+        client = self.enterContext(TestClient(create_app(settings, s3, sqs, FakeS3Tables(), lifespan_bearer_auth=_test_bearer_service(settings))))
         client.post("/login", json={"password":"password"})
         lease = client.post("/api/v3/worker-leases", json={"files": [{"name": "source.parquet", "size_bytes": 1}]}).json()
         lease_key = f"s3-uploader/worker-leases/{lease['lease_id']}/lease.json"

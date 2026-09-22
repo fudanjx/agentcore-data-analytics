@@ -15,7 +15,14 @@ class SettingsTests(unittest.TestCase):
             "S3_UPLOADER_API_BASE_URL": "https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME": "s3-uploader-ingest",
             "S3_UPLOADER_CONTRACT_BUCKET": "ah-data-analytics",
             "S3_UPLOADER_CONTRACT_PREFIX": "temp_s3_update/web_ingest/table_contracts",
+            "S3_UPLOADER_BEARER_SECRET_ARN": "arn:aws:secretsmanager:ap-southeast-1:123456789012:secret:test",
         }
+
+    def test_bearer_secret_arn_required_in_every_env(self):
+        env = self.valid()
+        del env["S3_UPLOADER_BEARER_SECRET_ARN"]
+        with self.assertRaisesRegex(ConfigurationError, "BEARER_SECRET_ARN"):
+            Settings.from_environ(env)
 
     def test_requires_deployment_resource_ids_and_secrets(self):
         env = self.valid(); del env["S3_UPLOADER_LANDING_BUCKET"]
