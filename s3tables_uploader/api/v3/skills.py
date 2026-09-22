@@ -48,7 +48,7 @@ def _stream(body: Any) -> Iterator[bytes]:
 
 def _not_found_or_gateway(error: ClientError) -> HTTPException:
     code = error.response.get("Error", {}).get("Code", "") if hasattr(error, "response") else ""
-    if code in {"404", "NoSuchKey", "NotFound"}:
+    if code in {"404", "NoSuchKey", "NoSuchVersion", "NotFound"}:
         return HTTPException(404, "The requested skill file no longer exists")
     return HTTPException(502, "Unable to reach S3 for the requested skill file")
 
@@ -176,6 +176,7 @@ async def upload_version(
     s3: S3Dep,
     table_bucket_arn: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
+    description: Annotated[str, Form(max_length=skill_bundle.MAX_DESCRIPTION_CHARS)] = "",
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
     try:
@@ -187,6 +188,7 @@ async def upload_version(
             user.user_id,
             file.filename or "",
             content,
+            description,
             **dest,
         )
     finally:
@@ -196,41 +198,20 @@ async def upload_version(
 @router.get("/versions/download")
 def download_version(
     table_bucket_arn: Annotated[str, Query()],
-    filename: Annotated[str, Query()],
+    version_id: Annotated[str, Query(min_length=1, max_length=1024)],
     user: UserDep,
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
     s3: S3Dep,
 ) -> StreamingResponse:
     require_table_bucket_access(table_bucket_arn, user, tables)
-    bucket, key = skill_bundle.version_location(table_bucket_arn, filename, **dest)
+    bucket, key = skill_bundle.version_location(table_bucket_arn, **dest)
     try:
-        result = s3.get_object(Bucket=bucket, Key=key)
+        result = s3.get_object(Bucket=bucket, Key=key, VersionId=version_id)
     except ClientError as error:
         raise _not_found_or_gateway(error) from error
+    filename = key.rsplit("/", 1)[-1]
     headers = {"Content-Disposition": f"attachment; filename*=UTF-8''{quote(filename)}"}
     if result.get("ContentLength") is not None:
         headers["Content-Length"] = str(result["ContentLength"])
     return StreamingResponse(_stream(result["Body"]), media_type="application/zip", headers=headers)
-
-
-@router.delete("/versions")
-def delete_version(
-    payload: DeleteSkillFileRequest,
-    user: UserDep,
-    tables: TableBucketServiceDep,
-    dest: SkillDestinationDep,
-    s3: S3Dep,
-) -> dict[str, str]:
-    require_table_bucket_access(payload.table_bucket_arn, user, tables)
-    if not payload.confirm:
-        raise HTTPException(422, "Confirm deletion before removing a skill version")
-    bucket, key = skill_bundle.version_location(
-        payload.table_bucket_arn, payload.path, **dest
-    )
-    try:
-        s3.head_object(Bucket=bucket, Key=key)
-        s3.delete_object(Bucket=bucket, Key=key)
-    except ClientError as error:
-        raise _not_found_or_gateway(error) from error
-    return {"deleted_filename": payload.path}

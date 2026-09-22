@@ -56,14 +56,16 @@
       <p id="destination-help" class="hint">Select one existing table, or create a new one.</p>
       <details id="skill-builder" class="skill-builder" hidden>
         <summary><strong>Upload a skill for this S3 Tables bucket</strong> <span class="hint">(administrators and assigned editors)</span></summary>
-        <p class="hint">Upload a complete skill ZIP with <code>SKILL.md</code> at the ZIP root or inside one enclosing folder. Each upload is saved as a new timestamped snapshot; previous ZIP versions remain available for download. A snapshot is an archive and does not activate a runtime skill.</p>
+        <p class="hint">Upload a complete skill ZIP with <code>SKILL.md</code> at the ZIP root or inside one enclosing folder. Every upload replaces <code>bucket_name.zip</code>; native S3 versioning keeps earlier revisions available. A revision is an archive and does not activate a runtime skill.</p>
         <div class="skill-explorer-toolbar">
-          <strong>Skill ZIP versions</strong>
+          <strong>Latest skill ZIP versions (maximum 10)</strong>
           <button id="refresh-skill-files" class="secondary" type="button">Refresh versions</button>
         </div>
         <p id="skill-location" class="hint">Select an S3 Tables bucket to view its skill versions.</p>
         <div id="skill-file-explorer" class="skill-file-explorer" aria-live="polite"></div>
         <label for="skill-bundle-files">Skill ZIP file <input id="skill-bundle-files" type="file" accept=".zip,application/zip"></label>
+        <label for="skill-bundle-description">Description (optional)</label>
+        <textarea id="skill-bundle-description" maxlength="500" rows="3" placeholder="What changed in this version?"></textarea>
         <div class="skill-actions">
           <button id="upload-skill-bundle" type="button" disabled>Upload ZIP version</button>
           <p id="skill-bundle-status" class="operation-status" aria-live="polite"></p>

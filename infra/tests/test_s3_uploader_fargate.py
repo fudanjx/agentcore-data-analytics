@@ -55,7 +55,15 @@ class FargateTemplateTests(unittest.TestCase):
             statement for statement in statements
             if statement.get("Resource") == f"arn:aws:s3:::{SKILL_BUNDLE_BUCKET}/{SKILL_BUNDLE_PREFIX}/*"
         )
-        self.assertEqual(set(skill_object_statement["Action"]), {"s3:GetObject", "s3:PutObject", "s3:DeleteObject"})
+        self.assertEqual(set(skill_object_statement["Action"]), {
+            "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject",
+            "s3:DeleteObject",
+        })
+        self.assertTrue(any(
+            set(statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]])
+            == {"s3:GetBucketVersioning", "s3:PutBucketVersioning"}
+            for statement in statements
+        ))
 
     def test_historical_landing_data_is_read_only(self):
         resources = render_template()["Resources"]

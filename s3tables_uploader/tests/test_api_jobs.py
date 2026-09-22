@@ -3,6 +3,7 @@ import io
 import os
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 from unittest.mock import patch
 
 from botocore.exceptions import ClientError
@@ -17,7 +18,11 @@ from s3tables_uploader.services.secret_manager import InMemorySecretSource
 
 
 class FakeS3:
-    def __init__(self): self.items = {}; self.parts = {}; self.deleted_objects = []
+    def __init__(self):
+        self.items = {}; self.parts = {}; self.deleted_objects = []
+        self.object_versions = {}
+        self.versioning_status = None
+        self.version_counter = 0
     @staticmethod
     def _precondition_error():
         return ClientError({"Error": {"Code": "PreconditionFailed"}}, "S3")
@@ -29,20 +34,56 @@ class FakeS3:
         if kwargs.get("IfNoneMatch") == "*" and Key in self.items:
             raise self._precondition_error()
         self.items[Key] = Body
-        return {"ETag": "etag"}
-    def get_object(self, Bucket, Key):
+        result = {"ETag": "etag"}
+        if self.versioning_status == "Enabled":
+            self.version_counter += 1
+            version_id = f"version-{self.version_counter}"
+            version = {
+                "VersionId": version_id,
+                "Body": Body,
+                "Metadata": kwargs.get("Metadata", {}),
+                "LastModified": datetime.now(timezone.utc) + timedelta(microseconds=self.version_counter),
+            }
+            self.object_versions.setdefault(Key, []).append(version)
+            result["VersionId"] = version_id
+        return result
+    def get_object(self, Bucket, Key, VersionId=None):
         import io
+        body = self.items.get(Key)
+        if VersionId is not None:
+            version = next((item for item in self.object_versions.get(Key, []) if item["VersionId"] == VersionId), None)
+            body = version["Body"] if version else None
+        if body is None:
+            raise self._not_found_error()
+        return {"Body": io.BytesIO(body), "ETag": "etag", "ContentLength": len(body)}
+    def head_object(self, Bucket, Key, VersionId=None):
+        versions = self.object_versions.get(Key, [])
+        version = next((item for item in versions if item["VersionId"] == VersionId), None) if VersionId else (versions[-1] if versions else None)
+        if version:
+            return {"ETag": "etag", "Metadata": version["Metadata"]}
         if Key not in self.items:
             raise self._not_found_error()
-        return {"Body": io.BytesIO(self.items[Key]), "ETag": "etag"}
-    def head_object(self, Bucket, Key):
-        if Key not in self.items:
-            raise KeyError(Key)
-        return {"ETag": "etag"}
+        return {"ETag": "etag", "Metadata": {}}
     def delete_object(self, Bucket, Key, VersionId=None):
         self.deleted_objects.append({"Bucket": Bucket, "Key": Key, "VersionId": VersionId})
-        self.items.pop(Key, None)
+        if VersionId is not None:
+            versions = self.object_versions.get(Key, [])
+            if not versions:
+                self.items.pop(Key, None)
+                return {}
+            remaining = [item for item in versions if item["VersionId"] != VersionId]
+            if len(remaining) == len(versions):
+                raise self._not_found_error()
+            self.object_versions[Key] = remaining
+            if remaining:
+                self.items[Key] = remaining[-1]["Body"]
+            else:
+                self.items.pop(Key, None)
+        else:
+            self.items.pop(Key, None)
         return {}
+    def get_bucket_versioning(self, Bucket): return {"Status": self.versioning_status} if self.versioning_status else {}
+    def put_bucket_versioning(self, Bucket, VersioningConfiguration): self.versioning_status = VersioningConfiguration["Status"]; return {}
     def generate_presigned_url(self, *args, **kwargs): return "https://s3.example/part"
     def upload_part(self, Bucket, Key, UploadId, PartNumber, Body):
         self.parts[(Key, PartNumber)] = Body
@@ -52,11 +93,26 @@ class FakeS3:
         return {"VersionId": "version"}
     def abort_multipart_upload(self, **kwargs): return {}
     def get_paginator(self, operation):
-        assert operation == "list_objects_v2"
+        assert operation in {"list_objects_v2", "list_object_versions"}
         client = self
         class Paginator:
             def paginate(self, Bucket, Prefix):
-                yield {"Contents": [{"Key": key} for key in sorted(client.items) if key.startswith(Prefix)]}
+                if operation == "list_objects_v2":
+                    yield {"Contents": [{"Key": key} for key in sorted(client.items) if key.startswith(Prefix)]}
+                    return
+                versions = []
+                for key, records in client.object_versions.items():
+                    if not key.startswith(Prefix):
+                        continue
+                    for index, record in enumerate(records):
+                        versions.append({
+                            "Key": key,
+                            "VersionId": record["VersionId"],
+                            "LastModified": record["LastModified"],
+                            "Size": len(record["Body"]),
+                            "IsLatest": index == len(records) - 1,
+                        })
+                yield {"Versions": versions}
         return Paginator()
 
 
@@ -333,7 +389,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(deleted.json()["deleted_path"], "SKILL.md")
         self.assertNotIn(key, self.s3.items)
 
-    def test_skill_zip_versions_accept_wrapped_skill_and_preserve_previous_snapshot(self):
+    def test_skill_zip_versions_use_native_s3_versions_and_descriptions(self):
         bucket = self.s3tables.bucket_arn
         skill = b"---\ndescription: test skill\n---\n# Test\n"
         archive = io.BytesIO()
@@ -372,39 +428,67 @@ class ApiTests(unittest.TestCase):
             files={"file": ("unsafe-dir.zip", unsafe_directory.getvalue(), "application/zip")},
         )
         self.assertEqual(directory_upload.status_code, 422, directory_upload.text)
-        for _ in range(2):
+        descriptions = ["Initial upload", "Added reference data – 中文"]
+        for description in descriptions:
             uploaded = self.client.post(
-                "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+                "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "description": description},
                 files={"file": ("wrapped-skill.zip", content, "application/zip")},
             )
             self.assertEqual(uploaded.status_code, 201, uploaded.text)
+            self.assertEqual(uploaded.json()["filename"], "ah-soc-delta-pilot.zip")
+            self.assertEqual(uploaded.json()["description"], description)
+            self.assertTrue(uploaded.json()["version_id"])
+        self.assertEqual(self.s3.versioning_status, "Enabled")
+        self.assertEqual(list(self.s3.object_versions), ["skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip"])
         versions = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
         self.assertEqual(versions.status_code, 200, versions.text)
-        names = [item["filename"] for item in versions.json()["versions"]]
-        self.assertEqual(len(names), 2)
-        self.assertNotEqual(names[0], names[1])
-        self.assertTrue(all(name.endswith(".zip") and item["uploaded_at"] for name, item in zip(names, versions.json()["versions"])))
-        downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": names[0]})
+        listed = versions.json()["versions"]
+        self.assertEqual(len(listed), 2)
+        self.assertTrue(all("filename" not in item for item in listed))
+        self.assertEqual([item["description"] for item in listed], list(reversed(descriptions)))
+        self.assertNotEqual(listed[0]["version_id"], listed[1]["version_id"])
+        self.assertTrue(all(item["uploaded_at"] for item in listed))
+        downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "version_id": listed[0]["version_id"]})
         self.assertEqual(downloaded.status_code, 200, downloaded.text)
         self.assertEqual(downloaded.content, content)
-        unsafe = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "filename": "../other.zip"})
-        self.assertEqual(unsafe.status_code, 422, unsafe.text)
-        unconfirmed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": False})
-        self.assertEqual(unconfirmed.status_code, 422, unconfirmed.text)
-        removed = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "path": names[0], "confirm": True})
-        self.assertEqual(removed.status_code, 200, removed.text)
-        self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).json()["versions"][0]["filename"], names[1])
+        deletion = self.client.request("DELETE", "/api/v3/skills/versions", json={"table_bucket_arn": bucket, "version_id": listed[0]["version_id"]})
+        self.assertEqual(deletion.status_code, 405, deletion.text)
 
-    def test_skill_zip_version_list_includes_existing_timestamp_zip(self):
+    def test_skill_zip_version_list_reads_description_from_object_metadata(self):
         bucket = self.s3tables.bucket_arn
-        self.s3.items["skills/ah-soc-delta-pilot/20260913112233.zip"] = b"existing snapshot"
-        self.s3.items["skills/ah-soc-delta-pilot/SKILL.md"] = b"loose skill file"
+        self.s3.put_bucket_versioning(Bucket="agentcore-harness-dev", VersioningConfiguration={"Status": "Enabled"})
+        self.s3.put_object(
+            Bucket="agentcore-harness-dev",
+            Key="skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip",
+            Body=b"existing snapshot",
+            Metadata={"description": "Existing%20version"},
+        )
         self.client.post("/login", json={"password": "password"})
         response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(len(response.json()["versions"]), 1)
-        self.assertEqual(response.json()["versions"][0]["filename"], "20260913112233.zip")
-        self.assertEqual(response.json()["versions"][0]["uploaded_at"], "2026-09-13T11:22:33+00:00")
+        self.assertNotIn("filename", response.json()["versions"][0])
+        self.assertEqual(response.json()["versions"][0]["description"], "Existing version")
+
+    def test_skill_zip_version_list_returns_only_latest_ten(self):
+        bucket = self.s3tables.bucket_arn
+        key = "skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip"
+        self.s3.put_bucket_versioning(Bucket="agentcore-harness-dev", VersioningConfiguration={"Status": "Enabled"})
+        for index in range(12):
+            self.s3.put_object(
+                Bucket="agentcore-harness-dev",
+                Key=key,
+                Body=f"version-{index}".encode(),
+                Metadata={"description": f"Description%20{index}"},
+            )
+        self.client.post("/login", json={"password": "password"})
+        response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
+        self.assertEqual(response.status_code, 200, response.text)
+        listed = response.json()["versions"]
+        self.assertEqual(len(listed), 10)
+        self.assertEqual(listed[0]["description"], "Description 11")
+        self.assertEqual(listed[-1]["description"], "Description 2")
+        self.assertTrue(listed[0]["is_latest"])
 
     def test_skill_bundle_destination_requires_explicit_configuration(self):
         from s3tables_uploader import skill_bundle

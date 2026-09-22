@@ -79,6 +79,7 @@ function updateSkillControls() {
 }
 function clearSkillBundle() {
   $('skill-bundle-files').value = '';
+  $('skill-bundle-description').value = '';
   $('skill-bundle-status').textContent = '';
   $('skill-bundle-status').className = 'operation-status';
   $('skill-location').textContent = 'Select an S3 Tables bucket to view its skill versions.';
@@ -118,47 +119,33 @@ async function loadSkillFiles() {
     for (const version of result.versions) {
       const row = document.createElement('div'); row.className = 'skill-file-row';
       const details = document.createElement('div'); details.className = 'skill-file-details';
-      const name = document.createElement('strong'); name.textContent = version.filename;
       const meta = document.createElement('small'); meta.textContent = `${formatFileSize(version.size)} · Uploaded ${formatSkillUploadTime(version.uploaded_at)}`;
-      details.append(name, meta);
+      const description = document.createElement('small'); description.textContent = version.description || 'No description';
+      details.append(meta, description);
       const actions = document.createElement('div'); actions.className = 'skill-file-actions';
-      const download = document.createElement('button'); download.type = 'button'; download.className = 'secondary'; download.textContent = 'Download'; download.onclick = () => downloadSkillFile(version.filename);
-      const remove = document.createElement('button'); remove.type = 'button'; remove.className = 'danger'; remove.textContent = 'Delete'; remove.onclick = () => deleteSkillFile(version.filename);
-      actions.append(download, remove); row.append(details, actions); explorer.append(row);
+      const download = document.createElement('button'); download.type = 'button'; download.className = 'secondary'; download.textContent = 'Download'; download.onclick = () => downloadSkillFile(version);
+      actions.append(download); row.append(details, actions); explorer.append(row);
     }
   } catch (error) {
     $('skill-location').textContent = 'Unable to load the selected skill versions.';
     explorer.className = 'skill-file-explorer failed'; explorer.textContent = error.message || 'Skill version listing failed.';
   }
 }
-async function downloadSkillFile(path) {
+async function downloadSkillFile(version) {
   if (!state.bucket) return;
-  const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Downloading ${path}…`;
+  const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = 'Downloading skill ZIP version…';
   try {
-    const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, filename: path });
+    const query = new URLSearchParams({ table_bucket_arn: state.bucket.table_bucket_arn, version_id: version.version_id });
     const response = await apiFetch(`/api/v3/skills/versions/download?${query}`);
     if (!response.ok) { const result = await response.json(); throw new Error(result.detail || 'Skill version download failed.'); }
     const blob = await response.blob(); const url = URL.createObjectURL(blob);
-    const link = document.createElement('a'); link.href = url; link.download = path;
+    const bucketName = state.bucket.table_bucket_arn.split('/').pop();
+    const link = document.createElement('a'); link.href = url; link.download = `${bucketName}.zip`;
     document.body.append(link); link.click(); link.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
-    status.className = 'operation-status complete'; status.textContent = `Downloaded ${path}.`;
+    status.className = 'operation-status complete'; status.textContent = 'Downloaded skill ZIP version.';
   } catch (error) {
     status.className = 'operation-status failed'; status.textContent = error.message || 'Skill version download failed.';
-  }
-}
-async function deleteSkillFile(path) {
-  if (!state.bucket) return;
-  if (!confirm(`Delete skill ZIP version “${path}”?`)) return;
-  const status = $('skill-bundle-status'); status.className = 'operation-status'; status.textContent = `Deleting ${path}…`;
-  try {
-    const response = await apiFetch('/api/v3/skills/versions', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: state.bucket.table_bucket_arn, path, confirm: true }) });
-    const result = await response.json();
-    if (!response.ok) throw new Error(result.detail || 'Skill version deletion failed.');
-    status.className = 'operation-status complete'; status.textContent = `Deleted ${result.deleted_filename}.`;
-    await loadSkillFiles();
-  } catch (error) {
-    status.className = 'operation-status failed'; status.textContent = error.message || 'Skill version deletion failed.';
   }
 }
 async function uploadSkillBundle() {
@@ -172,11 +159,13 @@ async function uploadSkillBundle() {
     const form = new FormData();
     form.append('table_bucket_arn', state.bucket.table_bucket_arn);
     form.append('file', files[0], files[0].name);
+    form.append('description', $('skill-bundle-description').value.trim());
     const response = await apiFetch('/api/v3/skills/versions', { method: 'POST', body: form });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill ZIP upload failed.'; return; }
-    status.className = 'operation-status complete'; status.textContent = `Uploaded new skill version ${result.filename}.`;
+    status.className = 'operation-status complete'; status.textContent = `Uploaded new version of ${result.filename}.`;
     $('skill-bundle-files').value = '';
+    $('skill-bundle-description').value = '';
     await loadSkillFiles();
   } catch (error) {
     status.className = 'operation-status failed'; status.textContent = `Skill ZIP upload failed: ${error.message || 'network request failed'}`;

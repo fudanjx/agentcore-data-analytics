@@ -106,8 +106,9 @@ def render_template() -> dict[str, Any]:
     resources["ExecutionRole"] = _role("ecs-tasks.amazonaws.com", [{"Effect": "Allow", "Action": "secretsmanager:GetSecretValue", "Resource": [{"Ref": "LoginPasswordSecretArn"}, {"Ref": "LoginSigningSecretArn"}]}], managed=["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"])
     resources["ApiTaskRole"] = _role("ecs-tasks.amazonaws.com", [
         landing_read, api_landing_write, landing_list,
-        {"Effect": "Allow", "Action": "s3:ListBucket", "Resource": skill_bundle_bucket, "Condition": {"StringLike": {"s3:prefix": [f"{SKILL_BUNDLE_PREFIX}/*"]}}},
-        {"Effect": "Allow", "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"], "Resource": skill_bundle_objects},
+        {"Effect": "Allow", "Action": ["s3:ListBucket", "s3:ListBucketVersions"], "Resource": skill_bundle_bucket, "Condition": {"StringLike": {"s3:prefix": [f"{SKILL_BUNDLE_PREFIX}/*"]}}},
+        {"Effect": "Allow", "Action": ["s3:GetBucketVersioning", "s3:PutBucketVersioning"], "Resource": skill_bundle_bucket},
+        {"Effect": "Allow", "Action": ["s3:GetObject", "s3:GetObjectVersion", "s3:PutObject", "s3:DeleteObject"], "Resource": skill_bundle_objects},
         {"Effect": "Allow", "Action": "sqs:SendMessage", "Resource": [{"Fn::GetAtt": ["BaseWorkerQueue", "Arn"]}, {"Fn::GetAtt": ["LargeWorkerQueue", "Arn"]}, {"Fn::GetAtt": ["MutationQueue", "Arn"]}]},
         {"Effect": "Allow", "Action": "secretsmanager:GetSecretValue", "Resource": [{"Ref": "LoginPasswordSecretArn"}, {"Ref": "LoginSigningSecretArn"}]},
         {"Effect": "Allow", "Action": "s3tables:ListTableBuckets", "Resource": "*"},

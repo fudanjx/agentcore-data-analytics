@@ -6,13 +6,12 @@ import json
 import io
 import mimetypes
 import re
-import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, unquote
 
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -24,8 +23,9 @@ MAX_FILES = 500
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 250 * 1024 * 1024
 MAX_ZIP_BYTES = 50 * 1024 * 1024
-_VERSION_RE = re.compile(r"^(?P<stamp>\d{8}T\d{9}Z)-[0-9a-f]{8}\.zip$")
-_FLAT_ZIP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.zip$", re.IGNORECASE)
+MAX_DESCRIPTION_CHARS = 500
+MAX_ENCODED_DESCRIPTION_BYTES = 1024
+MAX_LISTED_VERSIONS = 10
 _BUCKET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<header>.*?)\r?\n---[ \t]*(?P<rest>\r?\n.*|\Z)",
@@ -271,36 +271,40 @@ def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -
 
 def version_location(
     table_bucket_arn: str,
-    filename: str,
     *,
     destination_bucket: str,
     destination_prefix: str,
 ) -> tuple[str, str]:
-    if not _FLAT_ZIP_RE.fullmatch(filename):
-        raise SkillBundleError("Invalid skill version filename")
     bucket_name = table_bucket_name(table_bucket_arn)
     bucket, prefix, _ = _destination(
         bucket_name,
         destination_bucket=destination_bucket,
         destination_prefix=destination_prefix,
     )
-    return bucket, f"{prefix}/{filename}"
+    return bucket, f"{prefix}/{bucket_name}.zip"
 
 
-def _version_upload_time(filename: str, last_modified) -> datetime | None:
-    match = _VERSION_RE.fullmatch(filename)
-    if match:
-        return datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
-    stamp = filename[:-4]
-    if stamp.isdigit():
-        try:
-            if len(stamp) == 14:
-                return datetime.strptime(stamp, "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-            if len(stamp) in {10, 13}:
-                return datetime.fromtimestamp(int(stamp) / (1000 if len(stamp) == 13 else 1), tz=timezone.utc)
-        except (OverflowError, ValueError):
-            pass
-    return last_modified
+def _normalise_description(description: str) -> tuple[str, str]:
+    normalised = description.strip()
+    if len(normalised) > MAX_DESCRIPTION_CHARS:
+        raise SkillBundleError(f"Description must be at most {MAX_DESCRIPTION_CHARS} characters")
+    encoded = quote(normalised, safe="")
+    if len(encoded.encode("ascii")) > MAX_ENCODED_DESCRIPTION_BYTES:
+        raise SkillBundleError("Description is too large to store in S3 object metadata")
+    return normalised, encoded
+
+
+def ensure_bucket_versioning(s3_client: Any, bucket: str) -> None:
+    """Enable native S3 versioning on the configured skill archive bucket."""
+    try:
+        status = s3_client.get_bucket_versioning(Bucket=bucket).get("Status")
+        if status != "Enabled":
+            s3_client.put_bucket_versioning(
+                Bucket=bucket,
+                VersioningConfiguration={"Status": "Enabled"},
+            )
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to enable versioning on the skill-bundle S3 bucket", 502) from error
 
 
 def list_skill_versions(
@@ -311,23 +315,46 @@ def list_skill_versions(
     destination_prefix: str,
 ) -> dict:
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(
+    bucket, prefix, _ = _destination(
         bucket_name,
         destination_bucket=destination_bucket,
         destination_prefix=destination_prefix,
     )
+    key = f"{prefix}/{bucket_name}.zip"
+    uri = f"s3://{bucket}/{key}"
     versions = []
     try:
-        for page in s3_client.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
-            for item in page.get("Contents", []):
-                filename = item.get("Key", "").removeprefix(f"{prefix}/")
-                if not _FLAT_ZIP_RE.fullmatch(filename):
+        for page in s3_client.get_paginator("list_object_versions").paginate(Bucket=bucket, Prefix=key):
+            for item in page.get("Versions", []):
+                if item.get("Key") != key:
                     continue
-                uploaded = _version_upload_time(filename, item.get("LastModified"))
-                versions.append({"filename": filename, "uploaded_at": uploaded.isoformat() if uploaded else None, "size": int(item.get("Size", 0))})
+                version_id = item.get("VersionId")
+                if not version_id:
+                    continue
+                uploaded = item.get("LastModified")
+                versions.append({
+                    "version_id": version_id,
+                    "is_latest": bool(item.get("IsLatest")),
+                    "uploaded_at": uploaded.isoformat() if uploaded else None,
+                    "size": int(item.get("Size", 0)),
+                })
+        versions = sorted(
+            versions,
+            key=lambda item: (item["uploaded_at"] or "", item["version_id"]),
+            reverse=True,
+        )[:MAX_LISTED_VERSIONS]
+        for version in versions:
+            metadata = s3_client.head_object(
+                Bucket=bucket, Key=key, VersionId=version["version_id"]
+            ).get("Metadata", {})
+            version["description"] = unquote(metadata.get("description", ""))
     except (BotoCoreError, ClientError) as error:
         raise SkillBundleError("Unable to list skill versions from S3", 502) from error
-    return {"skill_name": bucket_name, "destination_uri": uri, "versions": sorted(versions, key=lambda item: (item["uploaded_at"] or "", item["filename"]), reverse=True)}
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": uri,
+        "versions": versions,
+    }
 
 
 def publish_version(
@@ -336,28 +363,51 @@ def publish_version(
     user_id: str,
     filename: str,
     content: bytes,
+    description: str = "",
     *,
     destination_bucket: str,
     destination_prefix: str,
 ) -> dict:
     validate_version_zip(table_bucket_arn, filename, content)
+    description, encoded_description = _normalise_description(description)
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(
+    bucket, prefix, _ = _destination(
         bucket_name,
         destination_bucket=destination_bucket,
         destination_prefix=destination_prefix,
     )
+    key = f"{prefix}/{bucket_name}.zip"
+    uri = f"s3://{bucket}/{key}"
     uploaded = datetime.now(timezone.utc)
-    snapshot = f"{uploaded.strftime('%Y%m%dT%H%M%S')}{uploaded.microsecond // 1000:03d}Z-{uuid.uuid4().hex[:8]}.zip"
     try:
-        s3_client.put_object(
-            Bucket=bucket, Key=f"{prefix}/{snapshot}", Body=content,
-            ContentType="application/zip", ServerSideEncryption=S3_SSE, IfNoneMatch="*",
-            Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256], "original-filename": quote(filename, safe="._-")[:256]},
+        ensure_bucket_versioning(s3_client, bucket)
+        result = s3_client.put_object(
+            Bucket=bucket, Key=key, Body=content,
+            ContentType="application/zip", ServerSideEncryption=S3_SSE,
+            Metadata={
+                "s3-table-bucket": bucket_name,
+                "uploaded-by": quote(user_id, safe="@._-")[:256],
+                "original-filename": quote(filename, safe="._-")[:256],
+                "description": encoded_description,
+            },
         )
     except (BotoCoreError, ClientError) as error:
         raise SkillBundleError("Unable to upload the skill version to S3", 502) from error
-    return {"skill_name": bucket_name, "destination_uri": uri, "filename": snapshot, "uploaded_at": uploaded.isoformat(), "size": len(content)}
+    version_id = result.get("VersionId")
+    if not version_id:
+        raise SkillBundleError(
+            "S3 did not return a version ID for the uploaded skill; verify bucket versioning is enabled",
+            502,
+        )
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": uri,
+        "filename": f"{bucket_name}.zip",
+        "version_id": version_id,
+        "uploaded_at": uploaded.isoformat(),
+        "size": len(content),
+        "description": description,
+    }
 
 
 def skill_file_location(
