@@ -14,7 +14,8 @@ coupling low and makes ``app.dependency_overrides`` clean for tests.
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
-from typing import Any, AsyncIterator, TypedDict
+from collections.abc import AsyncGenerator
+from typing import Any, TypedDict
 
 import boto3
 from fastapi import FastAPI
@@ -98,7 +99,7 @@ def make_lifespan(
     """
 
     @asynccontextmanager
-    async def lifespan(_app: FastAPI) -> AsyncIterator[AppState]:
+    async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
         configure_logging()
         logger = create_structured_logger("s3tables_uploader.lifespan")
         state = build_state(settings, clients=clients, bearer_auth=bearer_auth)

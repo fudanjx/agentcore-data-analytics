@@ -27,6 +27,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 USER 65532
 
+ENV HOME=/usr/home
 EXPOSE 8090
 
 # Distroless images have no shell; keep the command in exec form.

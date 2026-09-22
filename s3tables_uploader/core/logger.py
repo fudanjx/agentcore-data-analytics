@@ -84,6 +84,11 @@ def configure_logging() -> None:
         )
     )
     root.addHandler(handler)
+    # Third-party stdlib loggers inherit the root level (DEBUG); pin the
+    # noisy ones to WARNING so boto3/urllib3 traffic does not drown out
+    # application events.
+    for noisy in ("boto3", "botocore", "urllib3", "s3transfer", "asyncio"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
     root._pilot_configured = True  # type: ignore[attr-defined]
 
 
