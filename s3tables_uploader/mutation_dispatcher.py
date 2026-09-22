@@ -17,7 +17,7 @@ from typing import Any, Literal
 import boto3
 from botocore.exceptions import ClientError
 
-from .config import ConfigurationError, Environment, WorkerSettings, _optional, _required
+from .config import ConfigurationError, Environment, _optional, _required
 from .core.constants import HISTORY_BUCKET, HISTORY_PREFIX
 from .job_store import MissingRecord, S3JobStore
 from .models import Destination, JobRequest, JobStatus, MutationCommand
@@ -52,7 +52,6 @@ class MutationDispatcherSettings:
     @classmethod
     def from_environ(cls, environ: dict[str, str] | None = None) -> "MutationDispatcherSettings":
         env = dict(os.environ if environ is None else environ)
-        worker = WorkerSettings.from_environ(env)
 
         # History destination follows the same rule as the API-side Settings:
         # STG/PRD must set both explicitly so a staging deploy never writes
@@ -83,11 +82,11 @@ class MutationDispatcherSettings:
             history_prefix = history_prefix or HISTORY_PREFIX
 
         return cls(
-            region=worker.region,
-            landing_bucket=worker.landing_bucket,
-            landing_prefix=worker.landing_prefix,
+            region=_required("AWS_REGION", env),
+            landing_bucket=_required("S3_UPLOADER_LANDING_BUCKET", env),
+            landing_prefix=_required("S3_UPLOADER_LANDING_PREFIX", env).strip("/"),
             queue_url=_required("S3_UPLOADER_MUTATION_QUEUE_URL", env),
-            glue_job_name=worker.glue_job_name,
+            glue_job_name=_required("S3_UPLOADER_GLUE_JOB_NAME", env),
             max_concurrent_glue=int(env.get("S3_UPLOADER_MAX_CONCURRENT_GLUE", "5")),
             max_tracked_messages=int(env.get("S3_UPLOADER_MAX_TRACKED_MUTATIONS", "50")),
             visibility_seconds=int(env.get("S3_UPLOADER_MUTATION_VISIBILITY_SECONDS", "120")),
