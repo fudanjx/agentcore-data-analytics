@@ -14,11 +14,13 @@ that include colons and slashes).
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, HTTPException, Query
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -126,7 +128,7 @@ def create_namespace(
 # ---------------------------------------------------------------------------
 
 @router.get("/tables")
-def list_tables(
+async def list_tables(
     table_bucket_arn: Annotated[str, Query()],
     namespace: Annotated[str, Query()],
     user: UserDep,
@@ -134,28 +136,36 @@ def list_tables(
     contracts: ContractServiceDep,
     s3: S3Dep,
 ) -> dict[str, object]:
-    require_table_bucket_access(table_bucket_arn, user, tables)
-    rows: list[dict[str, object]] = []
-    for entry in tables.list_tables(table_bucket_arn, namespace):
-        name = entry["name"]
-        if name == UPLOAD_HISTORY_TABLE:
-            continue
+    await run_in_threadpool(require_table_bucket_access, table_bucket_arn, user, tables)
+    entries = await run_in_threadpool(tables.list_tables, table_bucket_arn, namespace)
+
+    def build_row(entry: dict[str, object]) -> dict[str, object]:
+        name = str(entry["name"])
         details = tables.get_table(table_bucket_arn, namespace, name)
         uploader_managed = contracts.is_uploader_managed(table_bucket_arn, namespace, name)
         contract = (
             contracts.load(table_bucket_arn, namespace, name) if uploader_managed else {}
         )
-        raw = entry.get("raw", {})
-        rows.append(
-            {
-                "name": name,
-                "created_at": str(raw.get("createdAt")),
-                "modified_at": str(raw.get("modifiedAt")),
-                "row_count": iceberg_row_count(s3, details.get("metadataLocation")),
-                "uploader_managed": uploader_managed,
-                "deduplication_columns": contract.get("deduplication_columns", []),
-            }
+        raw = entry.get("raw", {}) or {}
+        return {
+            "name": name,
+            "created_at": str(raw.get("createdAt")),
+            "modified_at": str(raw.get("modifiedAt")),
+            "row_count": iceberg_row_count(s3, details.get("metadataLocation")),
+            "uploader_managed": uploader_managed,
+            "deduplication_columns": contract.get("deduplication_columns", []),
+        }
+
+    # Fan out per-table AWS calls concurrently through the shared anyio
+    # threadpool so N tables cost ~one round-trip's worth of latency instead
+    # of N sequential trips.
+    rows = await asyncio.gather(
+        *(
+            run_in_threadpool(build_row, entry)
+            for entry in entries
+            if entry["name"] != UPLOAD_HISTORY_TABLE
         )
+    )
     return {
         "table_bucket": table_bucket_arn,
         "namespace": namespace,
