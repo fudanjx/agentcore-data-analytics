@@ -14,6 +14,7 @@ from urllib.parse import quote
 
 from botocore.exceptions import ClientError
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -87,7 +88,14 @@ async def upload_files(
             (path, await upload.read(skill_bundle.MAX_FILE_BYTES + 1))
             for path, upload in zip(paths, files, strict=True)
         ]
-        return skill_bundle.publish_files(s3, table_bucket_arn, user.user_id, payload, **dest)
+        return await run_in_threadpool(
+            skill_bundle.publish_files,
+            s3,
+            table_bucket_arn,
+            user.user_id,
+            payload,
+            **dest,
+        )
     finally:
         for upload in files:
             await upload.close()
@@ -172,8 +180,14 @@ async def upload_version(
     require_table_bucket_access(table_bucket_arn, user, tables)
     try:
         content = await file.read(skill_bundle.MAX_ZIP_BYTES + 1)
-        return skill_bundle.publish_version(
-            s3, table_bucket_arn, user.user_id, file.filename or "", content, **dest
+        return await run_in_threadpool(
+            skill_bundle.publish_version,
+            s3,
+            table_bucket_arn,
+            user.user_id,
+            file.filename or "",
+            content,
+            **dest,
         )
     finally:
         await file.close()

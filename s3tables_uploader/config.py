@@ -99,6 +99,7 @@ class Settings:
     skill_bundle_bucket: str = ""
     skill_bundle_prefix: str = ""
     api_base_url: str = ""
+    async_thread_limit: int = 100
 
     # ------------------------------------------------------------------
     # Computed properties — the ONLY way consumers should branch on env.
@@ -149,6 +150,11 @@ class Settings:
         if not 1 <= raw_retention_days <= 30:
             raise ConfigurationError(
                 "S3_UPLOADER_RAW_RETENTION_DAYS must be 1 through 30"
+            )
+        async_thread_limit = _integer("S3_UPLOADER_ASYNC_THREAD_LIMIT", env, 100)
+        if not 1 <= async_thread_limit <= 1000:
+            raise ConfigurationError(
+                "S3_UPLOADER_ASYNC_THREAD_LIMIT must be 1 through 1000"
             )
         serve_local_frontend = _boolean(
             "S3_UPLOADER_SERVE_LOCAL_FRONTEND", env, True
@@ -224,6 +230,7 @@ class Settings:
             history_prefix=history_prefix.strip("/"),
             skill_bundle_bucket=skill_bundle_bucket,
             skill_bundle_prefix=skill_bundle_prefix.strip("/"),
+            async_thread_limit=async_thread_limit,
         )
 
 

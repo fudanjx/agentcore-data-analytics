@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, Request
+from fastapi.concurrency import run_in_threadpool
 
 from ...core.constants import S3_SSE, SUPPORTED_COMPAT_SUFFIXES, UPLOAD_PART_BYTES
 from ...core.exceptions import UploaderError
@@ -84,7 +85,7 @@ async def create_compat_session(
         for number, upload in enumerate(uploads):
             name = _safe_upload_name(upload.filename or "")
             key = f"{settings.landing_prefix}/uploads/{session_id}/raw/{number:02d}-{name}"
-            multipart = await asyncio.to_thread(
+            multipart = await run_in_threadpool(
                 s3.create_multipart_upload,
                 Bucket=settings.landing_bucket,
                 Key=key,
@@ -97,10 +98,10 @@ async def create_compat_session(
             size = 0
             part_number = 1
             try:
-                while chunk := await asyncio.to_thread(upload.file.read, UPLOAD_PART_BYTES):
+                while chunk := await run_in_threadpool(upload.file.read, UPLOAD_PART_BYTES):
                     digest.update(chunk)
                     size += len(chunk)
-                    part = await asyncio.to_thread(
+                    part = await run_in_threadpool(
                         s3.upload_part,
                         Bucket=settings.landing_bucket,
                         Key=key,
@@ -112,7 +113,7 @@ async def create_compat_session(
                     part_number += 1
                 if not parts:
                     raise HTTPException(400, f"{name} is empty")
-                completed = await asyncio.to_thread(
+                completed = await run_in_threadpool(
                     s3.complete_multipart_upload,
                     Bucket=settings.landing_bucket,
                     Key=key,
@@ -120,7 +121,7 @@ async def create_compat_session(
                     MultipartUpload={"Parts": parts},
                 )
             except (Exception, asyncio.CancelledError):
-                await asyncio.to_thread(
+                await run_in_threadpool(
                     s3.abort_multipart_upload,
                     Bucket=settings.landing_bucket,
                     Key=key,
@@ -209,7 +210,7 @@ async def create_compat_session(
                 except Exception:
                     pass
             try:
-                await asyncio.to_thread(delete_raw_source_versions, store, {"files": files})
+                await run_in_threadpool(delete_raw_source_versions, store, {"files": files})
             except Exception:
                 pass
         if isinstance(error, HTTPException):

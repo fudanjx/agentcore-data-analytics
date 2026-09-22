@@ -17,7 +17,9 @@ from contextlib import asynccontextmanager
 from collections.abc import AsyncGenerator
 from typing import Any, TypedDict
 
+import anyio.to_thread
 import boto3
+from botocore.config import Config
 from fastapi import FastAPI
 
 from ..config import Settings
@@ -40,13 +42,33 @@ class AppState(TypedDict):
     bearer_auth: BearerAuthService
 
 
+# Connection pool caps are sized as ratios of ``async_thread_limit`` so the S3
+# client (hot path for every upload endpoint) can saturate the threadpool while
+# low-traffic clients don't pin unnecessary sockets. The floor of 10 matches
+# botocore's own default — never regress below that even if the thread limit is
+# set very low. See the merge plan for rationale and per-client justification.
+_POOL_RATIOS: dict[str, float] = {
+    "s3": 1.0,
+    "s3tables": 0.25,
+    "sqs": 0.15,
+    "glue": 0.10,
+    "secrets_manager": 0.10,
+}
+_POOL_FLOOR = 10
+
+
+def _pool_config(settings: Settings, ratio: float) -> Config:
+    return Config(max_pool_connections=max(_POOL_FLOOR, int(settings.async_thread_limit * ratio)))
+
+
 def _boto_clients(settings: Settings) -> dict[str, Any]:
     return {
-        "s3": boto3.client("s3", region_name=settings.region),
-        "sqs": boto3.client("sqs", region_name=settings.region),
-        "glue": boto3.client("glue", region_name=settings.region),
-        "s3tables": boto3.client("s3tables", region_name=settings.region),
-        "secrets_manager": boto3.client("secretsmanager", region_name=settings.region),
+        name: boto3.client(
+            "secretsmanager" if name == "secrets_manager" else name,
+            region_name=settings.region,
+            config=_pool_config(settings, ratio),
+        )
+        for name, ratio in _POOL_RATIOS.items()
     }
 
 
@@ -102,6 +124,10 @@ def make_lifespan(
     async def lifespan(_app: FastAPI) -> AsyncGenerator[AppState]:
         configure_logging()
         logger = create_structured_logger("s3tables_uploader.lifespan")
+        # Raise anyio's shared threadpool cap so sync FastAPI handlers AND the
+        # ``run_in_threadpool`` calls in async upload endpoints all share one
+        # tunable limit. Applied once per worker process during startup.
+        anyio.to_thread.current_default_thread_limiter().total_tokens = settings.async_thread_limit
         state = build_state(settings, clients=clients, bearer_auth=bearer_auth)
         state["bearer_auth"].warm()
         logger.info("bearer_auth_warmed", environment=settings.environment.value)
@@ -109,6 +135,7 @@ def make_lifespan(
             "lifespan_started",
             environment=settings.environment.value,
             frontend=settings.frontend_surface_enabled,
+            async_thread_limit=settings.async_thread_limit,
         )
         try:
             yield state

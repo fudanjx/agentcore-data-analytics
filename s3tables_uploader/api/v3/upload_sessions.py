@@ -8,7 +8,6 @@ dispatches to the appropriate typed handler based on the request's
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -23,6 +22,7 @@ from fastapi import (
     Request,
     Response,
 )
+from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -145,7 +145,8 @@ async def create_session(
     metadata = {"session-id": session_id, "owner-user-id": user.user_id}
     if payload.source_sha256:
         metadata["sha256"] = payload.source_sha256
-    response = s3.create_multipart_upload(
+    response = await run_in_threadpool(
+        s3.create_multipart_upload,
         Bucket=settings.landing_bucket,
         Key=key,
         ContentType=payload.content_type,
@@ -161,7 +162,7 @@ async def create_session(
         multipart_upload_id=response["UploadId"],
         expected_sha256=payload.source_sha256,
     )
-    store.put_session(session)
+    await run_in_threadpool(store.put_session, session)
     return {
         "session_id": session_id,
         "upload_id": session.multipart_upload_id,
