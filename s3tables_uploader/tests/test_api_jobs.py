@@ -85,7 +85,7 @@ class FakeS3Tables:
     def list_table_buckets(self, **kwargs): return {"tableBuckets": self.buckets}
     def list_tags_for_resource(self, resourceArn):
         # Fake every known bucket as belonging to this app.
-        return {"tags": [{"key": "APP", "value": "Data-Insights"}]}
+        return {"tags": {"APP": "Data-Insights"}}
     def tag_resource(self, resourceArn, tags):
         return {}
     def create_table_bucket(self, name):

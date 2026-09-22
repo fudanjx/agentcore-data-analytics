@@ -38,8 +38,7 @@ class _FakeS3Tables:
 
     def list_tags_for_resource(self, resourceArn: str) -> dict[str, Any]:  # noqa: N803
         self.list_tag_calls.append(resourceArn)
-        entries = self._tags.get(resourceArn, {})
-        return {"tags": [{"key": k, "value": v} for k, v in entries.items()]}
+        return {"tags": dict(self._tags.get(resourceArn, {}))}
 
     def create_table_bucket(self, name: str) -> dict[str, str]:
         arn = f"arn:aws:s3tables:ap-southeast-1:0:bucket/{name}"

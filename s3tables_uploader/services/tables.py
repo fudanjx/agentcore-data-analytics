@@ -117,7 +117,7 @@ class TableBucketService:
             response = self._s3tables.list_tags_for_resource(resourceArn=arn)
         except ClientError:
             return False
-        tags = {tag["key"]: tag["value"] for tag in response.get("tags", [])}
+        tags = {tag_key: tag_value for tag_key, tag_value in response.get("tags", {}).items()}
         return tags.get(APP_TAG_FILTER_KEY) == APP_TAG_FILTER_VALUE
 
     def purge_cache(self) -> int:
