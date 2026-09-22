@@ -9,11 +9,11 @@ Settings-driven destination through as ``**dest`` on every call.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Annotated, Any, Iterator
 from urllib.parse import quote
 
 from botocore.exceptions import ClientError
-from fastapi import APIRouter, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
@@ -58,7 +58,7 @@ def _not_found_or_gateway(error: ClientError) -> HTTPException:
 
 @router.get("/files")
 def list_files(
-    table_bucket_arn: str,
+    table_bucket_arn: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
@@ -74,9 +74,9 @@ async def upload_files(
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
     s3: S3Dep,
-    table_bucket_arn: str = Form(),
-    paths_json: str = Form(),
-    files: list[UploadFile] = File(),
+    table_bucket_arn: Annotated[str, Form()],
+    paths_json: Annotated[str, Form()],
+    files: Annotated[list[UploadFile], File()],
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
     paths = skill_bundle.parse_paths_json(paths_json)
@@ -95,8 +95,8 @@ async def upload_files(
 
 @router.get("/files/download")
 def download_file(
-    table_bucket_arn: str,
-    path: str,
+    table_bucket_arn: Annotated[str, Query()],
+    path: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
@@ -150,7 +150,7 @@ def delete_file(
 
 @router.get("/versions")
 def list_versions(
-    table_bucket_arn: str,
+    table_bucket_arn: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
@@ -166,8 +166,8 @@ async def upload_version(
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,
     s3: S3Dep,
-    table_bucket_arn: str = Form(),
-    file: UploadFile = File(),
+    table_bucket_arn: Annotated[str, Form()],
+    file: Annotated[UploadFile, File()],
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
     try:
@@ -181,8 +181,8 @@ async def upload_version(
 
 @router.get("/versions/download")
 def download_version(
-    table_bucket_arn: str,
-    filename: str,
+    table_bucket_arn: Annotated[str, Query()],
+    filename: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     dest: SkillDestinationDep,

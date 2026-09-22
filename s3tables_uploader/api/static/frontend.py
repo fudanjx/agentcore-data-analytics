@@ -8,9 +8,16 @@ receives a 404 rather than a login form.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Annotated, Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Path as PathParam,
+    Request,
+    Response,
+)
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
@@ -33,7 +40,9 @@ def landing() -> FileResponse:
 
 
 @router.get("/static/{asset}")
-def static_asset(asset: Literal["app.js", "style.css"]) -> FileResponse:
+def static_asset(
+    asset: Annotated[Literal["app.js", "style.css"], PathParam()],
+) -> FileResponse:
     return FileResponse(_STATIC_ROOT / asset, headers={"Cache-Control": "no-store"})
 
 
@@ -49,8 +58,12 @@ def login_form() -> HTMLResponse:
 
 
 @router.post("/login")
-async def login(request: Request, settings: SettingsDep) -> Response:
-    is_json = request.headers.get("content-type", "").startswith("application/json")
+async def login(
+    request: Request,
+    settings: SettingsDep,
+    content_type: Annotated[str, Header()] = "",
+) -> Response:
+    is_json = content_type.startswith("application/json")
     if is_json:
         payload = LoginRequest.model_validate(await request.json())
     else:
@@ -81,10 +94,10 @@ async def login(request: Request, settings: SettingsDep) -> Response:
 
 
 @router.post("/logout")
-def logout(request: Request) -> Response:
+def logout(accept: Annotated[str, Header()] = "") -> Response:
     response = (
         JSONResponse({"authenticated": False})
-        if request.headers.get("accept", "").startswith("application/json")
+        if accept.startswith("application/json")
         else RedirectResponse(url="/login", status_code=303)
     )
     response.delete_cookie(COOKIE_NAME, path="/")

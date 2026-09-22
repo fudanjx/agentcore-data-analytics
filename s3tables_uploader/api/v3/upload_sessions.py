@@ -13,9 +13,16 @@ import hashlib
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi import (
+    APIRouter,
+    Header,
+    HTTPException,
+    Path as PathParam,
+    Request,
+    Response,
+)
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -116,10 +123,16 @@ async def create_session(
     s3: S3Dep,
     tables: TableBucketServiceDep,
     leases: LeaseServiceDep,
+    content_type: Annotated[str, Header()] = "",
 ) -> dict[str, object]:
-    """Accept direct-S3 JSON requests and immutable multipart form uploads."""
-    content_type = request.headers.get("content-type", "").lower()
-    if content_type.startswith("multipart/form-data"):
+    """Accept direct-S3 JSON requests and immutable multipart form uploads.
+
+    The body itself is parsed downstream (either ``await request.json()`` for
+    the direct-S3 protocol or ``await request.form()`` for the multipart
+    compat branch) because a single route cannot type both content types via
+    ``Annotated[...]``.
+    """
+    if content_type.lower().startswith("multipart/form-data"):
         return await _create_compat_session(request, user, settings, store, s3, tables, leases)
     try:
         payload = CreateSessionRequest.model_validate(await request.json())
@@ -162,7 +175,7 @@ async def create_session(
 
 @router.get("/{session_id}")
 def get_session(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     user: UserDep,
     store: StoreDep,
     settings: SettingsDep,
@@ -210,7 +223,7 @@ def get_session(
 
 @router.delete("/{session_id}", status_code=204)
 def delete_session(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     user: UserDep,
     store: StoreDep,
 ) -> Response:
@@ -225,7 +238,7 @@ def delete_session(
 
 @router.post("/{session_id}/parts")
 def create_part_url(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     payload: PartUrlRequest,
     user: UserDep,
     store: StoreDep,
@@ -253,7 +266,7 @@ def create_part_url(
 
 @router.post("/{session_id}/complete", status_code=202)
 def complete_session(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     payload: CompleteSessionRequest,
     user: UserDep,
     store: StoreDep,
@@ -320,7 +333,7 @@ def complete_session(
 
 @router.post("/{session_id}/key-impact", status_code=202)
 def key_impact(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     payload: SessionKeyImpactRequest,
     user: UserDep,
     store: StoreDep,
@@ -361,7 +374,7 @@ def key_impact(
 
 @router.post("/{session_id}/ingestions", status_code=202)
 def start_ingestion(
-    session_id: str,
+    session_id: Annotated[str, PathParam()],
     payload: SessionIngestionRequest,
     user: UserDep,
     store: StoreDep,

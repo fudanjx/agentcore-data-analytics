@@ -5,8 +5,9 @@ from __future__ import annotations
 import hashlib
 import uuid
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path as PathParam
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -39,7 +40,7 @@ class RollbackRequest(BaseModel):
 
 @router.get("/{mutation_id}")
 def mutation_status(
-    mutation_id: str,
+    mutation_id: Annotated[str, PathParam()],
     user: UserDep,
     store: StoreDep,
 ) -> dict[str, object]:

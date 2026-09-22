@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Path as PathParam
 
 from ...app.dependencies import (
     GlueDep,
@@ -22,7 +23,7 @@ router = APIRouter(prefix=get_api_prefix(Path(__file__), "api"))
 
 @router.get("/{job_id}")
 def get_job(
-    job_id: str,
+    job_id: Annotated[str, PathParam()],
     user: UserDep,
     store: StoreDep,
 ) -> dict[str, object]:
@@ -44,7 +45,7 @@ ingestions_router = APIRouter(prefix="/api/v3/ingestions")
 
 @ingestions_router.get("/{job_run_id}")
 def ingestion_status(
-    job_run_id: str,
+    job_run_id: Annotated[str, PathParam()],
     _user: UserDep,
     glue: GlueDep,
     settings: SettingsDep,

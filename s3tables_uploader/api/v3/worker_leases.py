@@ -5,9 +5,9 @@ from __future__ import annotations
 import uuid
 from datetime import timedelta
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, HTTPException, Path as PathParam, Response
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -79,7 +79,7 @@ def create_lease(
 
 @router.put("/{lease_id}")
 def replace_idle_lease(
-    lease_id: str,
+    lease_id: Annotated[str, PathParam()],
     payload: CreateWorkerLeaseRequest,
     user: UserDep,
     leases: LeaseServiceDep,
@@ -144,7 +144,7 @@ def replace_idle_lease(
 
 @router.delete("/{lease_id}", status_code=204)
 def cancel_lease(
-    lease_id: str,
+    lease_id: Annotated[str, PathParam()],
     user: UserDep,
     store: StoreDep,
 ) -> Response:
@@ -213,7 +213,7 @@ def cancel_lease(
 
 @router.post("/{lease_id}/retry-large", status_code=202)
 def retry_large(
-    lease_id: str,
+    lease_id: Annotated[str, PathParam()],
     user: UserDep,
     leases: LeaseServiceDep,
     store: StoreDep,

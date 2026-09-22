@@ -21,7 +21,7 @@ from __future__ import annotations
 import re
 from typing import Annotated, Any
 
-from fastapi import Depends, Request
+from fastapi import Depends, Header, Request
 
 from ..config import Settings
 from ..core.constants import (
@@ -177,6 +177,7 @@ def require_auth(
     request: Request,
     settings: SettingsDep,
     bearer: BearerAuthDep,
+    authorization: Annotated[str | None, Header()] = None,
 ) -> None:
     """Router-level guard accepted by every core router.
 
@@ -192,9 +193,8 @@ def require_auth(
     The chosen path is stamped on ``request.state.auth_method`` so
     :func:`resolve_user` can pick the matching identity resolver.
     """
-    auth_header = request.headers.get("Authorization")
-    if auth_header:
-        bearer.verify(auth_header)
+    if authorization:
+        bearer.verify(authorization)
         request.state.auth_method = "bearer"
         return
     if not settings.frontend_surface_enabled:
@@ -209,10 +209,11 @@ def require_auth(
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
-def resolve_frontend_user(
-    request: Request, profiles: ProfileServiceDep
+def _resolve_frontend_user(
+    user_id: str | None,
+    profiles: LocalIdentityProfileService | None,
 ) -> UserContext:
-    """Cookie modes: read ``X-Pilot-User-Id`` and resolve against profiles.
+    """Cookie modes: resolve the profile switcher's identity.
 
     Missing header defaults to ``local-admin`` — the profile switcher may
     not be set on the browser's first request, and forcing a 401 there
@@ -223,13 +224,11 @@ def resolve_frontend_user(
         raise IdentityHeaderInvalid(
             "Frontend identity resolver called in hardened mode"
         )
-    user_id = request.headers.get(FRONTEND_IDENTITY_HEADER, "local-admin")
-    return profiles.resolve(user_id)
+    return profiles.resolve(user_id or "local-admin")
 
 
-def resolve_hardened_user(request: Request) -> UserContext:
-    """Hardened modes: read ``User-ID`` (email); no profile lookup, full permissions."""
-    user_id = request.headers.get(HARDENED_IDENTITY_HEADER)
+def _resolve_hardened_user(user_id: str | None) -> UserContext:
+    """Hardened modes: validate ``User-ID`` (email); no profile lookup, full permissions."""
     if not user_id:
         raise IdentityHeaderRequired(
             f"Header {HARDENED_IDENTITY_HEADER} is required"
@@ -250,6 +249,12 @@ def resolve_hardened_user(request: Request) -> UserContext:
 def resolve_user(
     request: Request,
     profiles: ProfileServiceDep,
+    x_pilot_user_id: Annotated[
+        str | None, Header(alias=FRONTEND_IDENTITY_HEADER)
+    ] = None,
+    hardened_user_id: Annotated[
+        str | None, Header(alias=HARDENED_IDENTITY_HEADER)
+    ] = None,
 ) -> UserContext:
     """Dispatcher: pick the resolver based on how ``require_auth`` authenticated.
 
@@ -260,8 +265,8 @@ def resolve_user(
     """
     method = getattr(request.state, "auth_method", None)
     if method == "cookie":
-        return resolve_frontend_user(request, profiles)
-    return resolve_hardened_user(request)
+        return _resolve_frontend_user(x_pilot_user_id, profiles)
+    return _resolve_hardened_user(hardened_user_id)
 
 
 UserDep = Annotated[UserContext, Depends(resolve_user)]

@@ -16,8 +16,9 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ...app.dependencies import (
@@ -98,7 +99,7 @@ def purge_bucket_tag_cache(
 
 @router.get("/namespaces")
 def list_namespaces(
-    table_bucket_arn: str,
+    table_bucket_arn: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
 ) -> dict[str, object]:
@@ -126,8 +127,8 @@ def create_namespace(
 
 @router.get("/tables")
 def list_tables(
-    table_bucket_arn: str,
-    namespace: str,
+    table_bucket_arn: Annotated[str, Query()],
+    namespace: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     contracts: ContractServiceDep,

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from ...app.dependencies import (
     AuditReaderDep,
@@ -22,9 +23,9 @@ router = APIRouter(prefix=get_api_prefix(Path(__file__), "api"))
 
 @router.get("")
 def upload_history(
-    table_bucket_arn: str,
-    namespace: str,
-    table: str,
+    table_bucket_arn: Annotated[str, Query()],
+    namespace: Annotated[str, Query()],
+    table: Annotated[str, Query()],
     user: UserDep,
     tables: TableBucketServiceDep,
     contracts: ContractServiceDep,
