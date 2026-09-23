@@ -104,8 +104,8 @@ class BearerAuthService:
                 and (now - self._last_forced_refresh) < self._refresh_min_interval
             ):
                 return None
-            self._refresh_locked()
             self._last_forced_refresh = now
+            self._refresh_locked()
             assert self._cached is not None
             return self._cached.value
 
