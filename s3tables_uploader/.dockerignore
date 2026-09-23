@@ -3,3 +3,4 @@ __pycache__/
 .env
 .env/
 scripts/migrate_legacy_audit.py
+docs/
