@@ -17,6 +17,7 @@ COPY dify-server.py .
 COPY model_usage.py .
 COPY dependencies.py .
 COPY lifespan.py .
+COPY memory_proxy.py .
 COPY permissions.py .
 
 RUN adduser --disabled-password --gecos "" appuser

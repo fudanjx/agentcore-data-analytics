@@ -43,6 +43,12 @@ spec:
               value: "postgresql://postgres:ahdsa@k8s-dify-difypost-c3b810c02f-4f45659eb43387cd.elb.ap-southeast-1.amazonaws.com:5432/nuhs?sslmode=disable&connect_timeout=5"
             - name: MODEL_PRICING_CACHE_TTL_SECONDS
               value: "3600"
+            - name: DIFY_MEMORY_PROXY_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: agentcore-dify-proxy
+                  key: memory-api-key
+                  optional: true
           resources:
             requests:
               cpu: 256m

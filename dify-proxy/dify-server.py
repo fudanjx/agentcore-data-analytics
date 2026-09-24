@@ -4,6 +4,8 @@ Only the OpenAI-compatible endpoints used by Dify are exposed:
 
     GET  /{slug}/v1/models
     POST /{slug}/v1/chat/completions
+    POST /memory/write
+    POST /memory/retrieve
 
 Dify may send ``user`` and a message containing a
 ``<C_ID>{conversation UUID}<C_ID>`` marker to preserve actor and conversation
@@ -42,6 +44,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 import model_usage
 from dependencies import DifyConnDep, NuhsConnDep
 from lifespan import lifespan
+from memory_proxy import router as memory_router
 from permissions import get_gateway_permissions_by_user_id
 
 logging.basicConfig(level=logging.INFO)
@@ -163,6 +166,7 @@ _RUNTIME_INTERRUPTED_TEXT = (
 )
 
 app = FastAPI(title="AgentCore Dify Proxy", version="1.2.0", lifespan=lifespan)
+app.include_router(memory_router)
 
 _agentcore_control_client = None
 _s3_client = None

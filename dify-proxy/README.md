@@ -1,5 +1,75 @@
 # AgentCore Dify Proxy
 
+## AgentCore Memory proxy
+
+The proxy exposes two authenticated endpoints for Dify workflows that cannot
+sign AgentCore requests with AWS SigV4 themselves:
+
+- `POST /memory/write` stores one user/assistant exchange.
+- `POST /memory/retrieve` performs semantic retrieval.
+
+The caller supplies `memory_id` for both operations and `strategy_id` for
+retrieval. This allows one proxy deployment to serve multiple configured
+memories without storing their identifiers in the Deployment environment.
+AWS authentication uses the IAM role attached to the `agentcore-proxy` service
+account.
+
+Set a dedicated bearer credential in a Kubernetes Secret:
+
+```bash
+kubectl -n agentcore create secret generic agentcore-dify-proxy \
+  --from-literal=memory-api-key='REPLACE_WITH_A_LONG_RANDOM_VALUE'
+```
+
+The Deployment reads that value as `DIFY_MEMORY_PROXY_API_KEY`. If it is absent,
+both memory routes return HTTP 503. Send it from the Dify HTTP Request node as
+`Authorization: Bearer <value>`.
+
+Write request:
+
+```json
+{
+  "memory_id": "memory_dify-kpdzNRHDzW",
+  "actor_id": "stable-dify-user-id",
+  "session_id": "stable-conversation-id",
+  "user_text": "What the user said",
+  "assistant_text": "What the assistant answered"
+}
+```
+
+Retrieve request:
+
+```json
+{
+  "memory_id": "memory_dify-kpdzNRHDzW",
+  "strategy_id": "semantic_builtin_peexk-ogfGK55koq",
+  "actor_id": "stable-dify-user-id",
+  "query": "Current user question",
+  "top_k": 5
+}
+```
+
+Grant the proxy service-account role only the memories it is allowed to serve:
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": [
+        "bedrock-agentcore:CreateEvent",
+        "bedrock-agentcore:RetrieveMemoryRecords"
+      ],
+      "Resource": "arn:aws:bedrock-agentcore:ap-southeast-1:ACCOUNT_ID:memory/MEMORY_ID"
+    }
+  ]
+}
+```
+
+New events are accepted immediately, but semantic memory extraction is
+asynchronous, so retrieval may not return a just-written exchange immediately.
+
 ## Generated artifacts
 
 The proxy injects a request-scoped S3 output prefix and ownership tags into
