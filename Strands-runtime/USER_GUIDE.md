@@ -110,6 +110,10 @@ Environment variable values in the AgentCore console are strings. Do not copy ev
 | --- | --- |
 | `MODEL_ID` or `MODEL_ARN` | Exactly one must identify the Bedrock model or application inference profile. The Runtime rejects an invocation when both are empty or absent. |
 
+`MODEL_PROVIDER` itself is optional because it defaults to `bedrock`. Set it to
+`bedrock_runtime_openai` to select the OpenAI-compatible Responses API on the
+Bedrock Runtime endpoint.
+
 The selected Runtime role must also have `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` access to the configured model resources. These permissions are compulsory but are IAM settings, not environment variables.
 
 ### Recommended for each Runtime configuration
@@ -145,7 +149,9 @@ Most users should omit these variables and keep the packaged defaults. Change th
 | Variables | Why you might change them |
 | --- | --- |
 | `AWS_REGION` | Normally supplied by AgentCore; do not override it routinely |
-| `PROMPT_CACHE_TTL` | Select `1h` instead of the default `5m` only when the model supports it and longer reuse is useful |
+| `ENABLE_PROMPT_CACHE` | Disable provider-specific caching only for troubleshooting or a model that does not support it |
+| `PROMPT_CACHE_TTL` | Native `bedrock` accepts `5m` or `1h`; `bedrock_runtime_openai` uses `30m` |
+| `PROMPT_CACHE_KEY_PREFIX` | Change only when separate GPT cache accounting groups are required |
 | `ENABLE_MODEL_USAGE_LOGS` | Disable the default usage log only when operational policy requires it |
 | `MODEL_PRICING_LABEL` | Select the matching `nuhs.model_pricing` row used by Dify Proxy for cost calculation |
 | `BASE_SYSTEM_PROMPT_MAX_BYTES` | Raise or lower the prompt-object size limit |
@@ -164,12 +170,15 @@ The following reference tables document the exact defaults and accepted values.
 | --- | --- | --- |
 | `AWS_DEFAULT_REGION` | `ap-southeast-1` in fallback paths | Set to the Runtime/AgentCore resource Region |
 | `AWS_REGION` | Usually supplied by AWS | Normally leave Runtime-managed; it is used as the first S3 prompt-client Region fallback |
-| `MODEL_ID` | Empty | Required unless `MODEL_ARN` is set; use a Bedrock model ID or application inference profile ARN |
-| `MODEL_ARN` | Empty | Alternative to `MODEL_ID`; do not set both |
+| `MODEL_PROVIDER` | `bedrock` | Use `bedrock` for Converse or `bedrock_runtime_openai` for Bedrock Runtime Responses |
+| `MODEL_ID` | Empty | Required unless `MODEL_ARN` is set for `bedrock`; Responses requires a system/geographic/global profile ID such as `us.openai.gpt-5.6-luna` |
+| `MODEL_ARN` | Empty | Alternative for `bedrock` only; application inference profile ARNs are rejected by Responses |
 | `MODEL_REGION` | Parsed from an ARN, otherwise `AWS_DEFAULT_REGION` | Set explicitly when the model is in a different Region |
 | `AGENT_NAME` | `data-analyst` | Set the Strands agent's name, for example `gmio-pcr` |
 | `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Briefly describe the agent's role and available capabilities |
-| `PROMPT_CACHE_TTL` | `5m` | `5m` or `1h`; the model must support the selected TTL |
+| `ENABLE_PROMPT_CACHE` | `true` | Enables Converse cache points or Responses cache breakpoints, depending on the provider |
+| `PROMPT_CACHE_TTL` | Provider-specific: `5m` or `30m` | `5m`/`1h` for `bedrock`; `30m` for `bedrock_runtime_openai` |
+| `PROMPT_CACHE_KEY_PREFIX` | `strands-runtime` | Prefix for the stable Responses cache-accounting key |
 | `MODEL_CONNECT_TIMEOUT_SECONDS` | `10` | Bedrock model connection timeout in seconds, constrained to 1-60 |
 | `MODEL_READ_TIMEOUT_SECONDS` | `900` | Bedrock model response read timeout in seconds, constrained to 60-900 |
 | `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Bedrock model retry attempts, constrained to 0-5 |
@@ -282,6 +291,28 @@ AGENT_DESCRIPTION=GMIO PCR intake agent
 ```
 
 There is no need to create empty environment-variable entries. Omission disables each optional capability.
+
+### GPT-5.6 Luna with Bedrock Runtime Responses
+
+Use a system geographic or global inference profile ID. Do not use an
+application inference profile ARN and do not configure `OPENAI_PROJECT_ID`:
+
+```text
+AWS_DEFAULT_REGION=ap-southeast-1
+MODEL_PROVIDER=bedrock_runtime_openai
+MODEL_ID=us.openai.gpt-5.6-luna
+MODEL_REGION=us-east-1
+ENABLE_PROMPT_CACHE=true
+PROMPT_CACHE_TTL=30m
+PROMPT_CACHE_KEY_PREFIX=strands-runtime
+MODEL_PRICING_LABEL=openai-gpt-5.6-luna-standard-2026-08
+```
+
+The execution role needs `bedrock:CallWithBearerToken`,
+`bedrock:InvokeModel`, and `bedrock:InvokeModelWithResponseStream` for the
+selected system inference profile and its routed foundation models. Responses
+authorization also requires `bedrock:InvokeModel` on
+`arn:aws:bedrock:MODEL_REGION:ACCOUNT_ID:project/default`.
 
 ### Full-feature overrides
 

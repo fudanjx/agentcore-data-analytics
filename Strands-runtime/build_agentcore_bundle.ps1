@@ -28,6 +28,7 @@ $ErrorActionPreference = "Stop"
 
 $runtimeFiles = @(
     "agent.py",
+    "bedrock_runtime_openai.py",
     "code_interpreter.py",
     "code_interpreter_result.py",
     "gateway_config.py",

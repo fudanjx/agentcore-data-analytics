@@ -7,7 +7,8 @@ For a complete self-service deployment walkthrough, including every environment 
 ## Included capabilities
 
 - A new Strands `Agent` per invocation, preventing conversation state from leaking between users.
-- The reference Bedrock application inference profile, configurable through `MODEL_ID` or `MODEL_ARN`.
+- Provider-selectable model transport: native Bedrock Converse by default, or
+  the OpenAI-compatible Responses API on the Bedrock Runtime endpoint.
 - Optional AgentCore Gateway MCP connections through directly signed SigV4 HTTP transports.
 - Optional request-scoped managed AgentCore Code Interpreter tools for code and shell execution.
 - Native Strands `AgentCoreMemorySessionManager` integration for session restoration, semantic/preference/summary retrieval, and batched turn persistence.
@@ -72,11 +73,14 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `MODEL_ID` / `MODEL_ARN` | Empty | Required Bedrock model ID or application inference profile ARN used by Strands |
+| `MODEL_PROVIDER` | `bedrock` | `bedrock` uses native Converse; `bedrock_runtime_openai` uses the OpenAI-compatible Responses API on `bedrock-runtime` |
+| `MODEL_ID` / `MODEL_ARN` | Empty | Required model target. `bedrock` accepts a model ID or application inference profile ARN; `bedrock_runtime_openai` requires a system/geographic/global inference profile ID such as `us.openai.gpt-5.6-luna` and rejects ARNs |
 | `MODEL_REGION` | Region parsed from a model ARN, otherwise AWS default | Bedrock Runtime client region |
 | `AGENT_NAME` | `data-analyst` | Name passed to the Strands agent |
 | `AGENT_DESCRIPTION` | `Data analyst with connected databases and managed code execution` | Description passed to the Strands agent |
-| `PROMPT_CACHE_TTL` | `5m` | Prompt-cache TTL for system/message and tool cache points; accepted values are `5m` and `1h`, and the selected model must support the requested TTL |
+| `ENABLE_PROMPT_CACHE` | `true` | Enable provider-specific prompt caching |
+| `PROMPT_CACHE_TTL` | `5m` for `bedrock`; `30m` for `bedrock_runtime_openai` | Native Converse accepts `5m` or `1h`; GPT Responses caching accepts `30m` |
+| `PROMPT_CACHE_KEY_PREFIX` | `strands-runtime` | Stable prefix for the Responses API prompt-cache accounting key |
 | `MODEL_CONNECT_TIMEOUT_SECONDS` | `10` | Bedrock model connection timeout, constrained to 1-60 seconds |
 | `MODEL_READ_TIMEOUT_SECONDS` | `900` | Bedrock model response read timeout, constrained to 60-900 seconds |
 | `MODEL_RETRY_MAX_ATTEMPTS` | `2` | Maximum Bedrock model retry attempts, constrained to 0-5 |
@@ -109,6 +113,36 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
 `MODEL_ID` or `MODEL_ARN` must be configured. Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that optional capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
+
+### Model providers
+
+The default provider preserves the existing Bedrock Converse behavior:
+
+```text
+MODEL_PROVIDER=bedrock
+MODEL_ARN=arn:aws:bedrock:REGION:ACCOUNT_ID:application-inference-profile/PROFILE_ID
+PROMPT_CACHE_TTL=5m
+```
+
+To use GPT-5.6 Luna through the OpenAI-compatible Responses API on the
+recommended Bedrock Runtime endpoint, configure a system inference profile ID,
+not an application inference profile ARN:
+
+```text
+MODEL_PROVIDER=bedrock_runtime_openai
+MODEL_ID=us.openai.gpt-5.6-luna
+MODEL_REGION=us-east-1
+ENABLE_PROMPT_CACHE=true
+PROMPT_CACHE_TTL=30m
+PROMPT_CACHE_KEY_PREFIX=strands-runtime
+MODEL_PRICING_LABEL=openai-gpt-5.6-luna-standard-2026-08
+```
+
+`bedrock_runtime_openai` keeps `stateful=false`, because AgentCore Memory remains
+the conversation source of truth. It places the stable system prompt in the
+first developer message, adds an explicit Responses cache breakpoint, and does
+not mark user messages, tool inputs, or tool results as cacheable. The reusable
+visible prefix must still meet the model's minimum cacheable length.
 
 ### Code Interpreter result contract
 
@@ -209,6 +243,9 @@ explicitly rather than silently changing agent behavior.
 The S3-source Runtime execution role must be granted access to:
 
 - `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` for the configured model or inference profile;
+- `bedrock:CallWithBearerToken` when `MODEL_PROVIDER=bedrock_runtime_openai`,
+  plus `bedrock:InvokeModel` access to the selected system inference profile,
+  its routed foundation models, and the account's regional `project/default`;
 - `bedrock-agentcore:InvokeGateway` for every configured Gateway ARN;
 - `bedrock-agentcore:StartCodeInterpreterSession`, `InvokeCodeInterpreter`, and `StopCodeInterpreterSession` for the configured interpreter;
 - the required AgentCore Memory data-plane operations and `bedrock-agentcore-control:GetMemory` for the configured Memory;
@@ -231,6 +268,7 @@ Pass `-Force` to replace an existing output file. The script installs the requir
 ```text
 strands_agent/main.py
 strands_agent/agent.py
+strands_agent/bedrock_runtime_openai.py
 strands_agent/code_interpreter.py
 strands_agent/code_interpreter_result.py
 strands_agent/gateway_config.py

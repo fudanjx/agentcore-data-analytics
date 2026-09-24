@@ -11,6 +11,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
 
+import httpx
 from botocore.config import Config as BotocoreConfig
 from strands import Agent, AgentSkills
 from strands.handlers.callback_handler import null_callback_handler
@@ -22,6 +23,7 @@ import gateway_proxy
 import memory
 import skills_sync
 import system_prompt
+from bedrock_runtime_openai import BedrockRuntimeOpenAIResponsesModel
 from hooks import DataToolsPermissionGate
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,9 @@ MODEL_ID = os.environ.get("MODEL_ID", "").strip() or os.environ.get(
     "MODEL_ARN", ""
 ).strip()
 MODEL_REGION = os.environ.get("MODEL_REGION", "").strip()
+MODEL_PROVIDER = os.environ.get("MODEL_PROVIDER", "bedrock").strip().lower() or "bedrock"
+if MODEL_PROVIDER not in {"bedrock", "bedrock_runtime_openai"}:
+    raise ValueError("MODEL_PROVIDER must be 'bedrock' or 'bedrock_runtime_openai'")
 AGENT_NAME = os.environ.get("AGENT_NAME", "data-analyst").strip() or "data-analyst"
 AGENT_DESCRIPTION = (
     os.environ.get(
@@ -50,9 +55,27 @@ AGENT_DESCRIPTION = (
     ).strip()
     or "Data analyst with connected databases and managed code execution"
 )
-PROMPT_CACHE_TTL = os.environ.get("PROMPT_CACHE_TTL", "5m").strip().lower() or "5m"
-if PROMPT_CACHE_TTL not in {"5m", "1h"}:
-    raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h'")
+ENABLE_PROMPT_CACHE = os.environ.get("ENABLE_PROMPT_CACHE", "true").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+_prompt_cache_default_ttl = "30m" if MODEL_PROVIDER == "bedrock_runtime_openai" else "5m"
+PROMPT_CACHE_TTL = (
+    os.environ.get("PROMPT_CACHE_TTL", _prompt_cache_default_ttl).strip().lower()
+    or _prompt_cache_default_ttl
+)
+if MODEL_PROVIDER == "bedrock_runtime_openai":
+    if ENABLE_PROMPT_CACHE and PROMPT_CACHE_TTL != "30m":
+        raise ValueError(
+            "PROMPT_CACHE_TTL must be '30m' for bedrock_runtime_openai"
+        )
+elif ENABLE_PROMPT_CACHE and PROMPT_CACHE_TTL not in {"5m", "1h"}:
+    raise ValueError("PROMPT_CACHE_TTL must be '5m' or '1h' for bedrock")
+PROMPT_CACHE_KEY_PREFIX = (
+    os.environ.get("PROMPT_CACHE_KEY_PREFIX", "strands-runtime").strip()
+    or "strands-runtime"
+)
 ENABLE_MODEL_USAGE_LOGS = os.environ.get(
     "ENABLE_MODEL_USAGE_LOGS", "true"
 ).lower() not in {"0", "false", "no"}
@@ -315,6 +338,52 @@ def _make_gateway_clients(custom_headers: dict[str, str]) -> list[MCPClient]:
     return clients
 
 
+def _make_model() -> Any:
+    """Create the model transport selected by MODEL_PROVIDER."""
+    if MODEL_PROVIDER == "bedrock_runtime_openai":
+        if MODEL_ID.startswith("arn:"):
+            raise ValueError(
+                "bedrock_runtime_openai requires a system/geographic/global inference "
+                "profile ID such as 'us.openai.gpt-5.6-luna'; application inference "
+                "profile ARNs are not supported by the Responses API"
+            )
+        return BedrockRuntimeOpenAIResponsesModel(
+            model_id=MODEL_ID,
+            region=_model_region(),
+            client_args={
+                "timeout": httpx.Timeout(
+                    timeout=MODEL_READ_TIMEOUT_SECONDS,
+                    connect=MODEL_CONNECT_TIMEOUT_SECONDS,
+                ),
+                "max_retries": MODEL_RETRY_MAX_ATTEMPTS,
+            },
+            stateful=False,
+            prompt_cache_enabled=ENABLE_PROMPT_CACHE,
+            prompt_cache_key_prefix=PROMPT_CACHE_KEY_PREFIX,
+            prompt_cache_ttl=PROMPT_CACHE_TTL,
+        )
+
+    cache_args: dict[str, Any] = {}
+    if ENABLE_PROMPT_CACHE:
+        cache_args = {
+            "cache_config": CacheConfig(
+                strategy="anthropic",
+                ttl=PROMPT_CACHE_TTL,
+            ),
+            "cache_tools": CacheToolsConfig(ttl=PROMPT_CACHE_TTL),
+        }
+    return BedrockModel(
+        model_id=MODEL_ID,
+        region_name=_model_region(),
+        boto_client_config=BotocoreConfig(
+            connect_timeout=MODEL_CONNECT_TIMEOUT_SECONDS,
+            read_timeout=MODEL_READ_TIMEOUT_SECONDS,
+            retries={"mode": "standard", "max_attempts": MODEL_RETRY_MAX_ATTEMPTS},
+        ),
+        **cache_args,
+    )
+
+
 def _prepare(request: InvocationRequest):
     if not MODEL_ID:
         raise ValueError("MODEL_ID or MODEL_ARN must be configured")
@@ -381,22 +450,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         }
         tools.extend(_make_gateway_clients(custom_headers=custom_gateway_headers))
 
-        model = BedrockModel(
-            model_id=MODEL_ID,
-            region_name=_model_region(),
-            boto_client_config=BotocoreConfig(
-                connect_timeout=MODEL_CONNECT_TIMEOUT_SECONDS,
-                read_timeout=MODEL_READ_TIMEOUT_SECONDS,
-                retries={"mode": "standard", "max_attempts": MODEL_RETRY_MAX_ATTEMPTS},
-            ),
-            # The default model is an opaque inference-profile ARN, so Strands
-            # cannot infer the provider when CacheConfig uses strategy="auto".
-            cache_config=CacheConfig(
-                strategy="anthropic",
-                ttl=PROMPT_CACHE_TTL,
-            ),
-            cache_tools=CacheToolsConfig(ttl=PROMPT_CACHE_TTL),
-        )
+        model = _make_model()
         runtime_agent = Agent(
             model=model,
             tools=tools,
