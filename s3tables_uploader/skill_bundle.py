@@ -25,8 +25,10 @@ MAX_TOTAL_BYTES = 250 * 1024 * 1024
 MAX_ZIP_BYTES = 50 * 1024 * 1024
 MAX_DESCRIPTION_CHARS = 500
 MAX_ENCODED_DESCRIPTION_BYTES = 1024
+MAX_UPLOADED_BY_CHARS = 254
 MAX_LISTED_VERSIONS = 10
 _BUCKET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<header>.*?)\r?\n---[ \t]*(?P<rest>\r?\n.*|\Z)",
     re.DOTALL,
@@ -294,6 +296,17 @@ def _normalise_description(description: str) -> tuple[str, str]:
     return normalised, encoded
 
 
+def _normalise_uploaded_by(uploaded_by: str) -> tuple[str, str]:
+    normalised = uploaded_by.strip()
+    if (
+        not normalised
+        or len(normalised) > MAX_UPLOADED_BY_CHARS
+        or not _EMAIL_RE.fullmatch(normalised)
+    ):
+        raise SkillBundleError("Uploaded by must be a valid email address")
+    return normalised, quote(normalised, safe="@._+-")
+
+
 def ensure_bucket_versioning(s3_client: Any, bucket: str) -> None:
     """Enable native S3 versioning on the configured skill archive bucket."""
     try:
@@ -348,6 +361,11 @@ def list_skill_versions(
                 Bucket=bucket, Key=key, VersionId=version["version_id"]
             ).get("Metadata", {})
             version["description"] = unquote(metadata.get("description", ""))
+            # ``uploaded-by`` is retained as a read fallback for versions
+            # created before the explicit uploader-email field was added.
+            version["uploaded_by"] = unquote(
+                metadata.get("uploaded_by", metadata.get("uploaded-by", ""))
+            )
     except (BotoCoreError, ClientError) as error:
         raise SkillBundleError("Unable to list skill versions from S3", 502) from error
     return {
@@ -360,9 +378,9 @@ def list_skill_versions(
 def publish_version(
     s3_client: Any,
     table_bucket_arn: str,
-    user_id: str,
     filename: str,
     content: bytes,
+    uploaded_by: str,
     description: str = "",
     *,
     destination_bucket: str,
@@ -370,6 +388,7 @@ def publish_version(
 ) -> dict:
     validate_version_zip(table_bucket_arn, filename, content)
     description, encoded_description = _normalise_description(description)
+    uploaded_by, encoded_uploaded_by = _normalise_uploaded_by(uploaded_by)
     bucket_name = table_bucket_name(table_bucket_arn)
     bucket, prefix, _ = _destination(
         bucket_name,
@@ -386,7 +405,7 @@ def publish_version(
             ContentType="application/zip", ServerSideEncryption=S3_SSE,
             Metadata={
                 "s3-table-bucket": bucket_name,
-                "uploaded-by": quote(user_id, safe="@._-")[:256],
+                "uploaded_by": encoded_uploaded_by,
                 "original-filename": quote(filename, safe="._-")[:256],
                 "description": encoded_description,
             },
@@ -407,6 +426,7 @@ def publish_version(
         "uploaded_at": uploaded.isoformat(),
         "size": len(content),
         "description": description,
+        "uploaded_by": uploaded_by,
     }
 
 

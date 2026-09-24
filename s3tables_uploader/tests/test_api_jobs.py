@@ -401,12 +401,12 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket}).status_code, 401)
         self.client.post("/login", json={"password": "password"})
         rejected = self.client.post(
-            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "uploaded_by": "tester@example.com"},
             files={"file": ("wrong.txt", content, "text/plain")},
         )
         self.assertEqual(rejected.status_code, 422, rejected.text)
         corrupt = self.client.post(
-            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "uploaded_by": "tester@example.com"},
             files={"file": ("broken.zip", b"not a zip", "application/zip")},
         )
         self.assertEqual(corrupt.status_code, 422, corrupt.text)
@@ -415,7 +415,7 @@ class ApiTests(unittest.TestCase):
             zipped.writestr("skill-folder/SKILL.md", skill)
             zipped.writestr("../outside.md", b"unsafe")
         unsafe_upload = self.client.post(
-            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "uploaded_by": "tester@example.com"},
             files={"file": ("unsafe.zip", unsafe_archive.getvalue(), "application/zip")},
         )
         self.assertEqual(unsafe_upload.status_code, 422, unsafe_upload.text)
@@ -424,19 +424,25 @@ class ApiTests(unittest.TestCase):
             zipped.writestr("skill-folder/SKILL.md", skill)
             zipped.writestr("../outside/", b"")
         directory_upload = self.client.post(
-            "/api/v3/skills/versions", data={"table_bucket_arn": bucket},
+            "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "uploaded_by": "tester@example.com"},
             files={"file": ("unsafe-dir.zip", unsafe_directory.getvalue(), "application/zip")},
         )
         self.assertEqual(directory_upload.status_code, 422, directory_upload.text)
         descriptions = ["Initial upload", "Added reference data – 中文"]
-        for description in descriptions:
+        uploaders = ["first@example.com", "second@example.com"]
+        for description, uploaded_by in zip(descriptions, uploaders, strict=True):
             uploaded = self.client.post(
-                "/api/v3/skills/versions", data={"table_bucket_arn": bucket, "description": description},
+                "/api/v3/skills/versions", data={
+                    "table_bucket_arn": bucket,
+                    "description": description,
+                    "uploaded_by": uploaded_by,
+                },
                 files={"file": ("wrapped-skill.zip", content, "application/zip")},
             )
             self.assertEqual(uploaded.status_code, 201, uploaded.text)
             self.assertEqual(uploaded.json()["filename"], "ah-soc-delta-pilot.zip")
             self.assertEqual(uploaded.json()["description"], description)
+            self.assertEqual(uploaded.json()["uploaded_by"], uploaded_by)
             self.assertTrue(uploaded.json()["version_id"])
         self.assertEqual(self.s3.versioning_status, "Enabled")
         self.assertEqual(list(self.s3.object_versions), ["skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip"])
@@ -446,6 +452,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(listed), 2)
         self.assertTrue(all("filename" not in item for item in listed))
         self.assertEqual([item["description"] for item in listed], list(reversed(descriptions)))
+        self.assertEqual([item["uploaded_by"] for item in listed], list(reversed(uploaders)))
         self.assertNotEqual(listed[0]["version_id"], listed[1]["version_id"])
         self.assertTrue(all(item["uploaded_at"] for item in listed))
         downloaded = self.client.get("/api/v3/skills/versions/download", params={"table_bucket_arn": bucket, "version_id": listed[0]["version_id"]})
@@ -461,7 +468,7 @@ class ApiTests(unittest.TestCase):
             Bucket="agentcore-harness-dev",
             Key="skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip",
             Body=b"existing snapshot",
-            Metadata={"description": "Existing%20version"},
+            Metadata={"description": "Existing%20version", "uploaded_by": "owner%2Bskill%40example.com"},
         )
         self.client.post("/login", json={"password": "password"})
         response = self.client.get("/api/v3/skills/versions", params={"table_bucket_arn": bucket})
@@ -469,6 +476,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(response.json()["versions"]), 1)
         self.assertNotIn("filename", response.json()["versions"][0])
         self.assertEqual(response.json()["versions"][0]["description"], "Existing version")
+        self.assertEqual(response.json()["versions"][0]["uploaded_by"], "owner+skill@example.com")
+
+    def test_skill_zip_version_requires_valid_uploader_email(self):
+        bucket = self.s3tables.bucket_arn
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as zipped:
+            zipped.writestr("SKILL.md", b"---\ndescription: test skill\n---\n# Test\n")
+        self.client.post("/login", json={"password": "password"})
+
+        missing = self.client.post(
+            "/api/v3/skills/versions",
+            data={"table_bucket_arn": bucket},
+            files={"file": ("skill.zip", archive.getvalue(), "application/zip")},
+        )
+        self.assertEqual(missing.status_code, 422, missing.text)
+
+        invalid = self.client.post(
+            "/api/v3/skills/versions",
+            data={"table_bucket_arn": bucket, "uploaded_by": "not-an-email"},
+            files={"file": ("skill.zip", archive.getvalue(), "application/zip")},
+        )
+        self.assertEqual(invalid.status_code, 422, invalid.text)
+        self.assertIn("valid email address", invalid.json()["detail"])
 
     def test_skill_zip_version_list_returns_only_latest_ten(self):
         bucket = self.s3tables.bucket_arn

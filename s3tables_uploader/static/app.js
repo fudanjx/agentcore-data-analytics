@@ -74,11 +74,14 @@ function updateSkillControls() {
   const hasBucket = Boolean(state.bucket);
   const files = $('skill-bundle-files').files;
   const hasFiles = files.length === 1 && files[0].name.toLowerCase().endsWith('.zip');
+  const uploaderEmail = $('skill-bundle-uploaded-by');
+  const hasUploaderEmail = Boolean(uploaderEmail.value.trim()) && uploaderEmail.checkValidity();
   $('skill-builder').hidden = !hasBucket;
-  $('upload-skill-bundle').disabled = !hasBucket || !hasFiles;
+  $('upload-skill-bundle').disabled = !hasBucket || !hasFiles || !hasUploaderEmail;
 }
 function clearSkillBundle() {
   $('skill-bundle-files').value = '';
+  $('skill-bundle-uploaded-by').value = '';
   $('skill-bundle-description').value = '';
   $('skill-bundle-status').textContent = '';
   $('skill-bundle-status').className = 'operation-status';
@@ -119,7 +122,8 @@ async function loadSkillFiles() {
     for (const version of result.versions) {
       const row = document.createElement('div'); row.className = 'skill-file-row';
       const details = document.createElement('div'); details.className = 'skill-file-details';
-      const meta = document.createElement('small'); meta.textContent = `${formatFileSize(version.size)} · Uploaded ${formatSkillUploadTime(version.uploaded_at)}`;
+      const uploadActor = version.uploaded_by || 'Unknown user';
+      const meta = document.createElement('small'); meta.textContent = `${formatFileSize(version.size)} · Uploaded by ${uploadActor} on ${formatSkillUploadTime(version.uploaded_at)}`;
       const description = document.createElement('small'); description.textContent = version.description || 'No description';
       details.append(meta, description);
       const actions = document.createElement('div'); actions.className = 'skill-file-actions';
@@ -152,6 +156,8 @@ async function uploadSkillBundle() {
   if (!state.bucket) return;
   const files = [...$('skill-bundle-files').files];
   if (files.length !== 1 || !files[0].name.toLowerCase().endsWith('.zip')) return;
+  const uploaderEmail = $('skill-bundle-uploaded-by');
+  if (!uploaderEmail.reportValidity()) return;
   const button = $('upload-skill-bundle'); const status = $('skill-bundle-status');
   button.disabled = true; button.classList.add('is-busy'); button.textContent = 'Uploading ZIP version…';
   status.className = 'operation-status'; status.textContent = 'Validating and uploading the selected skill ZIP…';
@@ -159,12 +165,14 @@ async function uploadSkillBundle() {
     const form = new FormData();
     form.append('table_bucket_arn', state.bucket.table_bucket_arn);
     form.append('file', files[0], files[0].name);
+    form.append('uploaded_by', uploaderEmail.value.trim());
     form.append('description', $('skill-bundle-description').value.trim());
     const response = await apiFetch('/api/v3/skills/versions', { method: 'POST', body: form });
     const result = await response.json();
     if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Skill ZIP upload failed.'; return; }
     status.className = 'operation-status complete'; status.textContent = `Uploaded new version of ${result.filename}.`;
     $('skill-bundle-files').value = '';
+    $('skill-bundle-uploaded-by').value = '';
     $('skill-bundle-description').value = '';
     await loadSkillFiles();
   } catch (error) {
@@ -1086,6 +1094,7 @@ $('refresh-skill-files').onclick = loadSkillFiles;
 $('retry-large').onclick = retryLargeWorker;
 $('cancel-start-over').onclick = cancelAndStartOver;
 $('skill-bundle-files').onchange = updateSkillControls;
+$('skill-bundle-uploaded-by').oninput = updateSkillControls;
 $('emulated-user').onchange = async () => {
   // A selected-file lease is owner scoped. Do not submit it after changing
   // the local identity emulation profile.

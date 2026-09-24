@@ -19,6 +19,7 @@ section, details { background: white; border: 1px solid #e0e7f0; border-radius: 
 .provisioning-grid > div { min-width: 0; }
 .provisioning-grid button { margin-top: 10px; }
 .skill-builder { padding: 14px; border-color: #8fb6cb; background: #f7fbfe; }
+.skill-builder input[type=email] { box-sizing: border-box; width: 100%; margin-top: 8px; border: 1px solid #b9c9dc; border-radius: 7px; padding: 10px; color: #14213d; background: #fff; font: inherit; }
 .skill-builder textarea { box-sizing: border-box; width: 100%; margin-top: 8px; resize: vertical; border: 1px solid #b9c9dc; border-radius: 7px; padding: 10px; color: #14213d; background: #fff; font: inherit; }
 .skill-confirm { display: block; margin-top: 10px; }
 .skill-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin-top: 12px; }

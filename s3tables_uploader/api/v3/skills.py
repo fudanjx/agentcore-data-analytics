@@ -176,6 +176,10 @@ async def upload_version(
     s3: S3Dep,
     table_bucket_arn: Annotated[str, Form()],
     file: Annotated[UploadFile, File()],
+    uploaded_by: Annotated[
+        str,
+        Form(min_length=1, max_length=skill_bundle.MAX_UPLOADED_BY_CHARS),
+    ],
     description: Annotated[str, Form(max_length=skill_bundle.MAX_DESCRIPTION_CHARS)] = "",
 ) -> dict[str, object]:
     require_table_bucket_access(table_bucket_arn, user, tables)
@@ -185,9 +189,9 @@ async def upload_version(
             skill_bundle.publish_version,
             s3,
             table_bucket_arn,
-            user.user_id,
             file.filename or "",
             content,
+            uploaded_by,
             description,
             **dest,
         )

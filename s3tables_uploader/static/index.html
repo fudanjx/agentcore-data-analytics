@@ -64,6 +64,8 @@
         <p id="skill-location" class="hint">Select an S3 Tables bucket to view its skill versions.</p>
         <div id="skill-file-explorer" class="skill-file-explorer" aria-live="polite"></div>
         <label for="skill-bundle-files">Skill ZIP file <input id="skill-bundle-files" type="file" accept=".zip,application/zip"></label>
+        <label for="skill-bundle-uploaded-by">Uploaded by (email)</label>
+        <input id="skill-bundle-uploaded-by" type="email" maxlength="254" autocomplete="email" placeholder="name@example.com" required>
         <label for="skill-bundle-description">Description (optional)</label>
         <textarea id="skill-bundle-description" maxlength="500" rows="3" placeholder="What changed in this version?"></textarea>
         <div class="skill-actions">
