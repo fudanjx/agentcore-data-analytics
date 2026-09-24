@@ -219,6 +219,11 @@ Each ZIP contains `SKILL.md` at its root or beneath one enclosing folder. The Ru
 
 Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a useful `description`; the name should match its directory. The request-scoped agent registers Strands' `AgentSkills` plugin against the local parent directory. Strands places only skill metadata in the system prompt and adds its native `skills` activation tool. When the model activates a relevant skill, that tool returns the complete `SKILL.md` instructions.
 
+When the invocation contains `"user_gateway_permissions": ["all"]`, the
+`AgentSkills` plugin discovers every synchronized skill beneath
+`SKILLS_LOCAL_DIR`. Otherwise, only directories whose names appear in
+`user_gateway_permissions` are registered.
+
 If `SKILLS_BUCKET` is empty or unset, the Runtime skips synchronization and does not add skill activation guidance, the `AgentSkills` plugin, `read_skill_resource`, or `stage_skill_resource`.
 
 Gateway MCP clients and managed Code Interpreter remain operational tools. They are not registered as skills. Runtime guidance directs the model to activate a matching skill before using its related domain tools. When the activated instructions require a UTF-8 text resource, the bounded `read_skill_resource` tool reads it from the local skill cache without allowing access outside that skill's directory.
@@ -285,6 +290,6 @@ For a versioned release artifact:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.1.1.zip `
+    -OutputPath .\dist\strands_agent_v0.1.5.zip `
     -Force
 ```

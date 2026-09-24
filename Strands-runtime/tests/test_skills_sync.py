@@ -184,6 +184,24 @@ class SkillsSyncTests(unittest.TestCase):
             asyncio.run(staged("skill", "references/data.md"))
         self.assertEqual([name for name, _ in calls], ["executeCommand"])
 
+    def test_all_permission_selects_the_parent_skills_directory(self):
+        sources = skills_sync.skill_sources_for_permissions(["all"])
+
+        self.assertEqual(sources, self.local_dir.resolve())
+
+    def test_named_permissions_select_only_named_skill_directories(self):
+        sources = skills_sync.skill_sources_for_permissions(
+            ["ah-analytics", "nuh-analytics"]
+        )
+
+        self.assertEqual(
+            sources,
+            [
+                self.local_dir.resolve() / "ah-analytics",
+                self.local_dir.resolve() / "nuh-analytics",
+            ],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

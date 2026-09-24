@@ -433,8 +433,11 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         plugins: list = []
         if skills_enabled:
             tools.append(skills_sync.read_skill_resource)
-            logger.info(f'Loaded skills:{[skills_sync.get_skill_path_by_name(skill_name) for skill_name in request.user_gateway_permissions]}')
-            plugins.append(AgentSkills(skills=[skills_sync.get_skill_path_by_name(skill_name) for skill_name in request.user_gateway_permissions]))
+            skill_sources = skills_sync.skill_sources_for_permissions(
+                request.user_gateway_permissions
+            )
+            logger.info("Configured skill sources: %s", skill_sources)
+            plugins.append(AgentSkills(skills=skill_sources))
         if interpreter_enabled:
             interpreter_session = code_interpreter.start_session(request.session_id)
             tools.extend(

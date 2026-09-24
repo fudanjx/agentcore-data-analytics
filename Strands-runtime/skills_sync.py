@@ -322,6 +322,15 @@ def _resolve_resource(skill_name: str, resource_path: str) -> Path:
 def get_skill_path_by_name(skill_name: str) -> Path:
     return LOCAL_DIR.resolve() / skill_name
 
+
+def skill_sources_for_permissions(permission_names: list[str]) -> Path | list[Path]:
+    """Resolve the AgentSkills sources allowed by the request permissions."""
+    names = [str(name).strip() for name in permission_names if str(name).strip()]
+    if any(name.casefold() == "all" for name in names):
+        # AgentSkills accepts a parent directory and discovers every child skill.
+        return LOCAL_DIR.resolve()
+    return [get_skill_path_by_name(name) for name in names]
+
 def skill_resource_s3_location(skill_name: str, resource_path: str) -> tuple[str, str | None]:
     """Return an S3 object URI and optional ZIP member for a synced resource."""
     if not skills_enabled():
