@@ -41,6 +41,8 @@ from s3tables_delta_pilot.webapp import (
     _valid_login_session,
     key_impact_analysis,
     list_skill_files,
+    list_skill_versions,
+    upload_skill_version,
     delete_skill_file,
     upload_skill_files,
     list_buckets,
@@ -214,15 +216,17 @@ class UiAssetTests(unittest.TestCase):
         self.assertIn("buckets.push(preferredBucket)", javascript)
         self.assertIn("namespaces.push(preferredNamespace)", javascript)
 
-    def test_bucket_skill_bundle_ui_has_an_incremental_file_explorer(self):
+    def test_bucket_skill_bundle_ui_has_a_zip_version_explorer(self):
         html = (STATIC / "index.html").read_text()
         javascript = (STATIC / "app.js").read_text()
         self.assertIn('id="skill-bundle-files"', html)
         self.assertIn('id="skill-file-explorer"', html)
         self.assertIn('id="refresh-skill-files"', html)
         self.assertIn('id="upload-skill-bundle"', html)
-        self.assertIn("'/api/skills/files'", javascript)
-        self.assertIn("/api/skills/files/download?${query}", javascript)
+        self.assertIn('accept=".zip,application/zip"', html)
+        self.assertNotIn("webkitdirectory", html)
+        self.assertIn("'/api/skills/versions'", javascript)
+        self.assertIn("/api/skills/versions/download?${query}", javascript)
         self.assertIn("async function loadSkillFiles", javascript)
         self.assertIn("async function deleteSkillFile", javascript)
         self.assertIn("clearSkillBundle()", javascript)
@@ -255,6 +259,21 @@ class UiAssetTests(unittest.TestCase):
             result = asyncio.run(upload_skill_files(TABLE_BUCKET_ARN, '["references/data.md"]', [upload], editor))
         self.assertEqual(["references/data.md"], result["uploaded_paths"])
         publishing.assert_called_once_with(TABLE_BUCKET_ARN, "local-editor", [("references/data.md", b"facts")])
+
+    def test_skill_zip_version_api_uses_the_authorized_bucket_and_single_file(self):
+        editor = PilotUser(
+            user_id="local-editor", is_admin=False, can_view_upload_history=True,
+            can_rollback_uploads=True,
+            buckets=(BucketScope(TABLE_BUCKET_ARN, NAMESPACE, "AH SOC delta pilot"),),
+        )
+        with patch("s3tables_delta_pilot.webapp.skill_bundle.list_skill_versions", return_value={"versions": []}) as listing:
+            self.assertEqual({"versions": []}, list_skill_versions(TABLE_BUCKET_ARN, editor))
+        listing.assert_called_once_with(TABLE_BUCKET_ARN)
+        upload = UploadFile(filename="skill.zip", file=BytesIO(b"zip contents"))
+        with patch("s3tables_delta_pilot.webapp.skill_bundle.publish_version", return_value={"filename": "snapshot.zip"}) as publishing:
+            result = asyncio.run(upload_skill_version(TABLE_BUCKET_ARN, upload, editor))
+        self.assertEqual("snapshot.zip", result["filename"])
+        publishing.assert_called_once_with(TABLE_BUCKET_ARN, "local-editor", "skill.zip", b"zip contents")
 
     def test_admin_can_create_a_bucket_and_namespace_but_editor_cannot(self):
         with patch.dict("os.environ", {}, clear=True):

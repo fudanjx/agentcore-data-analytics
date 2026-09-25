@@ -5,28 +5,30 @@ from __future__ import annotations
 import json
 import io
 import mimetypes
-import os
 import re
-import uuid
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import PurePosixPath
-from urllib.parse import quote
+from typing import Any
+from urllib.parse import quote, unquote
 
-import boto3
 from botocore.exceptions import BotoCoreError, ClientError
 
+from .core.constants import S3_SSE
+from .core.exceptions import UploaderError
 
-DEFAULT_DESTINATION_BUCKET = "agentcore-harness-dev"
-DEFAULT_DESTINATION_PREFIX = "skills"
+
 MAX_FILES = 500
 MAX_FILE_BYTES = 50 * 1024 * 1024
 MAX_TOTAL_BYTES = 250 * 1024 * 1024
 MAX_ZIP_BYTES = 50 * 1024 * 1024
-_VERSION_RE = re.compile(r"^(?P<stamp>\d{8}T\d{9}Z)-[0-9a-f]{8}\.zip$")
-_FLAT_ZIP_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,254}\.zip$", re.IGNORECASE)
+MAX_DESCRIPTION_CHARS = 500
+MAX_ENCODED_DESCRIPTION_BYTES = 1024
+MAX_UPLOADED_BY_CHARS = 254
+MAX_LISTED_VERSIONS = 10
 _BUCKET_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$")
+_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _FRONTMATTER_RE = re.compile(
     r"\A---[ \t]*\r?\n(?P<header>.*?)\r?\n---[ \t]*(?P<rest>\r?\n.*|\Z)",
     re.DOTALL,
@@ -34,14 +36,16 @@ _FRONTMATTER_RE = re.compile(
 _NAME_RE = re.compile(r"(?m)^name\s*:.*$")
 _DESCRIPTION_RE = re.compile(r"(?m)^description\s*:\s*(?P<value>.*)$")
 
-s3 = boto3.client(
-    "s3",
-    region_name=os.environ.get("AWS_REGION") or os.environ.get("AWS_DEFAULT_REGION") or "ap-southeast-1",
-)
 
+class SkillBundleError(UploaderError):
+    """Safe client-facing validation or S3 publication failure.
 
-class SkillBundleError(RuntimeError):
-    """Safe client-facing validation or S3 publication failure."""
+    Inherits from :class:`UploaderError` so the global exception handler
+    translates it into the standard JSON shape without router-level
+    try/except.
+    """
+
+    error_code = "SKILL_BUNDLE_ERROR"
 
     def __init__(self, message: str, status_code: int = 422):
         super().__init__(message)
@@ -61,9 +65,21 @@ def table_bucket_name(table_bucket_arn: str) -> str:
     return name
 
 
-def _destination(bucket_name: str) -> tuple[str, str, str]:
-    bucket = os.environ.get("PILOT_SKILL_BUNDLE_BUCKET", DEFAULT_DESTINATION_BUCKET).strip()
-    raw_prefix = os.environ.get("PILOT_SKILL_BUNDLE_PREFIX", DEFAULT_DESTINATION_PREFIX).strip()
+def _destination(
+    bucket_name: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> tuple[str, str, str]:
+    """Return the S3 destination for this table bucket's skill files.
+
+    ``destination_bucket`` / ``destination_prefix`` are the Settings-driven
+    values threaded through from the API layer (see
+    ``app.dependencies.get_skill_destination``). Both are required — the
+    module does not read env vars directly.
+    """
+    bucket = destination_bucket.strip()
+    raw_prefix = destination_prefix.strip()
     prefix_parts = [part for part in raw_prefix.replace("\\", "/").split("/") if part]
     if not bucket or any(part in {".", ".."} for part in prefix_parts):
         raise SkillBundleError("The skill-bundle destination configuration is invalid", 503)
@@ -159,21 +175,31 @@ def validate_upload_files(table_bucket_arn: str, files: list[tuple[str, bytes]])
     return bucket_name, normalised
 
 
-def _existing_object_keys(destination_bucket: str, destination_prefix: str) -> set[str]:
+def _existing_object_keys(s3_client: Any, destination_bucket: str, destination_prefix: str) -> set[str]:
     existing: set[str] = set()
-    paginator = s3.get_paginator("list_objects_v2")
+    paginator = s3_client.get_paginator("list_objects_v2")
     for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
         existing.update(item["Key"] for item in page.get("Contents", []))
     return existing
 
 
-def list_skill_files(table_bucket_arn: str) -> dict:
+def list_skill_files(
+    s3_client: Any,
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     """Return safe, relative object metadata for one table bucket's skill area."""
     bucket_name = table_bucket_name(table_bucket_arn)
-    destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
+    destination_bucket, destination_prefix, destination_uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     try:
         files: list[dict] = []
-        paginator = s3.get_paginator("list_objects_v2")
+        paginator = s3_client.get_paginator("list_objects_v2")
         for page in paginator.paginate(Bucket=destination_bucket, Prefix=f"{destination_prefix}/"):
             for item in page.get("Contents", []):
                 key = item.get("Key", "")
@@ -202,20 +228,28 @@ def list_skill_files(table_bucket_arn: str) -> dict:
 
 
 def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -> None:
-    """Require a complete, safe skill ZIP without expanding it onto disk."""
+    """Validate a complete skill ZIP before storing the original bytes."""
     if not filename.lower().endswith(".zip") or not content or len(content) > MAX_ZIP_BYTES:
         raise SkillBundleError("Upload one ZIP file of at most 50 MB")
     try:
         with zipfile.ZipFile(io.BytesIO(content)) as archive:
-            entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+            members = archive.infolist()
+            if len(members) > MAX_FILES * 2:
+                raise SkillBundleError("The skill ZIP contains too many entries")
+            entries = [entry for entry in members if not entry.is_dir()]
             if not entries or len(entries) > MAX_FILES:
                 raise SkillBundleError(f"A skill ZIP must contain 1 to {MAX_FILES} files")
             seen: set[str] = set()
             total = 0
-            for entry in entries:
-                path = _safe_relative_path(entry.filename)
-                if path in seen or entry.flag_bits & 1 or (entry.external_attr >> 16) & 0o170000 == 0o120000:
-                    raise SkillBundleError("The skill ZIP contains a duplicate, encrypted, or linked file")
+            for entry in members:
+                path = _safe_relative_path(entry.filename[:-1] if entry.is_dir() else entry.filename)
+                file_type = (entry.external_attr >> 16) & 0o170000
+                if entry.flag_bits & 1 or file_type == 0o120000:
+                    raise SkillBundleError("The skill ZIP contains an encrypted or linked entry")
+                if entry.is_dir():
+                    continue
+                if path in seen:
+                    raise SkillBundleError("The skill ZIP contains a duplicate file")
                 seen.add(path)
                 total += entry.file_size
                 if entry.file_size > MAX_FILE_BYTES or total > MAX_TOTAL_BYTES:
@@ -230,83 +264,208 @@ def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -
                     raise SkillBundleError("All files in a wrapped skill ZIP must share one enclosing folder")
             _normalise_skill_frontmatter(archive.read(skill_path), table_bucket_name(table_bucket_arn))
             for entry in entries:
-                # Reading verifies CRCs and rejects corrupt ZIP members before publication.
+                # Reading members verifies their CRCs before publication.
                 if entry.filename != skill_path:
                     archive.read(entry)
-    except (zipfile.BadZipFile, EOFError, RuntimeError, OSError) as error:
+    except (zipfile.BadZipFile, EOFError, RuntimeError, OSError, NotImplementedError) as error:
         raise SkillBundleError("The uploaded file is not a valid ZIP archive") from error
 
 
-def version_location(table_bucket_arn: str, filename: str) -> tuple[str, str]:
-    if not _FLAT_ZIP_RE.fullmatch(filename):
-        raise SkillBundleError("Invalid skill version filename")
+def version_location(
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> tuple[str, str]:
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, _ = _destination(bucket_name)
-    return bucket, f"{prefix}/{filename}"
+    bucket, prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
+    return bucket, f"{prefix}/{bucket_name}.zip"
 
 
-def list_skill_versions(table_bucket_arn: str) -> dict:
+def _normalise_description(description: str) -> tuple[str, str]:
+    normalised = description.strip()
+    if len(normalised) > MAX_DESCRIPTION_CHARS:
+        raise SkillBundleError(f"Description must be at most {MAX_DESCRIPTION_CHARS} characters")
+    encoded = quote(normalised, safe="")
+    if len(encoded.encode("ascii")) > MAX_ENCODED_DESCRIPTION_BYTES:
+        raise SkillBundleError("Description is too large to store in S3 object metadata")
+    return normalised, encoded
+
+
+def _normalise_uploaded_by(uploaded_by: str) -> tuple[str, str]:
+    normalised = uploaded_by.strip()
+    if (
+        not normalised
+        or len(normalised) > MAX_UPLOADED_BY_CHARS
+        or not _EMAIL_RE.fullmatch(normalised)
+    ):
+        raise SkillBundleError("Uploaded by must be a valid email address")
+    return normalised, quote(normalised, safe="@._+-")
+
+
+def ensure_bucket_versioning(s3_client: Any, bucket: str) -> None:
+    """Enable native S3 versioning on the configured skill archive bucket."""
+    try:
+        status = s3_client.get_bucket_versioning(Bucket=bucket).get("Status")
+        if status != "Enabled":
+            s3_client.put_bucket_versioning(
+                Bucket=bucket,
+                VersioningConfiguration={"Status": "Enabled"},
+            )
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to enable versioning on the skill-bundle S3 bucket", 502) from error
+
+
+def list_skill_versions(
+    s3_client: Any,
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(bucket_name)
+    bucket, prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
+    key = f"{prefix}/{bucket_name}.zip"
+    uri = f"s3://{bucket}/{key}"
     versions = []
     try:
-        for page in s3.get_paginator("list_objects_v2").paginate(Bucket=bucket, Prefix=f"{prefix}/"):
-            for item in page.get("Contents", []):
-                filename = item.get("Key", "").removeprefix(f"{prefix}/")
-                if not _FLAT_ZIP_RE.fullmatch(filename):
+        for page in s3_client.get_paginator("list_object_versions").paginate(Bucket=bucket, Prefix=key):
+            for item in page.get("Versions", []):
+                if item.get("Key") != key:
                     continue
-                match = _VERSION_RE.fullmatch(filename)
-                if match:
-                    uploaded = datetime.strptime(match.group("stamp"), "%Y%m%dT%H%M%S%fZ").replace(tzinfo=timezone.utc)
-                elif filename[:-4].isdigit() and len(filename[:-4]) == 14:
-                    try:
-                        uploaded = datetime.strptime(filename[:-4], "%Y%m%d%H%M%S").replace(tzinfo=timezone.utc)
-                    except ValueError:
-                        uploaded = item.get("LastModified")
-                elif filename[:-4].isdigit() and len(filename[:-4]) in {10, 13}:
-                    try:
-                        uploaded = datetime.fromtimestamp(int(filename[:-4]) / (1000 if len(filename[:-4]) == 13 else 1), tz=timezone.utc)
-                    except (OverflowError, ValueError):
-                        uploaded = item.get("LastModified")
-                else:
-                    uploaded = item.get("LastModified")
-                versions.append({"filename": filename, "uploaded_at": uploaded.isoformat() if uploaded else None, "size": int(item.get("Size", 0))})
+                version_id = item.get("VersionId")
+                if not version_id:
+                    continue
+                uploaded = item.get("LastModified")
+                versions.append({
+                    "version_id": version_id,
+                    "is_latest": bool(item.get("IsLatest")),
+                    "uploaded_at": uploaded.isoformat() if uploaded else None,
+                    "size": int(item.get("Size", 0)),
+                })
+        versions = sorted(
+            versions,
+            key=lambda item: (item["uploaded_at"] or "", item["version_id"]),
+            reverse=True,
+        )[:MAX_LISTED_VERSIONS]
+        for version in versions:
+            metadata = s3_client.head_object(
+                Bucket=bucket, Key=key, VersionId=version["version_id"]
+            ).get("Metadata", {})
+            version["description"] = unquote(metadata.get("description", ""))
+            # ``uploaded-by`` is retained as a read fallback for versions
+            # created before the explicit uploader-email field was added.
+            version["uploaded_by"] = unquote(
+                metadata.get("uploaded_by", metadata.get("uploaded-by", ""))
+            )
     except (BotoCoreError, ClientError) as error:
         raise SkillBundleError("Unable to list skill versions from S3", 502) from error
-    return {"skill_name": bucket_name, "destination_uri": uri, "versions": sorted(versions, key=lambda item: (item["uploaded_at"] or "", item["filename"]), reverse=True)}
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": uri,
+        "versions": versions,
+    }
 
 
-def publish_version(table_bucket_arn: str, user_id: str, filename: str, content: bytes) -> dict:
+def publish_version(
+    s3_client: Any,
+    table_bucket_arn: str,
+    filename: str,
+    content: bytes,
+    uploaded_by: str,
+    description: str = "",
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     validate_version_zip(table_bucket_arn, filename, content)
+    description, encoded_description = _normalise_description(description)
+    uploaded_by, encoded_uploaded_by = _normalise_uploaded_by(uploaded_by)
     bucket_name = table_bucket_name(table_bucket_arn)
-    bucket, prefix, uri = _destination(bucket_name)
+    bucket, prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
+    key = f"{prefix}/{bucket_name}.zip"
+    uri = f"s3://{bucket}/{key}"
     uploaded = datetime.now(timezone.utc)
-    snapshot = f"{uploaded.strftime('%Y%m%dT%H%M%S')}{uploaded.microsecond // 1000:03d}Z-{uuid.uuid4().hex[:8]}.zip"
     try:
-        s3.put_object(
-            Bucket=bucket, Key=f"{prefix}/{snapshot}", Body=content,
-            ContentType="application/zip", ServerSideEncryption="AES256", IfNoneMatch="*",
-            Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256], "original-filename": quote(filename, safe="._-")[:256]},
+        ensure_bucket_versioning(s3_client, bucket)
+        result = s3_client.put_object(
+            Bucket=bucket, Key=key, Body=content,
+            ContentType="application/zip", ServerSideEncryption=S3_SSE,
+            Metadata={
+                "s3-table-bucket": bucket_name,
+                "uploaded_by": encoded_uploaded_by,
+                "original-filename": quote(filename, safe="._-")[:256],
+                "description": encoded_description,
+            },
         )
     except (BotoCoreError, ClientError) as error:
         raise SkillBundleError("Unable to upload the skill version to S3", 502) from error
-    return {"skill_name": bucket_name, "destination_uri": uri, "filename": snapshot, "uploaded_at": uploaded.isoformat(), "size": len(content)}
+    version_id = result.get("VersionId")
+    if not version_id:
+        raise SkillBundleError(
+            "S3 did not return a version ID for the uploaded skill; verify bucket versioning is enabled",
+            502,
+        )
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": uri,
+        "filename": f"{bucket_name}.zip",
+        "version_id": version_id,
+        "uploaded_at": uploaded.isoformat(),
+        "size": len(content),
+        "description": description,
+        "uploaded_by": uploaded_by,
+    }
 
 
-def skill_file_location(table_bucket_arn: str, path: str) -> tuple[str, str, str]:
+def skill_file_location(
+    table_bucket_arn: str,
+    path: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> tuple[str, str, str]:
     """Return the configured S3 bucket/key after validating a relative path."""
     bucket_name = table_bucket_name(table_bucket_arn)
     safe_path = _safe_relative_path(path)
-    destination_bucket, destination_prefix, _ = _destination(bucket_name)
+    destination_bucket, destination_prefix, _ = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     return destination_bucket, f"{destination_prefix}/{safe_path}", safe_path
 
 
-def publish_files(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+def publish_files(
+    s3_client: Any,
+    table_bucket_arn: str,
+    user_id: str,
+    files: list[tuple[str, bytes]],
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     """Add or overwrite only the supplied skill files; retain all other files."""
     bucket_name, bundle = validate_upload_files(table_bucket_arn, files)
-    destination_bucket, destination_prefix, destination_uri = _destination(bucket_name)
+    destination_bucket, destination_prefix, destination_uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     try:
-        existing = _existing_object_keys(destination_bucket, destination_prefix)
+        existing = _existing_object_keys(s3_client, destination_bucket, destination_prefix)
         ordered = sorted(bundle, key=lambda item: (item.path == "SKILL.md", item.path))
         created: list[str] = []
         overwritten: list[str] = []
@@ -319,10 +478,10 @@ def publish_files(table_bucket_arn: str, user_id: str, files: list[tuple[str, by
             content_type = mimetypes.guess_type(item.path)[0] or "application/octet-stream"
             if item.path.endswith(".md"):
                 content_type = "text/markdown; charset=utf-8"
-            s3.put_object(
+            s3_client.put_object(
                 Bucket=destination_bucket, Key=key, Body=item.content,
                 ContentType=content_type,
-                ServerSideEncryption="AES256",
+                ServerSideEncryption=S3_SSE,
                 Metadata={"s3-table-bucket": bucket_name, "uploaded-by": quote(user_id, safe="@._-")[:256]},
             )
     except (BotoCoreError, ClientError) as error:
@@ -337,8 +496,23 @@ def publish_files(table_bucket_arn: str, user_id: str, files: list[tuple[str, by
     }
 
 
-def publish_bundle(table_bucket_arn: str, user_id: str, files: list[tuple[str, bytes]]) -> dict:
+def publish_bundle(
+    s3_client: Any,
+    table_bucket_arn: str,
+    user_id: str,
+    files: list[tuple[str, bytes]],
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict:
     """Compatibility wrapper; no longer deletes files absent from an upload."""
     validate_bundle(table_bucket_arn, files)
-    result = publish_files(table_bucket_arn, user_id, files)
+    result = publish_files(
+        s3_client,
+        table_bucket_arn,
+        user_id,
+        files,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
     return {**result, "deleted_paths": []}
