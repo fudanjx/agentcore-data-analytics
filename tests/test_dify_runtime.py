@@ -95,13 +95,19 @@ class FakePaginator:
 
 
 class FakeControlClient:
-    def __init__(self, pages):
+    def __init__(self, pages, tags_by_arn=None):
         self.pages = pages
+        self.tags_by_arn = tags_by_arn or {}
+        self.tag_calls = []
 
     def get_paginator(self, operation):
         if operation != "list_agent_runtimes":
             raise AssertionError(f"Unexpected operation: {operation}")
         return FakePaginator(self.pages)
+
+    def list_tags_for_resource(self, **kwargs):
+        self.tag_calls.append(kwargs)
+        return {"tags": self.tags_by_arn.get(kwargs["resourceArn"], {})}
 
 
 class FakePresignS3:
@@ -383,10 +389,13 @@ class DifyRuntimeTests(unittest.TestCase):
             ]
         )
 
-        with patch.object(
-            dify_server,
-            "get_agentcore_control_client",
-            return_value=client,
+        with (
+            patch.dict(dify_server.os.environ, {"ENV": "NUHS"}),
+            patch.object(
+                dify_server,
+                "get_agentcore_control_client",
+                return_value=client,
+            ),
         ):
             runtimes = dify_server.refresh_dify_runtimes(force=True)
 
@@ -394,6 +403,64 @@ class DifyRuntimeTests(unittest.TestCase):
         self.assertEqual(runtimes["dev"], "arn:dev")
         self.assertEqual(runtimes["analytics"], "arn:analytics")
         self.assertNotIn("still_creating", runtimes)
+        self.assertEqual(client.tag_calls, [])
+
+    def test_hcc_discovery_only_includes_nuhs_project_tagged_runtimes(self):
+        dify_server.DIFY_RUNTIMES.clear()
+        dify_server._runtime_discovery_attempted = False
+        client = FakeControlClient(
+            [
+                {
+                    "agentRuntimes": [
+                        {
+                            "agentRuntimeName": "agentcore_nuhs",
+                            "agentRuntimeArn": "arn:nuhs",
+                            "status": "READY",
+                        },
+                        {
+                            "agentRuntimeName": "other_project",
+                            "agentRuntimeArn": "arn:other",
+                            "status": "READY",
+                        },
+                        {
+                            "agentRuntimeName": "untagged",
+                            "agentRuntimeArn": "arn:untagged",
+                            "status": "READY",
+                        },
+                    ]
+                }
+            ],
+            tags_by_arn={
+                "arn:nuhs": {"PROJECT-NAME": "Bot-NUHS"},
+                "arn:other": {"PROJECT-NAME": "Different-Project"},
+            },
+        )
+
+        with (
+            patch.dict(dify_server.os.environ, {"ENV": "HCC-PROD"}),
+            patch.object(
+                dify_server,
+                "get_agentcore_control_client",
+                return_value=client,
+            ),
+        ):
+            runtimes = dify_server.refresh_dify_runtimes(force=True)
+
+        self.assertEqual(
+            runtimes,
+            {
+                "agentcore_nuhs": "arn:nuhs",
+                "nuhs": "arn:nuhs",
+            },
+        )
+        self.assertEqual(
+            client.tag_calls,
+            [
+                {"resourceArn": "arn:nuhs"},
+                {"resourceArn": "arn:other"},
+                {"resourceArn": "arn:untagged"},
+            ],
+        )
 
     def test_runtime_discovery_failure_preserves_cached_runtimes(self):
         cached = {"cached": "arn:cached"}

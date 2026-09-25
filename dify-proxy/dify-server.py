@@ -85,6 +85,9 @@ DIFY_RUNTIME_DISCOVERY_TTL_SECONDS = max(
     1,
     int(os.environ.get("DIFY_RUNTIME_DISCOVERY_TTL_SECONDS", "300")),
 )
+_HCC_ENV_PREFIX = "HCC"
+_HCC_RUNTIME_TAG_KEY = "PROJECT-NAME"
+_HCC_RUNTIME_TAG_VALUE = "Bot-NUHS"
 
 # READY harnesses discovered through the AgentCore control plane, keyed by
 # harnessName for use as the endpoint slug.
@@ -216,6 +219,23 @@ def _runtime_slugs(name: str) -> tuple[str, ...]:
     return (name,)
 
 
+def _hcc_runtime_filter_enabled() -> bool:
+    return os.environ.get("ENV", "").upper().startswith(_HCC_ENV_PREFIX)
+
+
+def _runtime_matches_deployment_filter(control_client, arn: str) -> bool:
+    """Restrict HCC deployments to runtimes tagged for the NUHS project."""
+    if not _hcc_runtime_filter_enabled():
+        return True
+
+    response = control_client.list_tags_for_resource(resourceArn=arn)
+    tags = response.get("tags", {})
+    return (
+        isinstance(tags, dict)
+        and tags.get(_HCC_RUNTIME_TAG_KEY) == _HCC_RUNTIME_TAG_VALUE
+    )
+
+
 def refresh_dify_runtimes(force: bool = False) -> dict[str, str]:
     """Discover READY runtimes, retaining the last successful result on failure."""
     global _runtime_discovery_attempted
@@ -238,9 +258,8 @@ def refresh_dify_runtimes(force: bool = False) -> dict[str, str]:
         _runtime_discovery_refreshed_at = now
         try:
             discovered = {}
-            paginator = get_agentcore_control_client().get_paginator(
-                "list_agent_runtimes"
-            )
+            control_client = get_agentcore_control_client()
+            paginator = control_client.get_paginator("list_agent_runtimes")
             for page in paginator.paginate():
                 for runtime in page.get("agentRuntimes", []):
                     name = runtime.get("agentRuntimeName")
@@ -252,7 +271,8 @@ def refresh_dify_runtimes(force: bool = False) -> dict[str, str]:
                         and isinstance(arn, str)
                         and arn
                     ):
-                        discovered[name] = arn
+                        if _runtime_matches_deployment_filter(control_client, arn):
+                            discovered[name] = arn
             for name, arn in list(discovered.items()):
                 for alias in _runtime_slugs(name)[1:]:
                     discovered.setdefault(alias, arn)
@@ -266,10 +286,18 @@ def refresh_dify_runtimes(force: bool = False) -> dict[str, str]:
 
         DIFY_RUNTIMES.clear()
         DIFY_RUNTIMES.update(discovered)
-        logger.info(
-            "Available Dify runtime backends: %s",
-            ", ".join(sorted(DIFY_RUNTIMES)),
-        )
+        if _hcc_runtime_filter_enabled():
+            logger.info(
+                "Available Dify runtime backends filtered by %s=%s: %s",
+                _HCC_RUNTIME_TAG_KEY,
+                _HCC_RUNTIME_TAG_VALUE,
+                ", ".join(sorted(DIFY_RUNTIMES)),
+            )
+        else:
+            logger.info(
+                "Available Dify runtime backends: %s",
+                ", ".join(sorted(DIFY_RUNTIMES)),
+            )
         return dict(DIFY_RUNTIMES)
 
 
