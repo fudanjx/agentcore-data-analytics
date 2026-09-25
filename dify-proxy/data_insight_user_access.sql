@@ -11,31 +11,30 @@
 
 BEGIN;
 
-CREATE TABLE IF NOT EXISTS data_insight_user_access (
+DROP TABLE IF EXISTS data_insight_user_access;
+
+CREATE TABLE data_insight_user_access (
     access_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_email VARCHAR(320) NOT NULL,
-    role TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('custodian', 'maintainer', 'querier')),
     dataset TEXT,
-
+    namespace TEXT,
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,
     deleted_at TIMESTAMPTZ,
-
     created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     created_by VARCHAR(320),
     updated_by VARCHAR(320)
 );
 
-CREATE UNIQUE INDEX idx_data_insight_user_access_user_dataset
-    ON data_insight_user_access (user_email, dataset)
-    NULLS NOT DISTINCT;
+CREATE INDEX idx_dia_user_email ON data_insight_user_access (LOWER(user_email)) WHERE is_deleted = FALSE;
+CREATE INDEX idx_dia_dataset    ON data_insight_user_access (dataset)           WHERE is_deleted = FALSE;
 
--- Supports permission lookup by email while ignoring soft-deleted records.
-CREATE INDEX IF NOT EXISTS ix_data_insight_user_access_email_lookup
-    ON data_insight_user_access (user_email)
-    WHERE NOT is_deleted;
-
-
+-- One active entry per (email, dataset) pair.
+-- Partial index: soft-deleted rows are invisible so the same user can be re-added after removal.
+CREATE UNIQUE INDEX uq_active_email_dataset
+    ON data_insight_user_access (LOWER(user_email), dataset)
+    WHERE is_deleted = FALSE AND dataset IS NOT NULL;
 
 COMMIT;
 
