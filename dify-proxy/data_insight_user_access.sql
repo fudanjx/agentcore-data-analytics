@@ -26,6 +26,10 @@ CREATE TABLE IF NOT EXISTS data_insight_user_access (
     updated_by VARCHAR(320)
 );
 
+CREATE UNIQUE INDEX idx_data_insight_user_access_user_dataset
+    ON data_insight_user_access (user_email, dataset)
+    NULLS NOT DISTINCT;
+
 -- Supports permission lookup by email while ignoring soft-deleted records.
 CREATE INDEX IF NOT EXISTS ix_data_insight_user_access_email_lookup
     ON data_insight_user_access (user_email)
