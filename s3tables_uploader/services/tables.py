@@ -208,6 +208,23 @@ class TableBucketService:
             "namespace": returned[0],
         }
 
+    def delete_namespace(self, table_bucket_arn: str, namespace: str) -> None:
+        """Delete an empty namespace.
+
+        S3 Tables rejects a namespace that still contains tables.  Keep that
+        guard in the control plane instead of adding a destructive cascade
+        here: the UI may only delete uploader-managed tables, while a
+        namespace can also contain tables owned by another workflow.
+        """
+        try:
+            self._s3tables.delete_namespace(
+                tableBucketARN=table_bucket_arn, namespace=namespace
+            )
+        except ClientError as error:
+            raise control_plane_error(
+                error, f"namespace {namespace}"
+            ) from error
+
     def list_tables(self, table_bucket_arn: str, namespace: str) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
         request: dict[str, str] = {"tableBucketARN": table_bucket_arn, "namespace": namespace}

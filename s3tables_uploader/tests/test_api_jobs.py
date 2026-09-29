@@ -21,6 +21,7 @@ class FakeS3:
     def __init__(self):
         self.items = {}; self.parts = {}; self.deleted_objects = []
         self.object_versions = {}
+        self.delete_markers = {}
         self.versioning_status = None
         self.version_counter = 0
     @staticmethod
@@ -68,17 +69,26 @@ class FakeS3:
         self.deleted_objects.append({"Bucket": Bucket, "Key": Key, "VersionId": VersionId})
         if VersionId is not None:
             versions = self.object_versions.get(Key, [])
-            if not versions:
+            remaining = [item for item in versions if item["VersionId"] != VersionId]
+            if len(remaining) != len(versions):
+                self.object_versions[Key] = remaining
+                if remaining:
+                    self.items[Key] = remaining[-1]["Body"]
+                else:
+                    self.items.pop(Key, None)
+                return {}
+            markers = self.delete_markers.get(Key, [])
+            if not versions and not markers:
+                # Existing tests model an externally-created version by
+                # storing only its current object body.
                 self.items.pop(Key, None)
                 return {}
-            remaining = [item for item in versions if item["VersionId"] != VersionId]
-            if len(remaining) == len(versions):
+            remaining_markers = [
+                item for item in markers if item["VersionId"] != VersionId
+            ]
+            if len(remaining_markers) == len(markers):
                 raise self._not_found_error()
-            self.object_versions[Key] = remaining
-            if remaining:
-                self.items[Key] = remaining[-1]["Body"]
-            else:
-                self.items.pop(Key, None)
+            self.delete_markers[Key] = remaining_markers
         else:
             self.items.pop(Key, None)
         return {}
@@ -112,7 +122,13 @@ class FakeS3:
                             "Size": len(record["Body"]),
                             "IsLatest": index == len(records) - 1,
                         })
-                yield {"Versions": versions}
+                delete_markers = []
+                for key, records in client.delete_markers.items():
+                    if not key.startswith(Prefix):
+                        continue
+                    for record in records:
+                        delete_markers.append({"Key": key, **record})
+                yield {"Versions": versions, "DeleteMarkers": delete_markers}
         return Paginator()
 
 
@@ -137,6 +153,8 @@ class FakeS3Tables:
         self.namespaces = {self.bucket_arn: ["pilot"]}
         self.tables = {(self.bucket_arn, "pilot"): [{"name": "test_table"}]}
         self.metadata_location = "s3://example--table-s3/metadata/test.metadata.json"
+        self.deleted_bucket = None
+        self.deleted_namespace = None
 
     def list_table_buckets(self, **kwargs): return {"tableBuckets": self.buckets}
     def list_tags_for_resource(self, resourceArn):
@@ -149,10 +167,21 @@ class FakeS3Tables:
         self.buckets.append({"arn": arn, "name": name, "type": "customer"})
         self.namespaces[arn] = []
         return {"arn": arn}
+    def delete_table_bucket(self, tableBucketARN):
+        if self.namespaces.get(tableBucketARN):
+            raise ClientError({"Error": {"Code": "ConflictException", "Message": "Bucket is not empty"}}, "DeleteTableBucket")
+        self.buckets = [item for item in self.buckets if item["arn"] != tableBucketARN]
+        self.namespaces.pop(tableBucketARN, None)
+        self.deleted_bucket = tableBucketARN
     def list_namespaces(self, tableBucketARN, **kwargs): return {"namespaces": [{"namespace": [name]} for name in self.namespaces[tableBucketARN]]}
     def create_namespace(self, tableBucketARN, namespace):
         self.namespaces[tableBucketARN].append(namespace[0])
         return {"tableBucketARN": tableBucketARN, "namespace": namespace}
+    def delete_namespace(self, tableBucketARN, namespace):
+        if self.tables.get((tableBucketARN, namespace)):
+            raise ClientError({"Error": {"Code": "ConflictException", "Message": "Namespace is not empty"}}, "DeleteNamespace")
+        self.namespaces[tableBucketARN].remove(namespace)
+        self.deleted_namespace = (tableBucketARN, namespace)
     def list_tables(self, tableBucketARN, namespace, **kwargs): return {"tables": self.tables.get((tableBucketARN, namespace), [])}
     def get_table(self, tableBucketARN, namespace, name): return {"metadataLocation": self.metadata_location}
     def delete_table(self, tableBucketARN, namespace, name):
@@ -242,12 +271,138 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(repeated.status_code, 202, repeated.text)
         self.assertEqual(repeated.json()["mutation_id"], mutation_id)
 
-    def test_administrator_can_create_namespace_and_delete_table(self):
+    def test_administrator_can_create_and_force_delete_empty_bucket_and_namespace(self):
         self.client.post("/login", json={"password":"password"})
         bucket = self.client.post("/api/v3/buckets", json={"name": "new-analytics"})
         self.assertEqual(bucket.status_code, 201, bucket.text)
+        deleted_bucket = self.client.request(
+            "DELETE", "/api/v3/buckets",
+            json={"table_bucket_arn": bucket.json()["table_bucket_arn"], "force": True},
+        )
+        self.assertEqual(deleted_bucket.status_code, 200, deleted_bucket.text)
+        self.assertEqual(self.s3tables.deleted_bucket, bucket.json()["table_bucket_arn"])
         namespace = self.client.post("/api/v3/buckets/namespaces", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "reporting"})
         self.assertEqual(namespace.status_code, 201, namespace.text)
+        deleted_namespace = self.client.request(
+            "DELETE", "/api/v3/buckets/namespaces",
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "reporting", "confirm": True},
+        )
+        self.assertEqual(deleted_namespace.status_code, 200, deleted_namespace.text)
+        self.assertEqual(
+            self.s3tables.deleted_namespace,
+            (self.s3tables.bucket_arn, "reporting"),
+        )
+
+    def test_force_bucket_deletion_cascades_but_preserves_audit_and_skill_prefix(self):
+        self.client.post("/login", json={"password":"password"})
+        namespace = self.client.request(
+            "DELETE", "/api/v3/buckets/namespaces",
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "confirm": True},
+        )
+        self.assertEqual(namespace.status_code, 409, namespace.text)
+        scope = hashlib.sha256(f"{self.s3tables.bucket_arn}|pilot".encode()).hexdigest()[:16]
+        contract_key = f"temp_s3_update/web_ingest/table_contracts/{scope}/test_table.json"
+        audit_key = f"temp_s3_update/web_ingest/upload_history/{scope}/test_table/upload.json"
+        skill_key = "skills/ah-soc-delta-pilot/SKILL.md"
+        self.s3.versioning_status = "Enabled"
+        self.s3.put_object(Bucket="ah-data-analytics", Key=contract_key, Body=b"first")
+        self.s3.put_object(Bucket="ah-data-analytics", Key=contract_key, Body=b"second")
+        self.s3.versioning_status = None
+        self.s3.items[audit_key] = b"{}"
+        self.s3.items[skill_key] = b"---\ndescription: retained\n---\n"
+        bucket = self.client.request(
+            "DELETE", "/api/v3/buckets",
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "force": True},
+        )
+        self.assertEqual(bucket.status_code, 200, bucket.text)
+        self.assertEqual(bucket.json()["deleted_tables"], 1)
+        self.assertEqual(bucket.json()["deleted_namespaces"], 1)
+        self.assertEqual(bucket.json()["deleted_contracts"], 2)
+        self.assertFalse(bucket.json()["skill_prefix_deleted"])
+        self.assertNotIn(contract_key, self.s3.items)
+        self.assertEqual(self.s3.object_versions[contract_key], [])
+        self.assertIn(audit_key, self.s3.items)
+        self.assertIn(skill_key, self.s3.items)
+        self.assertEqual(self.s3tables.deleted_bucket, self.s3tables.bucket_arn)
+
+    def test_force_bucket_deletion_optionally_purges_all_skill_versions(self):
+        self.client.post("/login", json={"password":"password"})
+        self.s3.versioning_status = "Enabled"
+        skill_key = "skills/ah-soc-delta-pilot/ah-soc-delta-pilot.zip"
+        self.s3.put_object(Bucket="agentcore-harness-dev", Key=skill_key, Body=b"first")
+        self.s3.put_object(Bucket="agentcore-harness-dev", Key=skill_key, Body=b"second")
+        self.s3.delete_markers[skill_key] = [{
+            "VersionId": "delete-marker-1",
+            "LastModified": datetime.now(timezone.utc),
+        }]
+        bucket = self.client.request(
+            "DELETE", "/api/v3/buckets",
+            json={
+                "table_bucket_arn": self.s3tables.bucket_arn,
+                "force": True,
+                "delete_skill_prefix": True,
+            },
+        )
+        self.assertEqual(bucket.status_code, 200, bucket.text)
+        self.assertTrue(bucket.json()["skill_prefix_deleted"])
+        self.assertEqual(bucket.json()["deleted_skill_versions"], 3)
+        self.assertNotIn(skill_key, self.s3.items)
+        self.assertEqual(self.s3.object_versions[skill_key], [])
+        self.assertEqual(self.s3.delete_markers[skill_key], [])
+
+    def test_force_bucket_deletion_stops_before_changes_when_a_table_is_locked(self):
+        import json
+
+        self.client.post("/login", json={"password":"password"})
+        target = "\x1f".join(
+            (self.s3tables.bucket_arn, "pilot", "test_table")
+        ).encode()
+        lock_key = f"s3-uploader/table-locks/{hashlib.sha256(target).hexdigest()}.json"
+        self.s3.items[lock_key] = json.dumps({
+            "owner_token": "active-job",
+            "lease_expires_at": "2100-01-01T00:00:00+00:00",
+        }).encode()
+        bucket = self.client.request(
+            "DELETE", "/api/v3/buckets",
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "force": True},
+        )
+        self.assertEqual(bucket.status_code, 409, bucket.text)
+        self.assertIn("TABLE_MUTATION_IN_PROGRESS", bucket.json()["detail"])
+        self.assertIsNone(self.s3tables.deleted_bucket)
+        self.assertEqual(
+            self.s3tables.tables[(self.s3tables.bucket_arn, "pilot")],
+            [{"name": "test_table"}],
+        )
+
+    def test_bucket_force_and_namespace_confirmation_are_required(self):
+        self.client.post("/login", json={"password":"password"})
+        namespace = self.client.request(
+            "DELETE", "/api/v3/buckets/namespaces",
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot"},
+        )
+        self.assertEqual(namespace.status_code, 422, namespace.text)
+        bucket = self.client.request(
+            "DELETE", "/api/v3/buckets",
+            json={"table_bucket_arn": self.s3tables.bucket_arn},
+        )
+        self.assertEqual(bucket.status_code, 422, bucket.text)
+
+    def test_non_admin_cannot_delete_bucket_or_namespace(self):
+        self.client.post("/login", json={"password":"password"})
+        headers = {"X-Pilot-User-Id": "local-editor"}
+        namespace = self.client.request(
+            "DELETE", "/api/v3/buckets/namespaces", headers=headers,
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "confirm": True},
+        )
+        self.assertEqual(namespace.status_code, 403, namespace.text)
+        bucket = self.client.request(
+            "DELETE", "/api/v3/buckets", headers=headers,
+            json={"table_bucket_arn": self.s3tables.bucket_arn, "force": True},
+        )
+        self.assertEqual(bucket.status_code, 403, bucket.text)
+
+    def test_administrator_can_delete_uploader_managed_table(self):
+        self.client.post("/login", json={"password":"password"})
         scope = hashlib.sha256(f"{self.s3tables.bucket_arn}|pilot".encode()).hexdigest()[:16]
         self.s3.items[f"temp_s3_update/web_ingest/table_contracts/{scope}/test_table.json"] = b"{}"
         deleted = self.client.request("DELETE", "/api/v3/buckets/tables", json={"table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "table": "test_table"})

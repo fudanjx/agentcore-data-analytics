@@ -31,6 +31,7 @@ class _FakeS3Tables:
         self.tag_calls: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
         self.deleted: list[str] = []
+        self.deleted_namespaces: list[tuple[str, str]] = []
         self.raise_on_tag = False
 
     def list_table_buckets(self, **_kwargs: Any) -> dict[str, Any]:
@@ -46,20 +47,23 @@ class _FakeS3Tables:
         self._buckets.append({"arn": arn, "name": name, "type": "customer"})
         return {"arn": arn}
 
-    def tag_resource(self, resourceArn: str, tags: list[dict[str, str]]) -> None:  # noqa: N803
+    def tag_resource(self, resourceArn: str, tags: dict[str, str]) -> None:  # noqa: N803
         self.tag_calls.append({"arn": resourceArn, "tags": tags})
         if self.raise_on_tag:
             raise ClientError(
                 {"Error": {"Code": "AccessDenied", "Message": "no"}},
                 "TagResource",
             )
-        self._tags[resourceArn] = {tag["key"]: tag["value"] for tag in tags}
+        self._tags[resourceArn] = dict(tags)
 
     def delete_table_bucket(self, tableBucketARN: str) -> None:  # noqa: N803
         self.deleted.append(tableBucketARN)
         self._buckets = [
             item for item in self._buckets if item["arn"] != tableBucketARN
         ]
+
+    def delete_namespace(self, tableBucketARN: str, namespace: str) -> None:  # noqa: N803
+        self.deleted_namespaces.append((tableBucketARN, namespace))
 
 
 class TableBucketServiceTests(unittest.TestCase):
@@ -103,8 +107,7 @@ class TableBucketServiceTests(unittest.TestCase):
         result = service.create_bucket("new-thing")
         self.assertIn(result["table_bucket_arn"], {c["arn"] for c in client.created})
         self.assertEqual(len(client.tag_calls), 1)
-        applied = {t["key"]: t["value"] for t in client.tag_calls[0]["tags"]}
-        self.assertEqual(applied, APP_TAGS)
+        self.assertEqual(client.tag_calls[0]["tags"], APP_TAGS)
         # Cached as matching → listing includes it without another tag call.
         before_list_calls = len(client.list_tag_calls)
         arns = [b["table_bucket_arn"] for b in service.list_buckets()]
@@ -128,6 +131,18 @@ class TableBucketServiceTests(unittest.TestCase):
         purged = service.purge_cache()
         self.assertGreaterEqual(purged, 1)
         self.assertEqual(service.purge_cache(), 0)
+
+    def test_delete_namespace_passes_bucket_and_namespace(self):
+        service, client, _ = self._service()
+        service.delete_namespace("arn:app", "reporting")
+        self.assertEqual(client.deleted_namespaces, [("arn:app", "reporting")])
+
+    def test_delete_bucket_invalidates_cached_tag_state(self):
+        service, client, _ = self._service()
+        service.list_buckets()
+        service.delete_bucket("arn:app")
+        self.assertEqual(client.deleted[-1], "arn:app")
+        self.assertNotIn("arn:app", [item["table_bucket_arn"] for item in service.list_buckets()])
 
 
 if __name__ == "__main__":

@@ -188,6 +188,8 @@ function renderAdminProvisioning() {
   const namespace = $('new-namespace').value.trim();
   $('create-bucket').disabled = !state.isAdmin || !/^[a-z0-9-]{3,63}$/.test(bucketName);
   $('create-namespace').disabled = !state.isAdmin || !state.bucket || !/^[a-z][a-z0-9_]{0,254}$/.test(namespace);
+  $('delete-bucket').disabled = !state.isAdmin || !state.bucket;
+  $('delete-namespace').disabled = !state.isAdmin || !state.bucket || !state.namespace;
 }
 function clearDestination() {
   state.bucket = null; state.namespace = null; state.table = null; state.tableManaged = false; state.isAdmin = false; state.userId = null;
@@ -308,6 +310,53 @@ async function createSelectedNamespace() {
     status.className = 'operation-status complete'; status.textContent = `Created namespace ${result.namespace}.`;
   } catch (error) {
     status.className = 'operation-status failed'; status.textContent = `Namespace creation failed: ${error.message}`;
+  } finally {
+    button.classList.remove('is-busy'); renderAdminProvisioning();
+  }
+}
+
+async function deleteSelectedBucket() {
+  const bucket = state.bucket;
+  if (!bucket) return;
+  const label = bucket.label || bucket.table_bucket_arn.split('/').pop();
+  if (!confirm(`Force delete S3 Tables bucket "${label}"? Every table, namespace, and uploader contract will be permanently deleted. Audit-history objects are retained. This cannot be undone.`)) return;
+  const deleteSkillPrefix = confirm(`Also permanently delete every skill file and archived skill version under the "${label}" skill prefix?\n\nOK = delete skill files too\nCancel = preserve skill files and continue deleting the bucket`);
+  const button = $('delete-bucket'); const status = $('delete-bucket-status');
+  button.disabled = true; button.classList.add('is-busy');
+  status.className = 'operation-status'; status.textContent = `Force deleting ${label} and all S3 Tables resources...`;
+  try {
+    const response = await apiFetch('/api/v3/buckets', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: bucket.table_bucket_arn, force: true, delete_skill_prefix: deleteSkillPrefix }) });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Force deletion failed. You can retry safely.'; return; }
+    state.bucket = null; state.namespace = null; state.table = null; state.tableManaged = false;
+    await loadBuckets();
+    $('admin-provisioning').open = true;
+    const skillSummary = result.skill_prefix_deleted ? ` Deleted ${result.deleted_skill_versions} skill object version(s).` : ' Preserved the skill prefix.';
+    status.className = 'operation-status complete'; status.textContent = `Deleted bucket ${label}: ${result.deleted_tables} table(s), ${result.deleted_namespaces} namespace(s), and ${result.deleted_contracts} contract object version(s).${skillSummary}`;
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Bucket deletion failed: ${error.message || 'network request failed'}`;
+  } finally {
+    button.classList.remove('is-busy'); renderAdminProvisioning();
+  }
+}
+
+async function deleteSelectedNamespace() {
+  const bucket = state.bucket; const namespace = state.namespace;
+  if (!bucket || !namespace) return;
+  if (!confirm(`Delete namespace "${namespace}"? It must contain no tables. This cannot be undone.`)) return;
+  const button = $('delete-namespace'); const status = $('delete-namespace-status');
+  button.disabled = true; button.classList.add('is-busy');
+  status.className = 'operation-status'; status.textContent = `Deleting namespace ${namespace}...`;
+  try {
+    const response = await apiFetch('/api/v3/buckets/namespaces', { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ table_bucket_arn: bucket.table_bucket_arn, namespace, confirm: true }) });
+    const result = await response.json();
+    if (!response.ok) { status.className = 'operation-status failed'; status.textContent = result.detail || 'Namespace deletion failed. Delete every table first.'; return; }
+    state.namespace = null; state.table = null; state.tableManaged = false;
+    await loadNamespaces();
+    $('admin-provisioning').open = true;
+    status.className = 'operation-status complete'; status.textContent = `Deleted namespace ${namespace}.`;
+  } catch (error) {
+    status.className = 'operation-status failed'; status.textContent = `Namespace deletion failed: ${error.message || 'network request failed'}`;
   } finally {
     button.classList.remove('is-busy'); renderAdminProvisioning();
   }
@@ -1089,6 +1138,8 @@ $('new-bucket').oninput = renderAdminProvisioning;
 $('new-namespace').oninput = renderAdminProvisioning;
 $('create-bucket').onclick = createTableBucket;
 $('create-namespace').onclick = createSelectedNamespace;
+$('delete-bucket').onclick = deleteSelectedBucket;
+$('delete-namespace').onclick = deleteSelectedNamespace;
 $('upload-skill-bundle').onclick = uploadSkillBundle;
 $('refresh-skill-files').onclick = loadSkillFiles;
 $('retry-large').onclick = retryLargeWorker;

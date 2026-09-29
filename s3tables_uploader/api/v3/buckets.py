@@ -3,9 +3,9 @@
 Namespaces and tables live *inside* buckets in the S3 Tables data model, so
 their URLs mirror that hierarchy:
 
-- ``/api/v3/buckets``                    list / create bucket
+- ``/api/v3/buckets``                    list / create / delete bucket
 - ``/api/v3/buckets/cache/purge``        admin: drop cached bucket tags
-- ``/api/v3/buckets/namespaces``         list / create namespace
+- ``/api/v3/buckets/namespaces``         list / create / delete namespace
 - ``/api/v3/buckets/tables``             list / delete table
 
 Bucket ARN travels as a query parameter (paths cannot cleanly encode ARNs
@@ -23,10 +23,12 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel, Field
 
+from ... import skill_bundle
 from ...app.dependencies import (
     ContractServiceDep,
     S3Dep,
     SettingsDep,
+    SkillDestinationDep,
     TableBucketServiceDep,
     UserDep,
 )
@@ -47,6 +49,18 @@ class CreateTableBucketRequest(BaseModel):
 class CreateNamespaceRequest(BaseModel):
     table_bucket_arn: str = Field(min_length=1)
     namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+
+
+class DeleteTableBucketRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    force: bool = False
+    delete_skill_prefix: bool = False
+
+
+class DeleteNamespaceRequest(BaseModel):
+    table_bucket_arn: str = Field(min_length=1)
+    namespace: str = Field(pattern=r"^[a-z][a-z0-9_]{0,254}$")
+    confirm: bool = False
 
 
 class DeleteTableRequest(BaseModel):
@@ -87,6 +101,84 @@ def create_bucket(
     return tables.create_bucket(payload.name)
 
 
+@router.delete("")
+def delete_bucket(
+    payload: DeleteTableBucketRequest,
+    user: UserDep,
+    tables: TableBucketServiceDep,
+    contracts: ContractServiceDep,
+    s3: S3Dep,
+    settings: SettingsDep,
+    skill_destination: SkillDestinationDep,
+) -> dict[str, object]:
+    require_admin(user)
+    require_table_bucket_access(payload.table_bucket_arn, user, tables)
+    if not payload.force:
+        raise HTTPException(
+            422,
+            "Set force=true to delete a table bucket and all of its contents",
+        )
+
+    namespaces = tables.list_namespaces(payload.table_bucket_arn)
+    inventory = {
+        namespace: [
+            str(entry["name"])
+            for entry in tables.list_tables(payload.table_bucket_arn, namespace)
+        ]
+        for namespace in namespaces
+    }
+
+    # Check every table before making the first destructive change. This
+    # prevents an upload or rollback from losing its destination mid-run.
+    lock_manager = S3TableLockManager(
+        s3, settings.landing_bucket, f"{settings.landing_prefix}/table-locks"
+    )
+    for namespace, namespace_tables in inventory.items():
+        for table in namespace_tables:
+            if lock_manager.get_lease(
+                table_bucket_arn=payload.table_bucket_arn,
+                namespace=namespace,
+                table=table,
+            ) is not None:
+                raise HTTPException(
+                    409,
+                    f"TABLE_MUTATION_IN_PROGRESS: {namespace}.{table}",
+                )
+
+    deleted_tables = 0
+    deleted_namespaces = 0
+    deleted_contracts = 0
+    for namespace in namespaces:
+        for table in inventory[namespace]:
+            tables.delete_table(payload.table_bucket_arn, namespace, table)
+            deleted_tables += 1
+        deleted_contracts += contracts.purge_namespace(
+            payload.table_bucket_arn, namespace
+        )
+        tables.delete_namespace(payload.table_bucket_arn, namespace)
+        deleted_namespaces += 1
+
+    deleted_skill_versions = 0
+    if payload.delete_skill_prefix:
+        deleted_skill_versions = int(
+            skill_bundle.delete_skill_prefix(
+                s3,
+                payload.table_bucket_arn,
+                **skill_destination,
+            )["deleted_versions"]
+        )
+
+    tables.delete_bucket(payload.table_bucket_arn)
+    return {
+        "deleted": payload.table_bucket_arn,
+        "deleted_tables": deleted_tables,
+        "deleted_namespaces": deleted_namespaces,
+        "deleted_contracts": deleted_contracts,
+        "skill_prefix_deleted": payload.delete_skill_prefix,
+        "deleted_skill_versions": deleted_skill_versions,
+    }
+
+
 @router.post("/cache/purge")
 def purge_bucket_tag_cache(
     user: UserDep, tables: TableBucketServiceDep
@@ -121,6 +213,23 @@ def create_namespace(
     require_admin(user)
     require_table_bucket_access(payload.table_bucket_arn, user, tables)
     return tables.create_namespace(payload.table_bucket_arn, payload.namespace)
+
+
+@router.delete("/namespaces")
+def delete_namespace(
+    payload: DeleteNamespaceRequest,
+    user: UserDep,
+    tables: TableBucketServiceDep,
+) -> dict[str, str]:
+    require_admin(user)
+    require_table_bucket_access(payload.table_bucket_arn, user, tables)
+    if not payload.confirm:
+        raise HTTPException(422, "Confirm deletion before removing a namespace")
+    tables.delete_namespace(payload.table_bucket_arn, payload.namespace)
+    return {
+        "deleted": payload.namespace,
+        "table_bucket_arn": payload.table_bucket_arn,
+    }
 
 
 # ---------------------------------------------------------------------------

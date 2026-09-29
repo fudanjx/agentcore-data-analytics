@@ -1,7 +1,15 @@
 import json
 import unittest
 
-from infra.s3_uploader_fargate import GLUE_JOB_NAME, LANDING_PREFIX, SKILL_BUNDLE_BUCKET, SKILL_BUNDLE_PREFIX, render_template
+from infra.s3_uploader_fargate import (
+    CONTRACT_BUCKET,
+    CONTRACT_PREFIX,
+    GLUE_JOB_NAME,
+    LANDING_PREFIX,
+    SKILL_BUNDLE_BUCKET,
+    SKILL_BUNDLE_PREFIX,
+    render_template,
+)
 
 
 class FargateTemplateTests(unittest.TestCase):
@@ -47,6 +55,8 @@ class FargateTemplateTests(unittest.TestCase):
         statements = resources["ApiTaskRole"]["Properties"]["Policies"][0]["PolicyDocument"]["Statement"]
         actions = {action for statement in statements for action in ([statement["Action"]] if isinstance(statement["Action"], str) else statement["Action"])}
         self.assertIn("s3tables:CreateTableBucket", actions)
+        self.assertIn("s3tables:DeleteTableBucket", actions)
+        self.assertIn("s3tables:DeleteNamespace", actions)
         self.assertIn("s3tables:DeleteTable", actions)
         self.assertIn("glue:StartJobRun", actions)
         self.assertNotIn("s3-uploader-v3", json.dumps(resources))
@@ -57,13 +67,30 @@ class FargateTemplateTests(unittest.TestCase):
         )
         self.assertEqual(set(skill_object_statement["Action"]), {
             "s3:GetObject", "s3:GetObjectVersion", "s3:PutObject",
-            "s3:DeleteObject",
+            "s3:DeleteObject", "s3:DeleteObjectVersion",
         })
         self.assertTrue(any(
             set(statement["Action"] if isinstance(statement["Action"], list) else [statement["Action"]])
             == {"s3:GetBucketVersioning", "s3:PutBucketVersioning"}
             for statement in statements
         ))
+
+        contract_object_statement = next(
+            statement for statement in statements
+            if statement.get("Resource")
+            == f"arn:aws:s3:::{CONTRACT_BUCKET}/{CONTRACT_PREFIX}/*"
+        )
+        self.assertIn("s3:DeleteObject", contract_object_statement["Action"])
+        self.assertIn("s3:DeleteObjectVersion", contract_object_statement["Action"])
+        contract_list_statement = next(
+            statement for statement in statements
+            if statement.get("Resource") == f"arn:aws:s3:::{CONTRACT_BUCKET}"
+            and "s3:ListBucketVersions" in statement["Action"]
+        )
+        self.assertIn(
+            f"{CONTRACT_PREFIX}/*",
+            contract_list_statement["Condition"]["StringLike"]["s3:prefix"],
+        )
 
     def test_historical_landing_data_is_read_only(self):
         resources = render_template()["Resources"]

@@ -227,6 +227,56 @@ def list_skill_files(
     }
 
 
+def delete_skill_prefix(
+    s3_client: Any,
+    table_bucket_arn: str,
+    *,
+    destination_bucket: str,
+    destination_prefix: str,
+) -> dict[str, object]:
+    """Permanently remove all objects, versions, and delete markers for a skill."""
+    bucket_name = table_bucket_name(table_bucket_arn)
+    bucket, prefix, destination_uri = _destination(
+        bucket_name,
+        destination_bucket=destination_bucket,
+        destination_prefix=destination_prefix,
+    )
+    object_prefix = f"{prefix}/"
+    deleted = 0
+    try:
+        paginator = s3_client.get_paginator("list_object_versions")
+        for page in paginator.paginate(Bucket=bucket, Prefix=object_prefix):
+            for item in [
+                *page.get("Versions", []),
+                *page.get("DeleteMarkers", []),
+            ]:
+                key = item.get("Key")
+                version_id = item.get("VersionId")
+                if not key or not version_id:
+                    continue
+                s3_client.delete_object(
+                    Bucket=bucket, Key=key, VersionId=version_id
+                )
+                deleted += 1
+
+        # Remove any unversioned objects left below the prefix as well.
+        paginator = s3_client.get_paginator("list_objects_v2")
+        for page in paginator.paginate(Bucket=bucket, Prefix=object_prefix):
+            for item in page.get("Contents", []):
+                key = item.get("Key")
+                if not key:
+                    continue
+                s3_client.delete_object(Bucket=bucket, Key=key)
+                deleted += 1
+    except (BotoCoreError, ClientError) as error:
+        raise SkillBundleError("Unable to delete the skill prefix from S3", 502) from error
+    return {
+        "skill_name": bucket_name,
+        "destination_uri": destination_uri,
+        "deleted_versions": deleted,
+    }
+
+
 def validate_version_zip(table_bucket_arn: str, filename: str, content: bytes) -> None:
     """Validate a complete skill ZIP before storing the original bytes."""
     if not filename.lower().endswith(".zip") or not content or len(content) > MAX_ZIP_BYTES:

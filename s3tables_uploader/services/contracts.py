@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from botocore.exceptions import ClientError
+from botocore.exceptions import BotoCoreError, ClientError
 
 from ..config import Settings
 from ..core.constants import S3_SSE
@@ -24,6 +24,53 @@ class ContractService:
     def _key(self, table_bucket_arn: str, namespace: str, table: str) -> str:
         scope = scope_key(table_bucket_arn, namespace)
         return f"{self._settings.contract_prefix}/{scope}/{table}.json"
+
+    def purge_namespace(self, table_bucket_arn: str, namespace: str) -> int:
+        """Permanently remove every contract version for one namespace."""
+        scope = scope_key(table_bucket_arn, namespace)
+        prefix = f"{self._settings.contract_prefix}/{scope}/"
+        deleted = 0
+        try:
+            paginator = self._s3.get_paginator("list_object_versions")
+            for page in paginator.paginate(
+                Bucket=self._settings.contract_bucket, Prefix=prefix
+            ):
+                for item in [
+                    *page.get("Versions", []),
+                    *page.get("DeleteMarkers", []),
+                ]:
+                    key = item.get("Key")
+                    version_id = item.get("VersionId")
+                    if not key or not version_id:
+                        continue
+                    self._s3.delete_object(
+                        Bucket=self._settings.contract_bucket,
+                        Key=key,
+                        VersionId=version_id,
+                    )
+                    deleted += 1
+
+            # Cover unversioned objects and buckets whose versioning was
+            # suspended after contracts had already been written.
+            paginator = self._s3.get_paginator("list_objects_v2")
+            for page in paginator.paginate(
+                Bucket=self._settings.contract_bucket, Prefix=prefix
+            ):
+                for item in page.get("Contents", []):
+                    key = item.get("Key")
+                    if not key:
+                        continue
+                    self._s3.delete_object(
+                        Bucket=self._settings.contract_bucket, Key=key
+                    )
+                    deleted += 1
+        except (BotoCoreError, ClientError) as error:
+            raise ControlPlaneError(
+                f"Unable to purge uploader contracts for namespace {namespace!r}",
+                status_code=503,
+                error_code="CONTRACT_DELETE_FAILED",
+            ) from error
+        return deleted
 
     def is_uploader_managed(self, table_bucket_arn: str, namespace: str, table: str) -> bool:
         try:

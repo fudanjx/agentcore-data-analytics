@@ -223,6 +223,14 @@ via `store.get_status(job_id)` directly — no cross-writer race.
   API never surfaces other apps' buckets in the same account. Tag lookup is
   cached per-process for 6 hours; a one-shot `POST /api/v3/buckets/cache/purge`
   clears it after an out-of-band re-tag.
+- Bucket and namespace deletion is administrator-only. Namespace deletion
+  requires `confirm: true` and still deletes only an empty namespace.
+  `DELETE /api/v3/buckets` requires `force: true`: it preflights every table
+  lock, deletes every table (including non-uploader tables), permanently
+  purges uploader contracts, deletes each namespace, and then deletes the
+  bucket. `delete_skill_prefix: true` additionally purges every object version
+  and delete marker below `skills/<table-bucket-name>/`; `false` preserves that
+  prefix. Canonical S3 audit-history objects are always retained.
 - Audit history reads only the canonical scoped prefix
   `<history_bucket>/<history_prefix>/<scope=hash(arn|ns)>/<table>/`. Legacy
   fallbacks were dropped; `scripts/migrate_legacy_audit.py` moves any tail

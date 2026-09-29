@@ -115,8 +115,9 @@ The source exposes `/api/v3/skills/versions` for native S3 versions of
 A ZIP may contain `SKILL.md` at its root or inside one enclosing folder. Each
 upload uses the same object key and may include an optional description stored
 in S3 user metadata. The browser lists the 10 newest S3 versions with their
-upload times and descriptions, and supports version-specific download. Skill
-ZIP versions cannot be deleted through the application.
+upload times and descriptions, and supports version-specific download. A
+force bucket deletion can optionally purge the bucket's entire skill prefix,
+including every S3 version and delete marker.
 The destination bucket must have S3 versioning enabled. Older loose skill files remain
 available through the compatibility `/api/skills/files` routes. These snapshots
 are archives; the consuming runtime does not automatically unpack or activate
@@ -127,6 +128,15 @@ objects, and checking or enabling versioning on the configured bucket. The
 worker, dispatcher, and Glue roles have no skill-bundle access.
 The `S3_UPLOADER_SKILL_BUNDLE_*` variables are the only supported runtime
 configuration; legacy `PILOT_SKILL_BUNDLE_*` variables are ignored.
+
+For a PRD service created manually in the AWS console, the API ECS task role
+must include `s3tables:DeleteTable`, `s3tables:DeleteNamespace`, and
+`s3tables:DeleteTableBucket`. It also needs prefix-scoped `s3:ListBucket` and
+`s3:ListBucketVersions`, plus `s3:DeleteObject` and
+`s3:DeleteObjectVersion`, for both the contract prefix and configured skill
+prefix. Do not grant deletes on the audit-history prefix; force bucket deletion
+retains those records. The execution role is unchanged because these are API
+runtime permissions, not image-pull permissions.
 
 ## Build, test, and blue-green release
 
@@ -176,6 +186,7 @@ completion from an ECS task lifecycle.
 | `/api/dev/identity-profiles` | GET | Pilot identity-emulation choices only. |
 | `/api/buckets` | GET | Authorised S3 Tables buckets. |
 | `/api/buckets` | POST | Admin creates table bucket: `{name}`. |
+| `/api/v3/buckets` | DELETE | Admin force-deletes a bucket and contents: `{table_bucket_arn, force:true, delete_skill_prefix}`. |
 | `/api/namespaces` | GET/POST | List or admin-create namespace. |
 | `/api/tables` | GET/DELETE | List cards or admin-delete managed table. |
 | `/api/upload-history` | GET | Per-table audit/history projection. |

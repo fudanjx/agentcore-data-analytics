@@ -323,6 +323,13 @@ APP_TAGS = {
   create.
 - `POST /api/v3/buckets/cache/purge` (admin) clears the cache on demand
   for the rare case an ARN was re-tagged in the AWS console.
+- `DELETE /api/v3/buckets/namespaces` is admin-only, requires `confirm: true`,
+  and relies on S3 Tables to reject a non-empty namespace.
+- `DELETE /api/v3/buckets` is admin-only and accepts only `force: true`. It
+  preflights all table locks, deletes all tables, permanently purges contracts,
+  deletes all namespaces, and then deletes the bucket. The caller chooses
+  whether `delete_skill_prefix` also permanently purges the bucket's skill
+  object versions and delete markers. S3 audit-history objects are retained.
 
 To add a new tag or change the app filter, edit `core/constants.py`;
 every service reads from that constant.
