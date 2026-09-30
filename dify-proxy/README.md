@@ -30,7 +30,7 @@ Write request:
 ```json
 {
   "memory_id": "memory_dify-kpdzNRHDzW",
-  "actor_id": "stable-dify-user-id",
+  "user_id": "person@example.com",
   "session_id": "stable-conversation-id",
   "user_text": "What the user said",
   "assistant_text": "What the assistant answered"
@@ -43,11 +43,19 @@ Retrieve request:
 {
   "memory_id": "memory_dify-kpdzNRHDzW",
   "strategy_id": "semantic_builtin_peexk-ogfGK55koq",
-  "actor_id": "stable-dify-user-id",
+  "user_id": "person@example.com",
   "query": "Current user question",
   "top_k": 5
 }
 ```
+
+`user_id` may be an email address. Existing clients may instead send
+`actor_id`; when that value is an email or otherwise contains characters that
+AgentCore actor IDs do not support, the proxy applies the same deterministic
+UUID conversion used for `user_id` and chat messages. An already-safe
+`actor_id`, such as `actor-1`, remains unchanged. Provide exactly one of
+`user_id` or `actor_id`. Identity matching is case-sensitive, so callers should
+use one canonical email casing consistently.
 
 Grant the proxy service-account role only the memories it is allowed to serve:
 

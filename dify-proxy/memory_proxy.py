@@ -3,6 +3,7 @@
 import hmac
 import logging
 import os
+import re
 import uuid
 from datetime import datetime, timezone
 from typing import Annotated, Any
@@ -11,7 +12,7 @@ import boto3
 import botocore.exceptions
 from fastapi import APIRouter, Depends, Header, HTTPException
 from fastapi.concurrency import run_in_threadpool
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 logger = logging.getLogger("agentcore-dify-proxy.memory")
 
@@ -24,21 +25,64 @@ router = APIRouter(
 )
 
 _memory_client = None
+_AGENTCORE_ACTOR_ID_RE = re.compile(
+    r"^[a-zA-Z0-9][a-zA-Z0-9-_/]*(?::[a-zA-Z0-9-_/]+)*[a-zA-Z0-9-_/]*$"
+)
 
 
-class MemoryWriteRequest(BaseModel):
+def stable_agentcore_user_id(value: object) -> str:
+    """Return a canonical UUID, deterministically mapping non-UUID identities."""
+    identity = str(value).strip()
+    if not identity:
+        raise ValueError("User identity cannot be empty")
+    try:
+        return str(uuid.UUID(identity))
+    except (AttributeError, TypeError, ValueError):
+        return str(
+            uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"agentcore-dify-user:{identity}",
+            )
+        )
+
+
+class MemoryActorRequest(BaseModel):
+    actor_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+    )
+    user_id: str | None = Field(default=None, min_length=1, max_length=255)
+
+    @model_validator(mode="after")
+    def require_one_identity(self):
+        if (self.actor_id is None) == (self.user_id is None):
+            raise ValueError("Provide exactly one of actor_id or user_id")
+        identity = self.actor_id if self.actor_id is not None else self.user_id
+        if not identity or not identity.strip():
+            raise ValueError("User identity cannot be blank")
+        return self
+
+    def resolved_actor_id(self) -> str:
+        if self.actor_id is not None:
+            actor_id = self.actor_id.strip()
+            if _AGENTCORE_ACTOR_ID_RE.fullmatch(actor_id):
+                return actor_id
+            return stable_agentcore_user_id(actor_id)
+        return stable_agentcore_user_id(self.user_id)
+
+
+class MemoryWriteRequest(MemoryActorRequest):
     memory_id: str = Field(min_length=12, max_length=2048)
-    actor_id: str = Field(min_length=1, max_length=255)
     session_id: str = Field(min_length=1, max_length=100)
     user_text: str = Field(min_length=1, max_length=100_000)
     assistant_text: str = Field(min_length=1, max_length=100_000)
     client_token: str | None = Field(default=None, min_length=1, max_length=256)
 
 
-class MemoryRetrieveRequest(BaseModel):
+class MemoryRetrieveRequest(MemoryActorRequest):
     memory_id: str = Field(min_length=12, max_length=2048)
     strategy_id: str = Field(min_length=1, max_length=100)
-    actor_id: str = Field(min_length=1, max_length=255)
     query: str = Field(min_length=1, max_length=10_000)
     top_k: int = Field(default=5, ge=1, le=100)
 
@@ -82,10 +126,11 @@ def _agentcore_error(operation: str, error: Exception) -> HTTPException:
 
 
 def _write_memory(payload: MemoryWriteRequest) -> dict[str, Any]:
+    actor_id = payload.resolved_actor_id()
     try:
         result = get_memory_client().create_event(
             memoryId=payload.memory_id,
-            actorId=payload.actor_id,
+            actorId=actor_id,
             sessionId=payload.session_id,
             eventTimestamp=datetime.now(timezone.utc),
             payload=[
@@ -115,8 +160,9 @@ def _write_memory(payload: MemoryWriteRequest) -> dict[str, Any]:
 
 
 def _retrieve_memory(payload: MemoryRetrieveRequest) -> dict[str, Any]:
+    actor_id = payload.resolved_actor_id()
     namespace = (
-        f"/strategies/{payload.strategy_id}/actors/{payload.actor_id}/"
+        f"/strategies/{payload.strategy_id}/actors/{actor_id}/"
     )
     try:
         result = get_memory_client().retrieve_memory_records(
