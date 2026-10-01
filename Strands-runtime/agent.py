@@ -19,6 +19,7 @@ from strands.models import BedrockModel, CacheConfig, CacheToolsConfig
 from strands.tools.mcp import MCPClient
 
 import code_interpreter
+import document_encryption
 import gateway_proxy
 import memory
 import skills_sync
@@ -116,6 +117,7 @@ class InvocationRequest:
     model_slug: str
     stream: bool
     user_gateway_permissions: list[str]
+    document_encryptions: list[dict[str, str]]
 
     @classmethod
     def from_payload(cls, payload: dict, context: Any = None) -> "InvocationRequest":
@@ -140,6 +142,8 @@ class InvocationRequest:
                     "content": item.get("content", ""),
                 }
             )
+
+        normalized, document_encryptions = document_encryption.extract_from_messages(normalized)
 
         context_session = getattr(context, "session_id", None) if context else None
         session_id = str(
@@ -198,7 +202,8 @@ class InvocationRequest:
                 if "stream" in payload
                 else has_messages
             ),
-            user_gateway_permissions=user_gateway_permissions
+            user_gateway_permissions=user_gateway_permissions,
+            document_encryptions=document_encryptions,
         )
 
 
@@ -407,6 +412,17 @@ def _prepare(request: InvocationRequest):
 
         document_guidance = """When <document_input> tags are present:
 Each <document_input> provides the uploaded file’s original filename and S3 URL. Use Code Interpreter to download these files"""
+        encryption_enabled = code_interpreter.document_decryption_enabled()
+        if request.document_encryptions and not encryption_enabled:
+            raise RuntimeError(
+                "Encrypted documents were supplied, but "
+                "CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured"
+            )
+        encryption_guidance = (
+            """Encrypted files use their stored filename in <document_input>. Call stage_encrypted_document with that exact stored filename and URL before analysis, then use the returned plaintext sandbox path. Never print or expose encryption metadata."""
+            if request.document_encryptions and encryption_enabled
+            else ""
+        )
         interpreter_enabled = (
             ENABLE_CODE_INTERPRETER and code_interpreter.CODE_INTERPRETER_ID
         )
@@ -415,6 +431,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
             for part in (
                 system_prompt.load(),
                 document_guidance,
+                encryption_guidance,
                 code_interpreter.system_guidance() if interpreter_enabled else "",
             )
             if part
@@ -446,6 +463,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                     skill_resource_uri=(
                         skills_sync.skill_resource_s3_location if skills_enabled else None
                     ),
+                    encrypted_documents=request.document_encryptions,
                 )
             )
         custom_gateway_headers = {

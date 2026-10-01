@@ -53,6 +53,12 @@ class AgentGuidanceTests(unittest.TestCase):
         agent_source = (RUNTIME_DIR / "agent.py").read_text(encoding="utf-8")
         self.assertIn("code_interpreter.system_guidance()", agent_source)
 
+    def test_encryption_guidance_is_request_and_configuration_scoped(self) -> None:
+        agent_source = (RUNTIME_DIR / "agent.py").read_text(encoding="utf-8")
+        self.assertIn("document_decryption_enabled()", agent_source)
+        self.assertIn("request.document_encryptions and encryption_enabled", agent_source)
+        self.assertIn("request.document_encryptions and not encryption_enabled", agent_source)
+
 
 if __name__ == "__main__":
     unittest.main()

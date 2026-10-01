@@ -5,10 +5,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import os
 import sys
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[1]
@@ -141,6 +143,61 @@ class CodeInterpreterWrapperTests(unittest.TestCase):
             self.module._tool_result_is_error(
                 json.dumps({"contract_version": 1, "ok": False, "summary": "failed"})
             )
+        )
+
+    def test_encrypted_document_download_accepts_only_s3_or_https(self) -> None:
+        https = self.module._document_download_command(
+            "https://files.example.test/document", "/tmp/document.encrypted"
+        )
+        s3 = self.module._document_download_command(
+            "s3://private-bucket/document", "/tmp/document.encrypted"
+        )
+
+        self.assertIn("curl --fail", https)
+        self.assertIn("aws s3 cp", s3)
+        with self.assertRaises(ValueError):
+            self.module._document_download_command(
+                "http://169.254.169.254/latest/meta-data", "/tmp/document.encrypted"
+            )
+
+    def test_encrypted_document_decryption_code_validates_envelope(self) -> None:
+        code = self.module._document_decryption_code(
+            "/tmp/source.encrypted", "/tmp/contract.pdf", b"k" * 32
+        )
+
+        self.assertIn("b'CLARAENC'", code)
+        self.assertIn("AESGCM(key).decrypt", code)
+        self.assertIn("raw[21:]", code)
+        self.assertIn("os.remove(source)", code)
+        self.assertNotIn((b"k" * 32).decode("ascii"), code)
+
+    def test_decryption_tool_requires_private_key_configuration(self) -> None:
+        metadata = [
+            {
+                "stored_name": "clara-123-contract.pdf",
+                "original_name": "contract.pdf",
+                "wrapped_key": "wrapped",
+            }
+        ]
+        with patch.dict(os.environ, {"CLARA_FILE_DECRYPTION_PRIVATE_KEY": ""}):
+            disabled_tools = self.module.build_tools(
+                "session", encrypted_documents=metadata
+            )
+            self.assertFalse(self.module.document_decryption_enabled())
+
+        with patch.dict(
+            os.environ, {"CLARA_FILE_DECRYPTION_PRIVATE_KEY": "configured"}
+        ):
+            enabled_tools = self.module.build_tools(
+                "session", encrypted_documents=metadata
+            )
+            self.assertTrue(self.module.document_decryption_enabled())
+
+        self.assertNotIn(
+            "stage_encrypted_document", [tool.__name__ for tool in disabled_tools]
+        )
+        self.assertIn(
+            "stage_encrypted_document", [tool.__name__ for tool in enabled_tools]
         )
 
 

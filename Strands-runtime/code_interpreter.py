@@ -1,6 +1,7 @@
 """Request-scoped AgentCore Code Interpreter tools for Strands."""
 
 import asyncio
+import base64
 import hashlib
 import json
 import logging
@@ -11,6 +12,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import boto3
 import code_interpreter_result
@@ -206,9 +208,89 @@ def _zip_member_extract_code(archive_path: str, member_path: str, destination: s
     )
 
 
+def _unwrap_document_key(wrapped_key: str) -> bytes:
+    private_key_pem = (
+        os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "")
+        .replace("\\n", "\n")
+        .strip()
+    )
+    if not private_key_pem:
+        raise RuntimeError("CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured")
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode("utf-8"), password=None
+        )
+        data_key = private_key.decrypt(
+            base64.b64decode(wrapped_key, validate=True),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+    except Exception as error:
+        raise RuntimeError("Unable to unwrap the encrypted document key") from error
+    if len(data_key) != 32:
+        raise RuntimeError("Unwrapped document key has an invalid length")
+    return data_key
+
+
+def document_decryption_enabled() -> bool:
+    """Return whether this Runtime is configured to decrypt CLARA documents."""
+    return bool(os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "").strip())
+
+
+def _document_destination(stored_name: str, original_name: str) -> tuple[str, str]:
+    digest = hashlib.sha256(stored_name.encode("utf-8")).hexdigest()[:12]
+    safe_name = re.sub(r"[^A-Za-z0-9._-]", "_", Path(original_name).name)[:160]
+    plaintext = f"/tmp/clara-{digest}-{safe_name or 'document.bin'}"
+    return f"{plaintext}.encrypted", plaintext
+
+
+def _document_download_command(source_url: str, destination: str) -> str:
+    parsed = urlparse(source_url)
+    if parsed.scheme == "s3" and parsed.netloc and parsed.path:
+        return f"aws s3 cp --only-show-errors {shlex.quote(source_url)} {shlex.quote(destination)}"
+    if parsed.scheme == "https" and parsed.netloc:
+        return (
+            "curl --fail --location --silent --show-error "
+            f"--output {shlex.quote(destination)} {shlex.quote(source_url)}"
+        )
+    raise ValueError("Encrypted document URL must use s3:// or https://")
+
+
+def _document_decryption_code(
+    encrypted_path: str, plaintext_path: str, data_key: bytes
+) -> str:
+    encoded_key = base64.b64encode(data_key).decode("ascii")
+    return (
+        "import base64, json, os\n"
+        "from cryptography.hazmat.primitives.ciphers.aead import AESGCM\n"
+        f"source = {json.dumps(encrypted_path)}\n"
+        f"destination = {json.dumps(plaintext_path)}\n"
+        f"key = base64.b64decode({json.dumps(encoded_key)})\n"
+        "try:\n"
+        "    raw = open(source, 'rb').read()\n"
+        "    if len(raw) < 37 or raw[:8] != b'CLARAENC' or raw[8] != 1:\n"
+        "        raise ValueError('invalid encrypted document envelope')\n"
+        "    header, nonce = raw[:21], raw[9:21]\n"
+        "    plaintext = AESGCM(key).decrypt(nonce, raw[21:], header)\n"
+        "    with open(destination, 'xb') as output:\n"
+        "        output.write(plaintext)\n"
+        "    print('AGENTCORE_RESULT_JSON=' + json.dumps({'ok': True, 'summary': 'Encrypted document staged at ' + destination}))\n"
+        "finally:\n"
+        "    if os.path.exists(source):\n"
+        "        os.remove(source)\n"
+    )
+
+
 def build_tools(
     session_id: str,
     skill_resource_uri: Callable[[str, str], str | tuple[str, str | None]] | None = None,
+    encrypted_documents: list[dict[str, str]] | None = None,
 ) -> list:
     """Create Strands tools bound to one managed interpreter session."""
 
@@ -245,6 +327,55 @@ def build_tools(
         return await _invoke_tool(session_id, "executeCommand", {"command": command})
 
     tools = [execute_code, execute_command]
+    encrypted_by_name = (
+        {item["stored_name"]: item for item in (encrypted_documents or [])}
+        if document_decryption_enabled()
+        else {}
+    )
+    if encrypted_by_name:
+
+        @tool(
+            name="stage_encrypted_document",
+            description=(
+                "Download and decrypt one request-provided encrypted document into "
+                "this request's managed Code Interpreter session. Pass the exact "
+                "stored filename and URL from its document_input tag. The tool returns "
+                "the plaintext sandbox path; encryption keys are never model-visible."
+            ),
+        )
+        async def stage_encrypted_document(stored_filename: str, source_url: str) -> str:
+            metadata = encrypted_by_name.get(stored_filename)
+            if metadata is None:
+                return "No encryption metadata exists for that stored filename"
+            encrypted_path, plaintext_path = _document_destination(
+                stored_filename, metadata["original_name"]
+            )
+            try:
+                command = _document_download_command(source_url, encrypted_path)
+                data_key = _unwrap_document_key(metadata["wrapped_key"])
+            except (RuntimeError, ValueError) as error:
+                return f"Unable to stage encrypted document: {error}"
+            downloaded = await _invoke_tool(
+                session_id, "executeCommand", {"command": command}
+            )
+            if _tool_result_is_error(downloaded):
+                return f"Unable to download encrypted document: {downloaded}"
+            decrypted = await _invoke_tool(
+                session_id,
+                "executeCode",
+                {
+                    "language": "python",
+                    "code": _document_decryption_code(
+                        encrypted_path, plaintext_path, data_key
+                    ),
+                },
+            )
+            if _tool_result_is_error(decrypted):
+                return f"Unable to decrypt encrypted document: {decrypted}"
+            return f"Encrypted document staged at {plaintext_path}"
+
+        tools.append(stage_encrypted_document)
+
     if skill_resource_uri is not None:
 
         @tool(

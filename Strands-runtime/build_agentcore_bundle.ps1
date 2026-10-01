@@ -31,6 +31,7 @@ $runtimeFiles = @(
     "bedrock_runtime_openai.py",
     "code_interpreter.py",
     "code_interpreter_result.py",
+    "document_encryption.py",
     "gateway_config.py",
     "gateway_proxy.py",
     "hooks.py",

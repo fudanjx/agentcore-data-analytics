@@ -2,6 +2,7 @@ bedrock-agentcore==1.18.1
 strands-agents==1.53.0
 boto3==1.43.68
 httpx==0.28.1
+cryptography>=44,<47
 mcp==1.29.0
 openai>=2.0,<3.0
 aws-bedrock-token-generator>=1.1,<2.0

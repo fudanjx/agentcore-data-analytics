@@ -100,6 +100,7 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `CODE_INTERPRETER_MAX_RESULT_CHARS` | `200000` | Legacy-mode raw tool-result context limit; ignored in semantic mode |
 | `ENABLE_TOOL_DETAILS` | `false` | Include bounded tool/skill inputs and results in streamed `agent_step` events |
 | `TOOL_DETAIL_MAX_CHARS` | `200000` | Maximum serialized characters exposed for each streamed tool input or result, constrained to 1,000-1,000,000 |
+| `CLARA_FILE_DECRYPTION_PRIVATE_KEY` | Empty | RSA private key used only to unwrap per-file CLARA AES keys; supply it from the deployment secret store |
 | `MEMORY_ID` | Empty | AgentCore Memory resource; empty or unset disables Memory |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
 | `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
