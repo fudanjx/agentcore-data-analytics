@@ -142,6 +142,7 @@ The initial labels are:
 | Claude Sonnet 4.6 | `bedrock-claude-sonnet-4.6-global-standard-ap-southeast-1` | Global inference, called from `ap-southeast-1` |
 | Claude Opus 4.7 | `bedrock-claude-opus-4.7-global-standard-ap-southeast-1` | Global inference, called from `ap-southeast-1` |
 | Claude Haiku 4.5 | `bedrock-claude-haiku-4.5-global-standard-ap-southeast-1` | Global inference, called from `ap-southeast-1` |
+| OpenAI GPT-5.6 Luna | `bedrock-openai-gpt-5.6-luna-global-standard-ap-southeast-1` | Global inference, called from `ap-southeast-1` |
 | OpenAI GPT-5.6 Sol | `bedrock-openai-gpt-5.6-sol-standard-us-east-1` | In-region inference in `us-east-1` |
 | OpenAI GPT-5.6 Terra | `bedrock-openai-gpt-5.6-terra-standard-us-east-1` | In-region inference in `us-east-1` |
 
@@ -289,6 +290,22 @@ VALUES
         TRUE
     ),
     (
+        'bedrock-openai-gpt-5.6-luna-global-standard-ap-southeast-1',
+        'openai',
+        'GPT-5.6 Luna',
+        'openai.gpt-5.6-luna',
+        'global.openai.gpt-5.6-luna',
+        'bedrock-runtime',
+        'ap-southeast-1',
+        'global',
+        'standard',
+        'USD',
+        0.200000, 1.200000, 0.020000, NULL, 0.250000, NULL,
+        272000, 0.400000, 1.800000, 0.040000, 0.500000,
+        'https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-luna.html',
+        TRUE
+    ),
+    (
         'bedrock-openai-gpt-5.6-sol-standard-us-east-1',
         'openai',
         'GPT-5.6 Sol',
@@ -383,10 +400,10 @@ FROM model_pricing
 ORDER BY pricing_label;
 ```
 
-The Claude rows use Global cross-Region inference with `ap-southeast-1` as the source/calling region. Amazon Bedrock prices an inference-profile request from its source region, so only the source regions actually used by a runtime need distinct pricing labels. Global inference is currently available for these Claude models from Singapore even though direct in-region inference is not.
+The Claude and GPT-5.6 Luna global rows use Global cross-Region inference with `ap-southeast-1` as the source/calling region. Amazon Bedrock prices an inference-profile request from its source region, so only the source regions actually used by a runtime need distinct pricing labels. Global inference is currently available for these models from Singapore even though direct in-region inference is not.
 
-GPT-5.6 Sol and Terra are OpenAI models offered through Amazon Bedrock, not the ChatGPT product. They use the `bedrock-mantle` endpoint. GPT-5.6 is not currently available from `ap-southeast-1`, so the seed data assumes `us-east-1`; the runtime that invokes GPT must use that region and the matching label. Sol and Terra have separate rates above 272,000 input/context tokens, which are included in the long-context columns.
+GPT-5.6 Sol, Terra, and Luna are OpenAI models offered through Amazon Bedrock, not the ChatGPT product. The Luna row uses the `bedrock-runtime` endpoint and the `global.openai.gpt-5.6-luna` inference profile from `ap-southeast-1`. The Sol and Terra seed rows use the `bedrock-mantle` endpoint for in-region inference in `us-east-1`; runtimes invoking those rows must use that region and the matching label. All three models have separate rates above 272,000 input/context tokens, which are included in the long-context columns.
 
-Rates and availability above were verified on 2026-08-21 from the [Amazon Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/), the model cards for [Claude Sonnet 4.6](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-6.html), [Claude Opus 4.7](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-7.html), and [Claude Haiku 4.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html), and the [GPT-5.6 availability announcement](https://aws.amazon.com/about-aws/whats-new/2026/07/openai-gpt-sol-terra/). AWS can change prices or regional availability, so update the rows before deploying if the AWS pricing page changes.
+Rates and availability above were verified on 2026-10-02 from the [Amazon Bedrock pricing page](https://aws.amazon.com/bedrock/pricing/), the model cards for [Claude Sonnet 4.6](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-sonnet-4-6.html), [Claude Opus 4.7](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-opus-4-7.html), [Claude Haiku 4.5](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-anthropic-claude-haiku-4-5.html), and [GPT-5.6 Luna](https://docs.aws.amazon.com/bedrock/latest/userguide/model-card-openai-gpt-56-luna.html), and the [GPT-5.6 availability announcement](https://aws.amazon.com/about-aws/whats-new/2026/07/openai-gpt-sol-terra/). AWS can change prices or regional availability, so update the rows before deploying if the AWS pricing page changes.
 
 The proxy selects the row whose `pricing_label` matches the Runtime's top-level `pricing_label`. It uses the reported cache TTL to choose the 5-minute, 30-minute, or 1-hour cache-write rate. When `total_input_tokens` is greater than `long_context_threshold_tokens`, it uses all four long-context rates for that invocation. Pricing rows and missing-label results are cached independently in each proxy process for `MODEL_PRICING_CACHE_TTL_SECONDS`; restart the pod or set the TTL to `0` when an immediate database update is required.
