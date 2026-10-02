@@ -14,52 +14,49 @@ Use the `procedure` filters and canonical date in `references/data-ontology.yaml
 
 Use the typed `operation_date` field directly for date filtering.
 
-## Critical: episode vs procedure count, and the identifiers
+## Critical: episode vs procedure count, and the two case identifiers
 
 **Clarify which the user wants before writing — they give very different numbers:**
 
 ```sql
 COUNT(*)                              -- procedures (each row = one procedure)
-COUNT(DISTINCT COALESCE("Adm_CSN","case_no"))             -- episodes populated
+COUNT(DISTINCT "case_no")             -- candidate case count where case_no is populated
 ```
 
-**`Case_No` is populated across both eras here** — unlike admission/discharge, where `Case_No` is SAP-only. Don't use `Case_No`'s presence/absence to detect era for this table.
-
-**`Adm_CSN` / `Surgery_CSN` are NGEMR-only** — they exist only when the procedure has a linked NGEMR encounter (day-surgery/walk-in procedures with no inpatient admission commonly have neither). When both are populated they don't always agree: `Adm_CSN` is the admission encounter the procedure is tied to, `Surgery_CSN` is the specific procedure/OT encounter itself (a patient's admission can cover several procedure encounters, or a procedure encounter can stand alone with no admission link). Use `Surgery_CSN` to identify the procedure encounter itself; use `Adm_CSN` to join back to `admission`/`inflight`.
+**Episode-level counting requires an explicit definition.** The live table has no physical `case_identifier` column. Use `COUNT(*)` for procedures; use a validated, period-specific case expression only after checking identifier completeness.
 
 ## Key columns
 
 | Column | Type | Meaning |
 |--------|------|---------|
-| `Case_No` | TEXT | Case identifier, populated across both eras — see caution above. |
-| `Adm_CSN` | TEXT | NGEMR admission-encounter identifier — join key back to `admission`. |
-| `Surgery_CSN` | TEXT | NGEMR procedure/OT-encounter identifier — identifies this specific procedure encounter. Can differ from `Adm_CSN` when both are present. |
-| `C` (→ `record_type` in the DB) | TEXT | Same ETL mismatch as admission/inflight: really the SAP case-number suffix letter, not a category — concatenate with `Case_No` for the full SAP case number. |
+| `Case_No` | TEXT | Episode identifier; see the ontology for candidate joins and completeness cautions. |
+| `PAT_ENC_CSN_ID` | TEXT | NGEMR encounter identifier; see the ontology for candidate joins and completeness cautions. |
 | `operation_date` | TIMESTAMP | Date of procedure |
 | `OT_Begin_Date` | TIMESTAMP | OT session start date |
 | `OT_Begin_Time` | TIME | OT session start time |
 | `OT_End_Date` | TIMESTAMP | OT session end date |
 | `OT_End_Time` | TIME | OT session end time |
-| `Adm_Type` | TEXT | Determines OP vs IP segmentation — see below. Rows with no value, or a code outside both buckets, are "Unclassified." |
+| `Adm_Type` | TEXT | Determines OP vs IP segmentation — see below |
 | `Treatment_OU` | TEXT | Operating theatre location |
 | `Treatment_Rm` | TEXT | Specific room name |
-| `OpTable` | TEXT | Raw OT table code, e.g. `1B`, `2C`, `M1`, `MSP` — see transform below |
-| `Op_Code` | TEXT | Raw procedure/operation code |
-| `Surg_Cd_Description` | TEXT | Description tied to `Op_Code` |
+| `OpTable` | TEXT | Raw OT table number/text — see transform below |
 | `Surgical_Visit_Type` | TEXT | `Elective Oper`, `Emergency Oper`, etc. |
+| `Surgery_Case_Type` | TEXT | `Elective` / `Emergency` |
 | `Sub-Specialty` | TEXT | Surgical sub-specialty (always double-quote — hyphen in name) |
 | `Sub-Specialty_Final` | TEXT (derived) | Harmonized sub-specialty — use instead of raw `Sub-Specialty` |
 | `Clinical_Dept` | TEXT | Department |
 | `Surgeon` | TEXT | Primary surgeon name |
 | `Surgeon_MCR_No` | TEXT | Primary surgeon MCR |
 | `Anaesthetist` | TEXT | Anaesthetist name |
-| `Anaesthetist_MCR_No` | TEXT | Anaesthetist MCR |
-| `ASA_Score` | TEXT | ASA physical status, raw format `'ASA 1'`–`'ASA 3'` (space-separated, not bare digits). Frequently null. |
+| `ASA_Score` | TEXT | ASA physical status (1–5) |
+| `Proc_Code` | TEXT | NGEMR procedure code |
+| `Proc_Description` | TEXT | NGEMR procedure description |
+| `TOSP_Level_Grouping` | TEXT | Surgical complexity level |
 | `DRG_Code` | TEXT | DRG code |
 | `Cls` | TEXT | Raw patient class code — resolve through `pt_class_abc` (see `references/pt-class-lookup.md`) |
 | `Pat_Class` | TEXT (derived) | `Cls` → `Class_abc` → collapsed to `'Private'`/`'Subsidized'` — see below |
-| `Surgery_Patient_Class` | TEXT | Separate raw NGEMR-only field (`DS`, `Inpatient`, `SDA`, `Outpatient`, `DS 23/AS 23`) — not used by production reporting (which uses `Adm_Type` instead); null whenever `Adm_CSN`/`Surgery_CSN` are null. |
 | `Age` | TEXT | Patient age |
+| `Proc_Row_Num` | TEXT | Row within a multi-procedure case (1 = primary) |
 | `cnt` | INTEGER | Always 1 |
 
 ## OpTable transform
@@ -86,36 +83,12 @@ END AS "Pat_Class"
 
 ## Sub-Specialty_Final harmonization
 
-**Three stages, straight from the production code:**
+| Raw `Sub-Specialty` | Mapped `Sub-Specialty_Final` |
+|---|---|
+| `Alex Fast General Surgery`, `Alex Chronic General Surgery` | `Alex General Surgery` |
+| `Alex HA General Orthopaedic`, `Alex HA Adult Reconstruction` | `Alex Orthopaedic` |
 
-| Raw `Sub-Specialty` (as stored) | Standardized (Alex-prefix normalized) | `Sub-Specialty_Final` |
-|---|---|---|
-| `Chronic General Surgery` | `Alex Chronic General Surgery` | `Alex General Surgery` |
-| `ALEX Chronic General Surgery` | `Alex Chronic General Surgery` | `Alex General Surgery` |
-| `alex chronic general surgery` | `Alex Chronic General Surgery` | `Alex General Surgery` |
-| `Fast General Surgery` | `Alex Fast General Surgery` | `Alex General Surgery` |
-| `HA General Orthopaedic` | `Alex HA General Orthopaedic` | `Alex Orthopaedic` |
-| `HA Adult Reconstruction` | `Alex HA Adult Reconstruction` | `Alex Orthopaedic` |
-| `HA Urology` (any other value) | `Alex HA Urology` | `Alex HA Urology` (passes through unchanged) |
-
-```sql
--- Stage 1: standardize casing/prefix
-CASE WHEN "Sub-Specialty" ~* '^alex\s*'
-       THEN regexp_replace("Sub-Specialty", '^alex\s*', 'Alex ', 'i')
-     ELSE 'Alex ' || "Sub-Specialty"
-END AS sub_specialty_standardized
-
--- Stage 2: collapse to Sub-Specialty_Final
-CASE
-  WHEN sub_specialty_standardized IN ('Alex Fast General Surgery', 'Alex Chronic General Surgery')
-    THEN 'Alex General Surgery'
-  WHEN sub_specialty_standardized IN ('Alex HA General Orthopaedic', 'Alex HA Adult Reconstruction')
-    THEN 'Alex Orthopaedic'
-  ELSE sub_specialty_standardized
-END AS "Sub-Specialty_Final"
-```
-
-Note: the source also has a third collapse rule (`Alex Fast Medicine`/`Alex Chronic` -> `Alex Fast Med/Chronic`) commented out -- not currently active in production. Don't implement it unless it gets turned on.
+All other values pass through unchanged.
 
 ## Adm_Type segmentation
 
@@ -141,6 +114,12 @@ EXTRACT(EPOCH FROM (
 )) / 60 + 15 AS duration_mins
 ```
 
+## Primary procedure per case
+
+```sql
+WHERE CAST("Proc_Row_Num" AS INT) = 1
+```
+
 ## Example: monthly day surgery procedures
 
 ```sql
@@ -149,7 +128,8 @@ SELECT
   "Clinical_Dept", "Sub-Specialty", "Treatment_OU",
   COUNT(*) AS procedures
 FROM procedure
-WHERE "Adm_Type" IN ('DS','ES','DO')
+WHERE "prelim_flag" = 'N'
+  AND "Adm_Type" IN ('DS','ES','DO')
   AND "operation_date" >= DATE '2024-01-01'
 GROUP BY 1, 2, 3, 4 ORDER BY 1;
 ```
@@ -163,14 +143,13 @@ SELECT
   COUNT(DISTINCT "case_no") AS cases_with_case_no,
   COUNT(*) AS procedures
 FROM procedure
-WHERE UPPER("Treatment_OU") IN ('ALEX DAY SURGERY OT','ALEX MAIN OPERATING THEATRE')
+WHERE "prelim_flag" = 'N'
+  AND UPPER("Treatment_OU") IN ('ALEX DAY SURGERY OT','ALEX MAIN OPERATING THEATRE')
   AND "Adm_Type" NOT IN ('DO','ES')
   AND "operation_date" >= DATE '2024-01-01'
 GROUP BY 1, 2 ORDER BY 1, cases_with_case_no DESC;
 ```
 
-Add `AND "prelim_flag" = 'N'` only if the user explicitly asks to exclude provisional/preliminary records — don't filter on it by default.
-
 ## Joins
 
-Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period. Prefer `Adm_CSN` over `Case_No` when joining to `admission` for NGEMR-era procedures.
+Use the candidate joins in `references/data-ontology.yaml` and validate counts for the requested period.
