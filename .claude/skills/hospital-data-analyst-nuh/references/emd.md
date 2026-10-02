@@ -43,7 +43,12 @@ CASE
 END AS segment
 ```
 
-`NCPUCC` is available only from January 2025; report it as unavailable, not zero, for 2023–2024.
+In S3, `NCPUCC` is available from January 2023, including CY2023 and CY2024
+data backfilled on 2026-09-15. Query and include those rows in S3 ED-attendance
+tables and totals. Never apply the former rule that treated pre-2025 `NCPUCC`
+as unavailable. This backfill does not establish matching RDS coverage; for an
+RDS request, query the requested period and report the observed coverage rather
+than assuming S3/RDS parity.
 
 ## PACS rules
 
@@ -72,6 +77,31 @@ Inspect distinct values and nulls, and verify the resulting groups sum to the
 base-filtered ED attendance. Do not carry forward an undocumented raw
 `ARRIVAL_MODE` code normalisation from older instructions.
 
+## Patient gender and unique patients
+
+Apply these rules to every EMD output format. Use `SEX` in RDS and `sex` in S3:
+
+```sql
+CASE
+  WHEN UPPER(TRIM(CAST("SEX" AS VARCHAR))) = 'M' THEN 'Male'
+  WHEN UPPER(TRIM(CAST("SEX" AS VARCHAR))) = 'F' THEN 'Female'
+  ELSE 'Others'
+END AS gender_group
+```
+
+Map `U`, null, blank, and every unexpected value to `Others`. Require
+`Male + Female + Others = source attendance` at every reported grain.
+
+Use `HRN` in RDS and `hrn` in S3 for a distinct EMD patient count:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use the exact quoted lowercase fields `"sex"` and `"hrn"` for S3. Keep the
+distinct-patient measure separate from row-counted attendance and admissions.
+Do not display individual HRNs.
+
 ## Example: monthly PACS attendance
 
 ```sql
@@ -93,22 +123,28 @@ GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3;
 ```
 
-## Locked benchmarks — NUH RDS and S3 verified
+## Locked benchmarks — unaffected periods
 
 Verified independently against NUH RDS and S3 `emd` on 2026-08-31 using the row-counting rule above,
 without a duplicate-status filter or ID-based deduplication. Monthly roll-ups
-and segment sums reconcile to independent period totals (12 months per calendar
-year and 6 months for H1 2026). These replace the previous ED benchmarks.
+and segment sums reconcile to independent period totals (12 months for CY2025
+and 6 months for H1 2026).
 
-NUH RDS and S3 results match for all periods and segments below, the CY2025
+NUH RDS and S3 results match for the periods and segments below, the CY2025
 admission figures and rates, and the H1-2026 PACS comparison above.
 
 | Period | Adult | Children CE | Children UCC | Total |
 |---|---:|---:|---:|---:|
-| CY2023 | 107,285 | 40,624 | unavailable | 147,909 |
-| CY2024 | 109,647 | 39,392 | unavailable | 149,039 |
 | CY2025 | 111,113 | 38,472 | 19,899 | 169,484 |
 | H1 2026 | 55,814 | 19,790 | 10,368 | 85,972 |
+
+The former CY2023 and CY2024 benchmark rows are retired because their totals
+predated the S3 `NCPUCC` backfill and excluded Children UCC. For S3 CY2023 or
+CY2024 reporting, obtain all three segment counts from a fresh query, calculate
+the total from that same result, and reconcile monthly, segment, and grand
+totals. Do not reuse the former totals or label Children UCC unavailable. Do not
+compare those S3 totals with RDS unless RDS coverage has been independently
+verified for the requested period.
 
 CY2025 total ED admissions are 45,520 in both sources. Admission rates use the attendance
 denominator for the same requested segment: Adult 39,337 / 111,113 = 35.40%;

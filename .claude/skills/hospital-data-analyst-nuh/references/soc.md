@@ -10,23 +10,42 @@ rows; no deduplication or additional global filter is required for total SOC
 visits. Use a half-open `SOC_VISIT_DATE` range. For department, cluster, MOH,
 or subspecialty reporting, also read `subspec-mapping.md`.
 
-## Locked CY2023 gender classification
+## Locked gender classification
 
-For CY2023 SOC gender reporting, use the `SEX` field. Map `1` to `Male` and
-`2` to `Female`. Do not substitute another gender-like field for CY2023.
+Apply this rule to every SOC output format. For CY2023, use `SEX`: map `1` to
+`Male` and `2` to `Female`. From CY2024 onward, use `GENDER_DESC`: map `Male`
+and `Female` to the matching output. Map null, blank, `Unknown`,
+`Unclassified`, and every other value to `Others`. Do not use `GENDER` or
+another gender-like field.
 
 ```sql
 CASE
-  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '1' THEN 'Male'
-  WHEN TRIM(CAST("SEX" AS VARCHAR)) = '2' THEN 'Female'
-  ELSE 'Unclassified'
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01'
+   AND TRIM(CAST("SEX" AS VARCHAR)) = '1' THEN 'Male'
+  WHEN "SOC_VISIT_DATE" < DATE '2024-01-01'
+   AND TRIM(CAST("SEX" AS VARCHAR)) = '2' THEN 'Female'
+  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01'
+   AND UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'MALE' THEN 'Male'
+  WHEN "SOC_VISIT_DATE" >= DATE '2024-01-01'
+   AND UPPER(TRIM(CAST("GENDER_DESC" AS VARCHAR))) = 'FEMALE' THEN 'Female'
+  ELSE 'Others'
 END AS gender_group
 ```
 
-Use the exact RDS field `"SEX"`; for S3 use the lowercase physical field
-`"sex"`. This rule is specific to CY2023 and must not be extrapolated to later
-periods. Profile null and unexpected values as `Unclassified`, and require
-`Male + Female + Unclassified = source total` monthly and annually.
+For S3, use the exact quoted lowercase physical fields `"soc_visit_date"`,
+`"sex"`, and `"gender_desc"`. Profile the source values and require
+`Male + Female + Others = source total` monthly and annually.
+
+## Unique patients
+
+Use `HRN` in RDS and `hrn` in S3 for a distinct SOC patient count:
+
+```sql
+COUNT(DISTINCT NULLIF(TRIM(CAST("HRN" AS VARCHAR)), ''))
+```
+
+Use `"hrn"` for S3. Keep this measure separate from SOC workload, which remains
+a source-row count. Do not display individual HRNs.
 
 ## Locked new / repeat classification
 

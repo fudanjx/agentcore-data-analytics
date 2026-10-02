@@ -68,6 +68,24 @@ the user requests a mobile dashboard.
 - If a direct SQL result is too large, use the supported SQL-export operation
   and run the corresponding validator on the complete exported file.
 
+## Chart-ready data contract
+
+Before rendering any chart, create one canonical chart-ready dataset and use it
+for the chart series, KPI cards, summary tables, and narrative calculations.
+
+- Canonicalize every axis and grouping key before matching or joining. A monthly
+  key must use one representation, preferably `YYYY-MM`, throughout the
+  chart-ready dataset and display labels.
+- Aggregate to exactly one numeric value per axis-key and series-key
+  combination. Treat duplicate keys as a QC failure rather than allowing the
+  rendering code to choose or repeat a value.
+- Assert that expected periods and categories occur exactly once, label and
+  series lengths match, and every plotted value is finite and numeric.
+- Reconcile every series sum to its source total and require stacked or grouped
+  components to reconcile to their corresponding overall measure.
+- If the source total is positive, an all-zero rendered series is a QC failure.
+  Do not infer that a blank chart represents zero activity.
+
 ## Fail-visible validation output
 
 Use the validator outcome to select one of these output states:
@@ -94,7 +112,10 @@ Use the validator outcome to select one of these output states:
 1. Re-initialise all data arrays in the active session before building. Do not rely on a prior session.
 2. Build HTML in one active session with list assembly and `json.dumps()` data injection. Do not use Python f-strings to embed JavaScript or `str.replace()` template placeholders.
 3. In JavaScript HTML builders, use single-quoted JavaScript strings around HTML containing double-quoted attributes.
-4. Before delivery, verify the generated script contains data declarations, `Plotly.newPlot`, KPI construction, and table construction; verify it has no empty script block or escaped-quote pattern that breaks HTML attributes.
+4. Before delivery, verify the generated script contains populated data
+   declarations and the expected chart, KPI, and table construction calls for
+   the selected rendering library. Verify it has no empty script block or
+   escaped-quote pattern that breaks HTML attributes.
 5. Do not upload or publish a dashboard unless the user explicitly authorizes that external action.
 
 ## Mobile dashboard rules
@@ -117,3 +138,10 @@ total from the plotted series and require it to equal the KPI and summary-table
 totals. For clinical-department output, require plotted workload plus declared
 non-clinical exclusions to equal source workload, and preserve unmatched OUs as
 `Unmapped` until corrected.
+
+Load the actual delivered HTML in a browser before reporting `QC PASSED`.
+Activate every page or tab and verify that each expected chart has visible
+traces or marks, filters update the related views, and no JavaScript error is
+reported. Rendering verification is mandatory regardless of chart library. If
+the delivered artifact cannot be rendered and inspected, state that limitation
+and do not describe its rendering as verified.
