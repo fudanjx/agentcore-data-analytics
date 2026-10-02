@@ -786,6 +786,19 @@ function filterDeduplicationColumns() {
   if (summary) summary.textContent = visible ? `${visible} of ${controls.length} columns shown. Filtering keeps all selections.` : 'No matching columns. Try another name.';
 }
 
+function filterSanitizationColumns() {
+  const query = ($('sanitization-search')?.value || '').trim().toLowerCase();
+  const controls = [...document.querySelectorAll('[data-manual-encryption-column]')];
+  let visible = 0;
+  controls.forEach(control => {
+    const matches = control.dataset.manualEncryptionColumn.toLowerCase().includes(query);
+    control.closest('.manual-sanitization-choice').hidden = !matches;
+    if (matches) visible += 1;
+  });
+  const summary = $('sanitization-filter-count');
+  if (summary) summary.textContent = visible ? `${visible} of ${controls.length} columns shown. Filtering keeps all selections.` : 'No matching columns. Try another name.';
+}
+
 function updateDeduplicationSelectionControls() {
   const controls = [...document.querySelectorAll('[data-deduplication-column]')].filter(control => !control.disabled);
   const selectedCount = controls.filter(control => control.checked).length;
@@ -949,15 +962,20 @@ function renderPreflight(result, { restoredDeduplicationColumns = [], restoredTy
     const section = document.createElement('section'); section.className = 'sanitization-review';
     const automatic = sanitization.automatic_encrypted_columns || [];
     const candidates = sanitization.manual_encryption_candidates || [];
-    const candidateRows = candidates.length ? `<div class="manual-sanitization-columns">${candidates.map(choice => {
+    const candidateRows = candidates.length ? `<div id="manual-sanitization-candidate-list" class="manual-sanitization-columns">${candidates.map(choice => {
       const samples = choice.samples_masked
         ? 'Examples are masked because this is an automatically protected healthcare field.'
         : choice.sample_values?.length ? `Examples: ${choice.sample_values.map(escapeHtml).join(', ')}` : 'No non-empty examples are available.';
       return `<label class="manual-sanitization-choice"><input type="checkbox" data-manual-encryption-column="${escapeHtml(choice.column)}"><span><strong>${escapeHtml(choice.column)}</strong><small>${samples}</small></span></label>`;
     }).join('')}</div>` : '<p class="hint">No additional columns are available for manual encryption.</p>';
-    section.innerHTML = `<h3>Sanitization review</h3><p>Automatic healthcare detection is already enforced. You may additionally encrypt a column before staging it in AWS. Singapore NRIC-shaped values are automatically detected and encrypted even when the column name is not recognised.</p><p><strong>Automatically protected columns:</strong> ${automatic.length ? automatic.map(escapeHtml).join(', ') : 'None detected by column name.'}</p>${candidateRows}`;
+    const search = candidates.length ? '<label class="sanitization-search-label" for="sanitization-search">Find a column<input id="sanitization-search" type="search" placeholder="Filter column names…" aria-controls="manual-sanitization-candidate-list"></label><p id="sanitization-filter-count" class="hint" aria-live="polite"></p>' : '';
+    section.innerHTML = `<h3>Sanitization review</h3><p>Automatic healthcare detection is already enforced. You may additionally encrypt a column before staging it in AWS. Singapore NRIC-shaped values are automatically detected and encrypted even when the column name is not recognised.</p><p><strong>Automatically protected columns:</strong> ${automatic.length ? automatic.map(escapeHtml).join(', ') : 'None detected by column name.'}</p>${search}${candidateRows}`;
     holder.append(section);
     section.querySelectorAll('[data-manual-encryption-column]').forEach(control => control.addEventListener('change', invalidateKeyAnalysis));
+    if (candidates.length) {
+      $('sanitization-search').oninput = filterSanitizationColumns;
+      filterSanitizationColumns();
+    }
   }
   if (result.mode === 'create' && result.type_selections?.length) {
     const choices = document.createElement('section'); choices.className = 'type-selections';

@@ -103,6 +103,24 @@ class SessionKeyImpactRequest(BaseModel):
     type_overrides: dict[str, str] = Field(default_factory=dict)
 
 
+def _schema_with_manual_encryption(
+    preflight: dict[str, Any], columns: list[str]
+) -> dict[str, Any]:
+    """Promote manually encrypted create-table fields to the text contract."""
+    if not columns:
+        return preflight
+    encrypted = set(columns)
+    return {
+        **preflight,
+        "target_schema": [
+            {**field, "type": "STRING"}
+            if field.get("name") in encrypted
+            else field
+            for field in preflight.get("target_schema", [])
+        ],
+    }
+
+
 def _safe_upload_name(name: str) -> str:
     value = Path(name).name
     if not value or value in {".", ".."}:
@@ -471,6 +489,14 @@ def start_ingestion(
     # before any contract mutation, durable job record, queue message, or
     # Glue side effect.
     leases.lock_for_ingestion(session, user.user_id)
+    if session["mode"] == "create" and payload.manual_encryption_columns:
+        save_compat_session(
+            store,
+            session,
+            preflight=_schema_with_manual_encryption(
+                session.get("preflight") or {}, payload.manual_encryption_columns
+            ),
+        )
     if late_key_activation and contract is not None:
         contracts.activate_late_deduplication(
             table_bucket_arn=session["table_bucket_arn"],

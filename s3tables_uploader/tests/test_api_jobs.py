@@ -896,6 +896,33 @@ class ApiTests(unittest.TestCase):
         self.assertIsNotNone(store.get_lease("lease")["cancellation_locked_at"])
         self.assertEqual(client.delete("/api/v3/worker-leases/lease").status_code, 409)
 
+    def test_manual_encryption_promotes_a_create_schema_field_to_string(self):
+        self.client.post("/login", json={"password": "password"})
+        store = S3JobStore(self.s3, "landing", "s3-uploader")
+        store.put_compat_session({
+            "session_id": "session", "owner_user_id": "local-admin", "expires_at": "2100-01-01T00:00:00+00:00",
+            "mode": "create", "table_bucket_arn": self.s3tables.bucket_arn, "namespace": "pilot", "table": "new_table",
+            "phase": "READY_FOR_REVIEW", "worker_lease_id": "lease",
+            "files": [{"name": "source.parquet", "sha256": "a" * 64, "source_key": "s3-uploader/uploads/session/raw/source.parquet", "source_version_id": "version", "size_bytes": 1}],
+            "preflight": {
+                "accepted": True,
+                "target_schema": [{"name": "numeric_id", "type": "BIGINT"}, {"name": "notes", "type": "STRING"}],
+                "sanitization_review": {"manual_encryption_candidates": [{"column": "numeric_id"}]},
+            },
+        })
+        store.put_lease({
+            "lease_id": "lease", "owner_user_id": "local-admin", "session_id": "session", "state": "AWAITING_CONFIRMATION",
+            "worker_size": "BASE", "expires_at": "2100-01-01T00:00:00+00:00", "cancellation_locked_at": None,
+        })
+
+        accepted = self.client.post("/api/v3/upload-sessions/session/ingestions", json={
+            "request_id": "request", "manual_encryption_columns": ["numeric_id"],
+        })
+
+        self.assertEqual(accepted.status_code, 202, accepted.text)
+        schema = store.get_compat_session("session")["preflight"]["target_schema"]
+        self.assertEqual(schema, [{"name": "numeric_id", "type": "STRING"}, {"name": "notes", "type": "STRING"}])
+
     def test_resource_limited_base_lease_can_be_manually_retried_as_large(self):
         import json
         env = {"AWS_REGION":"ap-southeast-1", "S3_UPLOADER_LANDING_BUCKET":"landing", "S3_UPLOADER_LANDING_PREFIX":"s3-uploader", "S3_UPLOADER_CONTRACT_BUCKET":"ah-data-analytics", "S3_UPLOADER_CONTRACT_PREFIX":"temp_s3_update/web_ingest/table_contracts", "S3_UPLOADER_BASE_QUEUE_URL":"base", "S3_UPLOADER_LARGE_QUEUE_URL":"large", "S3_UPLOADER_MUTATION_QUEUE_URL":"mutation", "S3_UPLOADER_LOGIN_PASSWORD":"password", "S3_UPLOADER_LOGIN_SECRET":"x" * 32, "S3_UPLOADER_API_BASE_URL":"https://s3-uploader-v2.bot-alex.com", "S3_UPLOADER_GLUE_JOB_NAME":"s3-uploader-ingest", "S3_UPLOADER_ENV":"development", "S3_UPLOADER_COOKIE_SECURE":"false", "S3_UPLOADER_BEARER_SECRET_ARN":"arn:aws:secretsmanager::0:secret/test"}

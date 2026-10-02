@@ -111,6 +111,9 @@ summary { cursor: pointer; } details pre { margin-top: 16px; } pre { white-space
 .manual-sanitization-choice input { margin-top: .25rem; }
 .manual-sanitization-choice span { display: grid; gap: .18rem; }
 .manual-sanitization-choice small { color: #6f6650; font-weight: 400; }
+.manual-sanitization-choice[hidden] { display: none; }
+.sanitization-search-label { display: grid; gap: .35rem; max-width: 28rem; }
+.sanitization-search-label input { width: 100%; box-sizing: border-box; }
 .deduplication-selection { border: 1px solid #b9d4e8; background: #f3f9fd; padding: 1rem; margin: 1rem 0; border-radius: .5rem; }
 .deduplication-selection h3 { margin-top: 0; }
 .deduplication-notice { color: #1d5f88; font-weight: 700; }
