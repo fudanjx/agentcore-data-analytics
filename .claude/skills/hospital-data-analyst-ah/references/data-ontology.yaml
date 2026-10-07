@@ -1,7 +1,7 @@
 version: 1
 source:
   namespace: ah
-  tables: [admission, discharge, inflight, outpatient, procedure, urgentcarecenter]
+  tables: [admission, discharge, inflight, outpatient, procedure, urgentcarecenter, moh_f40, moh_f41]
   schema_reference: docs/ah-s3tables-schema-guide.md
   verified_at: 2026-08-26
   verification: MCP list_tables plus aggregate values and join-existence checks
@@ -69,6 +69,27 @@ tables:
       ip_bed_request: ip_bed_request_time
       ip_admission: ip_admit_time
 
+  moh_f40:
+    grain: one SOC appointment, all visit types (F40 keeps first visits only)
+    date: { field: appt_creation_date, meaning: appointment creation (booking) date; equals reporting_period month }
+    identifiers: [epic_csn, sap_case_number, epic_asn]
+    filters:
+      - "visit_type_code IN ('FV','DF','FD')"
+      - "appt_status_desc <> 'Cancelled'"
+      - "appt_creation_rationale IN ('Earliest Possible Appointment','Forcebook')"
+    cautions:
+      - "Reference file: references/moh-f40.md. Unit is days (waiting_time). Subsidised and private both included."
+  moh_f41:
+    grain: one QMS2.0 consultation queue record
+    date: { field: appointment_date, meaning: appointment date; varchar dd/mm/yy, parse before range filters }
+    identifiers: []
+    filters:
+      - "sap_visit_type IN (6 doctor FV/RV labels, see moh-f41.md)"
+      - "epic_specialty mapped via inlined F41 specialty map (inner join)"
+      - "check_in_time present; serve >= wait; derived wait_min <= 180"
+    cautions:
+      - "Reference file: references/moh-f41.md. Unit is minutes (derived wait_min, not source waiting_time)."
+
 aliases:
   patient_name: { admission: pat_name, discharge: full_name, inflight: pat_name, outpatient: name, procedure: patient_name, urgentcarecenter: name }
   patient_sex: { admission: sex, discharge: sex, inflight: sex, outpatient: sex, procedure: sex, urgentcarecenter: gender }
@@ -83,3 +104,5 @@ candidate_joins:
 
 do_not_join:
   - { from: urgentcarecenter.sap_ip_case_no, to: admission.case_no, reason: "Live equality and trimmed-equality checks returned zero matches on 2026-08-26." }
+  - { from: moh_f40.epic_csn, to: outpatient.pat_enc_csn_id, reason: "moh_f40 epic_csn/nric/patient_id are encrypted tokens (enc:v1:...); COUNT(DISTINCT) only." }
+  - { from: moh_f41, to: "*", reason: "No patient or encounter identifier; row counts only." }

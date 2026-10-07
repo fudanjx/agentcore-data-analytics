@@ -1,6 +1,6 @@
 ---
 name: hospital-data-analyst-ah
-description: Analyze Alexandra Hospital (AH) operational data in the ah-analytics database. Use when the user asks about AH hospital data, patient statistics, or SQL queries for the ah-analytics tables — outpatient SOC visits, A&E/urgent care, inpatient admissions, discharges, bed occupancy/patient-days, or surgical procedures. Also trigger when context clearly implies an AH analytics query even without explicit mention of "AH" or "Alexandra Hospital".
+description: Analyze Alexandra Hospital (AH) operational data in the ah-analytics database. Use when the user asks about AH hospital data, patient statistics, or SQL queries for the ah-analytics tables — outpatient SOC visits, A&E/urgent care, inpatient admissions, discharges, bed occupancy/patient-days, surgical procedures, or MOH SOC waiting-time indicators: F40 first-visit appointment wait (days from booking to appointment, moh_f40) and F41 clinic consultation wait (minutes from appointment/queue to doctor, moh_f41). Also trigger when context clearly implies an AH analytics query even without explicit mention of "AH" or "Alexandra Hospital".
 ---
 
 # AH Analytics
@@ -14,6 +14,18 @@ Before writing any SQL:
 4. If the query involves patient class, residency, or paying status, also read `references/pt-class-lookup.md`.
 5. If the request is geographic — map, catchment area, patient origin, by district/area, or by postal code — also read `references/geo-map.md` and use `references/postal-districts.json` for the postal-to-district mapping.
 6. Inspect the live schema with `describe_table` when a requested field or type is uncertain.
+
+## Routing traps
+
+| Question is about | Use | Not |
+|---|---|---|
+| How many SOC first visits were seen (workload/volume) | `outpatient` | `moh_f40` |
+| Days to get a new appointment; MOH F40; FV wait median/P95/max | `moh_f40` (`references/moh-f40.md`) | `outpatient` (no MOH filters) |
+| Minutes waited in clinic to see the doctor; queue/consultation wait; QMS; MOH F41; 30/60-min targets | `moh_f41` (`references/moh-f41.md`) | `moh_f40`, `urgentcarecenter` |
+| A&E/UCC waits (arrival → triage → doctor) | `urgentcarecenter` | `moh_f41` |
+
+Bare "SOC/clinic wait time" with no unit or form: ask whether they mean appointment lead time (F40, days) or in-clinic wait (F41, minutes). Don't guess.
+Athena has no PERCENTILE_CONT/MEDIAN — see the percentile rule in `references/moh-f40.md`.
 
 ## Base-query sanity check
 
