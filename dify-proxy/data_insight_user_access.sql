@@ -16,7 +16,7 @@ DROP TABLE IF EXISTS data_insight_user_access;
 CREATE TABLE data_insight_user_access (
     access_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     user_email VARCHAR(320) NOT NULL,
-    role TEXT NOT NULL CHECK (role IN ('custodian', 'maintainer', 'querier')),
+    role TEXT NOT NULL CHECK (role IN ('custodian', 'maintainer', 'viewer')),
     dataset TEXT,
     namespace TEXT,
     is_deleted BOOLEAN NOT NULL DEFAULT FALSE,

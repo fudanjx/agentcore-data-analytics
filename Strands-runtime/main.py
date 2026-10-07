@@ -33,11 +33,14 @@ def invoke(payload, context):
     """
     request = agent.InvocationRequest.from_payload(payload, context)
     logger.info(
-        "Invoke: turns=%d actor=%s session=%s stream=%s",
+        "Invoke: turns=%d actor=%s session=%s stream=%s "
+        "user_gateway_permissions=%s permissions_field_present=%s",
         len(request.messages),
         request.actor_id,
         request.session_id,
         request.stream,
+        request.user_gateway_permissions,
+        "user_gateway_permissions" in payload,
     )
     if request.stream:
         return agent.stream(request)

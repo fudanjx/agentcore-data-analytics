@@ -1818,10 +1818,28 @@ async def chat_completions_by_slug(
     )
 
     # Get user permissions to be sent to Agentcore Runtime
-    user_gateway_permissions = await get_gateway_permissions_by_user_id(
-        dify_conn,
-        nuhs_conn,
-        user_id
+    try:
+        user_gateway_permissions = await get_gateway_permissions_by_user_id(
+            dify_conn,
+            nuhs_conn,
+            user_id
+        )
+    except Exception:
+        logger.exception(
+            "Gateway permission lookup failed before AgentCore invocation: "
+            "slug=%s session=%s actor=%s",
+            slug,
+            session_id,
+            user_id,
+        )
+        raise
+    logger.info(
+        "Passing gateway permissions to AgentCore: slug=%s session=%s "
+        "actor=%s permissions=%s",
+        slug,
+        session_id,
+        user_id,
+        user_gateway_permissions,
     )
     
     try:
