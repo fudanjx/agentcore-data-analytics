@@ -75,6 +75,29 @@ class WorkerAnalysisTests(unittest.TestCase):
         self.assertEqual(result["deduplication_columns"], ["c", "d", "f"])
         self.assertEqual(result["deduplication_candidates"], [])
 
+    def test_append_without_a_key_only_offers_shared_columns_for_manual_review_and_first_key(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "source.parquet"
+            pq.write_table(pa.table({"shared_id": ["1"], "description": ["alpha"]}), source)
+            result = profile_files(
+                [(source, "source.parquet", "digest")], "append", "arn", "pilot", "target",
+                {"schema": [
+                    {"name": "shared_id", "type": "STRING"},
+                    {"name": "description", "type": "STRING"},
+                    {"name": "first_upload_only", "type": "STRING"},
+                ], "deduplication_columns": []},
+            )
+
+        candidates = {item["column"] for item in result["deduplication_candidates"]}
+        manual = {
+            item["column"]
+            for item in result["sanitization_review"]["manual_encryption_candidates"]
+        }
+        self.assertEqual(candidates, {"shared_id", "description"})
+        self.assertEqual(manual, {"shared_id", "description"})
+        self.assertNotIn("first_upload_only", candidates)
+        self.assertNotIn("first_upload_only", manual)
+
     def test_profile_shows_safe_examples_and_masks_protected_columns(self):
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source.parquet"

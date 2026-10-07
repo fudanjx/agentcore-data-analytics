@@ -340,7 +340,18 @@ def profile_files(paths: list[tuple[Path, str, str]], mode: str, table_bucket_ar
             + result["nric_detected_columns"]
         )
     }
-    candidates = [] if configured_key else _deduplication_candidates(tables[0], target, protected_columns)
+    # On an append that is adopting its first key, only offer columns that
+    # already exist in the table and are available in every incoming file.
+    # This also bounds manual sanitization choices to fields that can be
+    # projected into the existing table contract.
+    selectable_target = (
+        [field for field in target if field["name"] in available_columns]
+        if mode == "append"
+        else target
+    )
+    candidates = [] if configured_key else _deduplication_candidates(
+        tables[0], selectable_target, protected_columns
+    )
     automatic_encrypted = sorted({
         normalise_names([column])[0]
         for result in results
