@@ -220,10 +220,12 @@ Each ZIP contains `SKILL.md` at its root or beneath one enclosing folder. The Ru
 
 Each `SKILL.md` requires YAML frontmatter containing a unique `name` and a useful `description`; the name should match its directory. The request-scoped agent registers Strands' `AgentSkills` plugin against the local parent directory. Strands places only skill metadata in the system prompt and adds its native `skills` activation tool. When the model activates a relevant skill, that tool returns the complete `SKILL.md` instructions.
 
-When the invocation contains `"user_gateway_permissions": ["all"]`, the
-`AgentSkills` plugin discovers every synchronized skill beneath
-`SKILLS_LOCAL_DIR`. Otherwise, only directories whose names appear in
-`user_gateway_permissions` are registered.
+For agents named `data-analyst` or `data-insights`, an invocation containing
+`"user_gateway_permissions": ["all"]` discovers every synchronized skill
+beneath `SKILLS_LOCAL_DIR`; otherwise, only directories whose names appear in
+`user_gateway_permissions` are registered. Agents with any other `AGENT_NAME`
+always discover every synchronized skill and do not apply permission-based
+skill filtering.
 
 If `SKILLS_BUCKET` is empty or unset, the Runtime skips synchronization and does not add skill activation guidance, the `AgentSkills` plugin, `read_skill_resource`, or `stage_skill_resource`.
 

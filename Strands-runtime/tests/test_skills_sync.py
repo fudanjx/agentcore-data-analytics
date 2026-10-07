@@ -185,13 +185,14 @@ class SkillsSyncTests(unittest.TestCase):
         self.assertEqual([name for name, _ in calls], ["executeCommand"])
 
     def test_all_permission_selects_the_parent_skills_directory(self):
-        sources = skills_sync.skill_sources_for_permissions(["all"])
+        sources = skills_sync.skill_sources_for_permissions(["all"], "data-analyst")
 
         self.assertEqual(sources, self.local_dir.resolve())
 
     def test_named_permissions_select_only_named_skill_directories(self):
         sources = skills_sync.skill_sources_for_permissions(
-            ["ah-analytics", "nuh-analytics"]
+            ["ah-analytics", "nuh-analytics"],
+            "data-analyst",
         )
 
         self.assertEqual(
@@ -201,6 +202,19 @@ class SkillsSyncTests(unittest.TestCase):
                 self.local_dir.resolve() / "nuh-analytics",
             ],
         )
+
+    def test_data_insights_agent_filters_skills_by_permission(self):
+        sources = skills_sync.skill_sources_for_permissions(
+            ["ah-analytics"],
+            "data-insights",
+        )
+
+        self.assertEqual(sources, [self.local_dir.resolve() / "ah-analytics"])
+
+    def test_other_agents_load_all_skills_without_permissions(self):
+        sources = skills_sync.skill_sources_for_permissions([], "general-assistant")
+
+        self.assertEqual(sources, self.local_dir.resolve())
 
 
 if __name__ == "__main__":

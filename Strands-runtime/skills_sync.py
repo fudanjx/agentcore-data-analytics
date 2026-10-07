@@ -323,10 +323,14 @@ def get_skill_path_by_name(skill_name: str) -> Path:
     return LOCAL_DIR.resolve() / skill_name
 
 
-def skill_sources_for_permissions(permission_names: list[str]) -> Path | list[Path]:
-    """Resolve the AgentSkills sources allowed by the request permissions."""
+def skill_sources_for_permissions(
+    permission_names: list[str], agent_name: str
+) -> Path | list[Path]:
+    """Resolve skill sources, filtering only the controlled analyst agents."""
     names = [str(name).strip() for name in permission_names if str(name).strip()]
-    if any(name.casefold() == "all" for name in names):
+    permission_filtered_agents = {"data-analyst", "data-insights"}
+    filter_by_permission = agent_name.strip().casefold() in permission_filtered_agents
+    if not filter_by_permission or any(name.casefold() == "all" for name in names):
         # AgentSkills accepts a parent directory and discovers every child skill.
         return LOCAL_DIR.resolve()
     return [get_skill_path_by_name(name) for name in names]

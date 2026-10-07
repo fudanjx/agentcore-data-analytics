@@ -451,7 +451,8 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
         if skills_enabled:
             tools.append(skills_sync.read_skill_resource)
             skill_sources = skills_sync.skill_sources_for_permissions(
-                request.user_gateway_permissions
+                request.user_gateway_permissions,
+                AGENT_NAME,
             )
             logger.info("Configured skill sources: %s", skill_sources)
             plugins.append(AgentSkills(skills=skill_sources))
