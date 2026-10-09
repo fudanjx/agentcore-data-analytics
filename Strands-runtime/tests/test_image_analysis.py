@@ -96,13 +96,13 @@ class ImageAnalysisTests(unittest.TestCase):
         tools = self.module.build_tools(
             [
                 {
-                    "stored_name": "clara-image.png",
-                    "source_url": "s3://private/image.png",
+                    "stored_name": "clara-image.png.claraimage",
+                    "source_url": "s3://private/image.png.claraimage",
                 }
             ],
             encrypted_documents=[
                 {
-                    "stored_name": "clara-image.png",
+                    "stored_name": "clara-image.png.claraimage",
                     "original_name": "image.png",
                     "wrapped_key": "wrapped",
                 }
@@ -121,7 +121,9 @@ class ImageAnalysisTests(unittest.TestCase):
                 return_value=plaintext,
             ),
         ):
-            payload = json.loads(asyncio.run(tools[0]("clara-image.png")))
+            payload = json.loads(
+                asyncio.run(tools[0]("clara-image.png.claraimage"))
+            )
 
         self.assertTrue(payload["ok"])
         self.assertTrue(payload["encrypted_input"])
@@ -139,6 +141,17 @@ class ImageAnalysisTests(unittest.TestCase):
         )
         payload = json.loads(asyncio.run(tools[0]("other.jpg")))
         self.assertFalse(payload["ok"])
+
+    def test_claraimage_requires_matching_encryption_metadata(self) -> None:
+        with self.assertRaisesRegex(RuntimeError, "missing matching"):
+            self.module.build_tools(
+                [
+                    {
+                        "stored_name": "clara-image.png.claraimage",
+                        "source_url": "s3://private/image.png.claraimage",
+                    }
+                ]
+            )
 
     def test_vision_model_falls_back_to_primary_model_id(self) -> None:
         with patch.dict(

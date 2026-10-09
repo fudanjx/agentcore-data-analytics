@@ -118,6 +118,13 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `SKILLS_MAX_SYNC_BYTES` | `262144000` | Maximum combined local skill resource size during one startup sync |
 | `SKILLS_MAX_RESOURCE_CHARS` | `100000` | Maximum UTF-8 text returned by one `read_skill_resource` call |
 
+Encrypted upload routing is enforced by stored-file suffix. `.claradoc` inputs
+must be decrypted with `stage_encrypted_document` before Code Interpreter uses
+the returned plaintext path. `.claraimage` inputs must be processed by
+`analyze_uploaded_image`, which decrypts the object in memory before invoking
+the vision model. Generic Code Interpreter tools reject direct access to either
+encrypted suffix.
+
 `MODEL_ID` or `MODEL_ARN` must be configured. Set `BASE_SYSTEM_PROMPT`, `AGENTCORE_GATEWAYS_JSON`, `CODE_INTERPRETER_ID`, `MEMORY_ID`, or `SKILLS_BUCKET` only when that optional capability belongs in the Runtime. Empty values disable the base prompt or corresponding tools, allowing a caller such as Dify to provide the application system prompt. Skills are enabled when `SKILLS_BUCKET` is non-empty; an empty `SKILLS_PREFIX` reads skills from the bucket root. `ENABLE_GATEWAYS=false` and `ENABLE_CODE_INTERPRETER=false` can still override configured integrations for a minimal smoke test.
 
 ### Model providers

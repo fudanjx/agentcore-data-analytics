@@ -220,6 +220,16 @@ def build_tools(
     encryption_by_name = {
         item["stored_name"]: item for item in (encrypted_documents or [])
     }
+    missing_encryption = [
+        stored_name
+        for stored_name in images_by_name
+        if stored_name.casefold().endswith(".claraimage")
+        and stored_name not in encryption_by_name
+    ]
+    if missing_encryption:
+        raise RuntimeError(
+            "Encrypted .claraimage input is missing matching encryption metadata"
+        )
 
     @tool(
         name="analyze_uploaded_image",
@@ -227,8 +237,9 @@ def build_tools(
             "Analyze one request-provided <IMAGE_INPUT> with a vision model. Pass "
             "its exact stored filename and a concise description of what to inspect. "
             "The tool securely downloads the request-bound S3 object and automatically "
-            "decrypts a matching CLARA encrypted image before vision analysis. Do not "
-            "use Code Interpreter, execute_command, or Python image libraries first."
+            "decrypts a .claraimage before sending only plaintext image bytes to the "
+            "vision model. Do not use Code Interpreter, execute_command, execute_code, "
+            "or Python image libraries first."
         ),
     )
     async def analyze_uploaded_image(

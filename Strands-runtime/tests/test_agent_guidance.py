@@ -58,6 +58,9 @@ class AgentGuidanceTests(unittest.TestCase):
         self.assertIn("document_decryption_enabled()", agent_source)
         self.assertIn("request.document_encryptions and encryption_enabled", agent_source)
         self.assertIn("request.document_encryptions and not encryption_enabled", agent_source)
+        self.assertIn("ending in .claradoc", agent_source)
+        self.assertIn("ending in .claraimage", agent_source)
+        self.assertIn("A CLARAENC header means the wrong tool was used", agent_source)
 
     def test_image_guidance_requires_vision_tool_instead_of_interpreter(self) -> None:
         agent_source = (RUNTIME_DIR / "agent.py").read_text(encoding="utf-8")

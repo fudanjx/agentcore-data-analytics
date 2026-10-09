@@ -268,6 +268,36 @@ def build_tools(
 ) -> list:
     """Create Strands tools bound to one managed interpreter session."""
 
+    encrypted_routes_enabled = (
+        bool(encrypted_documents) and document_decryption_enabled()
+    )
+
+    def encrypted_route_error(value: str) -> str | None:
+        if not encrypted_routes_enabled:
+            return None
+        normalized = value.casefold()
+        if ".claraimage" in normalized:
+            return (
+                "Encrypted .claraimage files cannot be accessed through Code "
+                "Interpreter. Call analyze_uploaded_image with the exact stored "
+                "filename."
+            )
+        if ".claradoc" in normalized:
+            return (
+                "Encrypted .claradoc files cannot be accessed directly. Call "
+                "stage_encrypted_document with the exact stored filename and S3 "
+                "URI, then use only its returned plaintext path."
+            )
+        return None
+
+    encrypted_routing_description = (
+        " Never access .claradoc or .claraimage sources directly: use "
+        "stage_encrypted_document for .claradoc and analyze_uploaded_image for "
+        ".claraimage."
+        if encrypted_routes_enabled
+        else ""
+    )
+
     @tool(
         name="execute_code",
         description=(
@@ -277,12 +307,16 @@ def build_tools(
             "aggregates and representative samples, not full datasets. End with "
             "one AGENTCORE_RESULT_JSON marker containing ok, summary, and only "
             "bounded optional metrics, sample rows, warnings, or artifact metadata."
+            + encrypted_routing_description
         ),
     )
     async def execute_code(code: str, language: str = "python") -> str:
         normalized = language.lower()
         if normalized not in {"python", "javascript", "typescript"}:
             return f"Unsupported Code Interpreter language: {normalized}"
+        route_error = encrypted_route_error(code)
+        if route_error:
+            return route_error
         return await _invoke_tool(
             session_id, "executeCode", {"code": code, "language": normalized}
         )
@@ -295,14 +329,22 @@ def build_tools(
             "generated artifact. Operate only on paths and S3 URIs from this request. "
             "Avoid broad listings and long logs. End with one AGENTCORE_RESULT_JSON "
             "marker containing a concise result, errors, and artifact metadata."
+            + encrypted_routing_description
         ),
     )
     async def execute_command(command: str) -> str:
+        route_error = encrypted_route_error(command)
+        if route_error:
+            return route_error
         return await _invoke_tool(session_id, "executeCommand", {"command": command})
 
     tools = [execute_code, execute_command]
     encrypted_by_name = (
-        {item["stored_name"]: item for item in (encrypted_documents or [])}
+        {
+            item["stored_name"]: item
+            for item in (encrypted_documents or [])
+            if not item["stored_name"].casefold().endswith(".claraimage")
+        }
         if document_decryption_enabled()
         else {}
     )
@@ -313,8 +355,9 @@ def build_tools(
             description=(
                 "Download and decrypt one request-provided encrypted document into "
                 "this request's managed Code Interpreter session. Pass the exact "
-                "stored filename and URL from its document_input tag. The tool returns "
-                "the plaintext sandbox path; encryption keys are never model-visible."
+                ".claradoc stored filename and URL from its DOCUMENT_INPUT tag. "
+                "Never use this tool for .claraimage. The tool returns the plaintext "
+                "sandbox path; encryption keys are never model-visible."
             ),
         )
         async def stage_encrypted_document(stored_filename: str, source_url: str) -> str:

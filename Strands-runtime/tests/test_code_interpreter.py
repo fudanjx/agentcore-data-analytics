@@ -200,6 +200,55 @@ class CodeInterpreterWrapperTests(unittest.TestCase):
             "stage_encrypted_document", [tool.__name__ for tool in enabled_tools]
         )
 
+    def test_generic_tools_reject_encrypted_upload_suffixes(self) -> None:
+        metadata = [
+            {
+                "stored_name": "clara-document.csv.claradoc",
+                "original_name": "document.csv",
+                "wrapped_key": "wrapped-document-key",
+            },
+            {
+                "stored_name": "clara-image.png.claraimage",
+                "original_name": "image.png",
+                "wrapped_key": "wrapped-image-key",
+            },
+        ]
+        with patch.dict(
+            os.environ, {"CLARA_FILE_DECRYPTION_PRIVATE_KEY": "configured"}
+        ):
+            tools = self.module.build_tools(
+                "session", encrypted_documents=metadata
+            )
+
+        execute_code = next(tool for tool in tools if tool.__name__ == "execute_code")
+        execute_command = next(
+            tool for tool in tools if tool.__name__ == "execute_command"
+        )
+        stage_document = next(
+            tool for tool in tools if tool.__name__ == "stage_encrypted_document"
+        )
+
+        with patch.object(self.module, "_invoke_tool") as invoke:
+            document_result = asyncio.run(
+                execute_command(
+                    "aws s3 cp s3://private/document.csv.claradoc /tmp/document"
+                )
+            )
+            image_result = asyncio.run(
+                execute_code("open('/tmp/image.png.claraimage', 'rb').read()")
+            )
+            staged_image_result = asyncio.run(
+                stage_document(
+                    "clara-image.png.claraimage",
+                    "s3://private/image.png.claraimage",
+                )
+            )
+
+        self.assertIn("stage_encrypted_document", document_result)
+        self.assertIn("analyze_uploaded_image", image_result)
+        self.assertIn("No encryption metadata", staged_image_result)
+        invoke.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

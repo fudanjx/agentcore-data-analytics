@@ -416,7 +416,7 @@ def _prepare(request: InvocationRequest):
         prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
 
         document_guidance = """Uploaded files may appear in two tag types:
-- <document_input> contains tabular, Office, PDF, or text files. Use Code Interpreter to download and analyze these files.
+- <DOCUMENT_INPUT> contains tabular, Office, PDF, or text files. Use Code Interpreter to analyze these files.
 - <IMAGE_INPUT> contains an image filename and S3 URI. Call analyze_uploaded_image with the exact stored filename. Never use Code Interpreter, execute_command, execute_code, or Python image libraries to interpret an <IMAGE_INPUT>."""
         encryption_enabled = code_interpreter.document_decryption_enabled()
         if request.document_encryptions and not encryption_enabled:
@@ -425,7 +425,12 @@ def _prepare(request: InvocationRequest):
                 "CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured"
             )
         encryption_guidance = (
-            """Encrypted files may appear in <document_input> or <IMAGE_INPUT>. For an encrypted document, call stage_encrypted_document with its exact stored filename and URL before Code Interpreter analysis. For an encrypted image, call analyze_uploaded_image directly; it downloads and decrypts the image before vision analysis. Never download an encrypted source with execute_command and never print or expose encryption metadata."""
+            """Encrypted files may appear in <DOCUMENT_INPUT> or <IMAGE_INPUT>.
+Encrypted upload routing is mandatory:
+- A stored filename ending in .claradoc is an encrypted document. Never download, open, parse, or inspect it directly. First call stage_encrypted_document with the exact stored filename and S3 URI from <DOCUMENT_INPUT>, then use only the returned plaintext path with Code Interpreter.
+- A stored filename ending in .claraimage is an encrypted image. Never use Code Interpreter, execute_command, execute_code, or Python image libraries on it. Call analyze_uploaded_image with the exact stored filename; that tool downloads and decrypts it before vision analysis.
+- A CLARAENC header means the wrong tool was used. Route the file through the required decryption tool; do not claim it is unreadable and do not ask for an unencrypted re-upload.
+Never print or expose encryption metadata or key material."""
             if request.document_encryptions and encryption_enabled
             else ""
         )
