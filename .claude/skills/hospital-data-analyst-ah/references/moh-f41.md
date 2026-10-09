@@ -1,6 +1,6 @@
 ---
 name: ah-analytics-moh-f41
-description: Column reference and SQL guidance for the ah-analytics moh_f41 table — MOH F41 QMS2.0 SOC consultation waiting time, in minutes from appointment/queue start to start of doctor consultation. Use for clinic/consultation wait median, P95, % within 30/60-min targets, by specialty, subsidy or investigation flag. Not for appointment lead time (moh_f40) or A&E waits (urgentcarecenter).
+description: Column reference and SQL guidance for the ah-analytics moh_f41 table — MOH F41 QMS2.0 SOC consultation waiting time, in minutes from appointment/queue start to start of doctor consultation. Use for clinic/consultation wait median, P95, share within the 30 and 60 minute targets, by specialty, subsidy or investigation flag. Not for appointment lead time (moh_f40) or A&E waits (urgentcarecenter).
 ---
 
 # AH Analytics — moh_f41 (MOH F41 consultation wait)
@@ -72,13 +72,24 @@ base AS (
   WHERE serve_m >= wait_m
     AND appt_dt BETWEEN DATE '2026-04-01' AND DATE '2026-06-30'
 ),
-f41 AS (SELECT * FROM base WHERE wait_min <= 180)
+f41_report AS (SELECT * FROM base WHERE wait_min <= 180)
 SELECT specialty_code, specialty, COUNT(*) AS n,
        approx_percentile(wait_min, 0.5)  AS median_min_approx,
        approx_percentile(wait_min, 0.95) AS p95_min_approx,
        AVG(CASE WHEN wait_min <= 30 THEN 1.0 ELSE 0 END) AS pct_within_30
-FROM f41 GROUP BY ROLLUP ((specialty_code, specialty));  -- NULL row = grand total
+FROM f41_report GROUP BY ROLLUP ((specialty_code, specialty));  -- NULL row = grand total
+-- always also report: SELECT COUNT(*) FILTER (WHERE wait_min > 180) AS excluded_over_180 FROM base
 ```
+
+## Reporting fields
+
+`f41_report` is a guiding base query, not a fixed output. It keeps every `moh_f41` column plus the derived fields, so other details (e.g. `session_am_pm`, `group_ou`, `epic_department_name`, `provider_resource`, `level_of_care`, `sap_visit_type`) can be selected or grouped directly. Default fields mirror the MOH output of `F41_Report_QMS2.0.py`: `hospital`, `report_quarter`, `appt_dt` (as `appointment_date`), `specialty_code`/`specialty`, `subsidy_code`, `appointment_time`, `check_in_time`, `investigations`, `start_wait_time_for_consultation`, `start_serve_time_for_consultation`, `wait_min`.
+
+**180-minute cap:** the script (and MOH submission) drops `wait_min > 180` as unclosed or erroneous queue records. Keep the cap for every KPI, target comparison and dashboard so figures match the F41 submission. Every F41 result (answer, table, chart, dashboard) must end with a one-line footnote stating the excluded count, e.g.:
+
+> ¹ Excludes N records with consultation wait > 180 min (unclosed or erroneous queue records), per the MOH F41 definition.
+
+Compute N with `excluded_over_180` above, for the same filters and period. Show the footnote even when N = 0. List the excluded rows only when asked about outliers or data quality — query `base` for them.
 
 ## Wait-time branches (`wait_min`)
 

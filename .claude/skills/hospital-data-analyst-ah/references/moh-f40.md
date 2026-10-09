@@ -15,7 +15,11 @@ Columns are lowercase snake_case. Two contain `+` and must be double-quoted: `"p
 WHERE visit_type_code IN ('FV','DF','FD')
   AND appt_status_desc <> 'Cancelled'
   AND appt_creation_rationale IN ('Earliest Possible Appointment','Forcebook')
+  AND NOT (performing_ou_code = 'LSWELL'
+           AND regexp_like(lower(COALESCE(comments, '')), 'research|-emp|longev|heal'))
 ```
+
+The LSWELL line drops research, pre-employment, and Longevity wellness bookings. It mirrors `F40_Code.py` exactly, including `heal` (which also matches "health"). Keep it as written.
 
 Expect heavy exclusion: most FV rows are `Doctor/Patient Requested Appointment`. That is the MOH definition, not a data gap.
 
@@ -23,7 +27,7 @@ Expect heavy exclusion: most FV rows are `Doctor/Patient Requested Appointment`.
 
 - `waiting_time` = `date_diff('day', appt_creation_date, scheduled_appt_date)` for every row — use the column directly.
 - `reporting_period` (e.g. `Oct 2025`) = month of `appt_creation_date`; `source_file` = `F40_YYYYMM_Mon.xlsx`.
-- `epic_csn` is unique per row. `epic_csn`, `nric`, `patient_id` are encrypted tokens (`enc:v1:...`) — `COUNT(DISTINCT)` only, never join.
+- `epic_csn` is unique per row. `epic_csn`, `nric`, `patient_id` are encrypted on upload with the same encryption as other tables, so they work as join keys (e.g. `epic_csn` → `outpatient.pat_enc_csn_id`; see `data-ontology.yaml` candidate_joins).
 
 ## Key columns
 
@@ -40,7 +44,8 @@ Expect heavy exclusion: most FV rows are `Doctor/Patient Requested Appointment`.
 | `residency` | `SG`, `PR`, `FR`, `FNR` (~5% null) |
 | `patient_class_code` | Raw class → MOH Subsidy Code (map below) |
 | `private_subsidized` | `SUBSIDISED` / `PRIVATE` (source grouping; use Subsidy Code for MOH output) |
-| `"performing_ou_visit_type_+_desc"` | Perf. OU = text right of ` + ` → MOH Specialty Code (map below) |
+| `"performing_ou_visit_type_+_desc"` | Perf. OU = text right of ` + ` → MOH Specialty Code / `moh_specialty` (map below) — **the default specialty** |
+| `"specialty_ou_visit_type_+_desc"` | Sub-specialty + visit type, then ` + ` description (e.g. `NUHS SPINE SURGERY FV + Spine Surgery - First Visit`). Finer than MOH specialty — use for sub-specialty breakdowns such as Spine cases, not as the default specialty |
 | `performing_ou_code` | Specialty code; reporting uses the Perf. OU text map |
 | `referral_hosp_desc` | Referral institution → Source of Referral Code (map below) |
 | `referral_type_desc` | Referral source grouping (source system) |
@@ -52,7 +57,8 @@ Expect heavy exclusion: most FV rows are `Doctor/Patient Requested Appointment`.
 Unmatched values get `Unmapped` — never drop them (category_completeness).
 
 - **Specialty Code**: `lower(trim(element_at(split("performing_ou_visit_type_+_desc", ' + '), -1)))` → `spec` CTE below. Not in the map (non-clinical, outside F40 scope): urgent care, pharmacy, podiatry, diagnostic imaging, nursing community, care & counselling, dietetics, clinical support svc.
-- **Subsidy Code**: `patient_class_code` → `sub` CTE below (`1` subsidised, `2` private/non-resident).
+- **Subsidy Code**: `patient_class_code` → `sub` CTE below (`1` subsidised, `2` private/non-resident). This is wider than the script's 6-class lookup (Tammy's decision, 2026-10-07).
+- Source script `F40_Code.py` keeps rows with blank specialty or subsidy codes; it does not drop them.
 - **Source of Referral Code**: 172 entries in `references/moh-f40-referral-codes.json` — too long for SQL. Only when a referral breakdown is requested, export the base rows and map in Code Interpreter:
 
 ```python
@@ -60,6 +66,32 @@ codes = json.load(open("references/moh-f40-referral-codes.json"))["codes"]
 key = df["referral_hosp_desc"].str.replace(r"\s*\{.*$", "", regex=True).str.strip().str.lower()
 df["source_of_referral_code"] = key.map(codes).fillna("Unmapped")
 ```
+
+The source script asks staff to enter missing referral codes by hand and appends them to `F40 Lookup Tables.xlsx`, so this JSON can lag behind. Report any `Unmapped` referral names so the JSON can be refreshed from the lookup.
+
+## Useful breakdowns
+
+- **Forcebooked**: `appt_creation_rationale = 'Forcebook'` vs `Earliest Possible Appointment`.
+- **Telehealth**: `visit_type_code IN ('DF','FD')` → `Y`, else `N`.
+- **Spine** (sub-group of Orthopaedic Surgery, shown on its own ops sheet): `upper(split_part("specialty_ou_visit_type_+_desc", '+', 1)) LIKE '%SPINE%'`.
+- **Well**: `performing_ou_code = 'LSWELL'` (own ops sheet).
+
+## MOH submission columns (`F40AHM{mm}Y{yyyy}.xlsx`, one file per creation month)
+
+| Column | Value |
+|---|---|
+| Hospital | `AH` |
+| Report Period | `Mon-YYYY` of `appt_creation_date` |
+| Specialty Code | spec map |
+| Date of Request | `appt_creation_date` (`dd-mm-yyyy`) |
+| Source of Referral Code | referral JSON |
+| Appointment Date | `scheduled_appt_date` (`dd-mm-yyyy`) |
+| Subsidy Status Code | sub map |
+| Urgency Class Code | constant `2` |
+| Forced Booked Appointment ? | `Y` if Forcebook, else blank |
+| Did patient specify doctor ? | constant `2` |
+| Waiting Time (days) | `waiting_time` |
+| TeleHealth | `Y` for DF/FD, else `N` — only in the `… Telehealth.xlsx` copy, which has the same rows |
 
 ## SQL pattern (Athena)
 
@@ -80,25 +112,53 @@ WITH spec(perf_ou, specialty_code, specialty) AS (VALUES
 sub(patient_class_code, subsidy_code) AS (VALUES
   ('SUB',1),('SUBP',1),('C',1),('B2',1),('CP',1),('B2P',1),
   ('A',2),('B1',2),('B2RF',2),('CRF',2),('NR',2),('PTRF',2),('PTE',2),('PTEP',2)),
-base AS (
-  SELECT f.*,
-         COALESCE(CAST(s.specialty_code AS varchar), 'Unmapped') AS specialty_code,
-         COALESCE(s.specialty, 'Unmapped') AS specialty,
-         COALESCE(CAST(b.subsidy_code AS varchar), 'Unmapped') AS subsidy_code
+f40_report AS (
+  SELECT
+    f.epic_csn,
+    f.nric,
+    f.performing_ou_code,
+    COALESCE(CAST(s.specialty_code AS varchar), 'Unmapped') AS specialty_code,
+    COALESCE(s.specialty, 'Unmapped')                       AS moh_specialty,
+    CAST(f.appt_creation_date AS date)                      AS appt_creation_date,
+    trim(split_part(f.referral_hosp_desc, '{', 1))          AS referral_hosp_desc,
+    CAST(f.scheduled_appt_date AS date)                     AS scheduled_appt_date,
+    f.patient_class_code                                    AS appt_pat_class,
+    COALESCE(CAST(b.subsidy_code AS varchar), 'Unmapped')   AS subsidy_code,
+    f.waiting_time,
+    f.visit_type_code,
+    f.actual_planned_no_show_appt,
+    f.appt_creation_rationale,
+    CASE WHEN f.appt_creation_rationale = 'Forcebook' THEN 'Y' ELSE '' END AS forcebooked,
+    CASE WHEN f.visit_type_code IN ('DF','FD') THEN 'Y' ELSE 'N' END      AS telehealth,
+    f.comments,
+    f.performing_physician_name,
+    f.appt_entry_user_id,
+    trim(split_part(f."specialty_ou_visit_type_+_desc", '+', 1)) AS subspecialty_visit_type
+    -- add any other moh_f40 column the question needs (residency, referral_type_desc, treatment_ou_desc, rescheduled_y_n, ...)
   FROM moh_f40 f
   LEFT JOIN spec s ON s.perf_ou = lower(trim(element_at(split(f."performing_ou_visit_type_+_desc", ' + '), -1)))
   LEFT JOIN sub  b ON b.patient_class_code = f.patient_class_code
   WHERE f.visit_type_code IN ('FV','DF','FD')
     AND f.appt_status_desc <> 'Cancelled'
     AND f.appt_creation_rationale IN ('Earliest Possible Appointment','Forcebook')
+    AND NOT (f.performing_ou_code = 'LSWELL'
+             AND regexp_like(lower(COALESCE(f.comments, '')), 'research|-emp|longev|heal'))
     AND CAST(f.appt_creation_date AS date) BETWEEN DATE '2026-01-01' AND DATE '2026-03-31'
 )
-SELECT specialty_code, specialty, COUNT(*) AS fv_volume,
+SELECT specialty_code, moh_specialty, COUNT(*) AS fv_volume,
        approx_percentile(waiting_time, 0.5)  AS median_days_approx,
        approx_percentile(waiting_time, 0.95) AS p95_days_approx,
        MAX(waiting_time) AS max_days
-FROM base GROUP BY ROLLUP ((specialty_code, specialty));  -- NULL row = grand total
+FROM f40_report GROUP BY ROLLUP ((specialty_code, moh_specialty));  -- NULL row = grand total
 ```
+
+## Reporting fields
+
+`f40_report` is a guiding base query, not a fixed output. Its fields mirror the `F40_Code.py` report (snake_case), so use them by default, under these names, for answers, extracts, drill-downs and dashboards. When the question needs other details, add any `moh_f40` column to the SELECT; keep the filters and lookups.
+**Specialty rule:** the default specialty for every F40 answer, table, chart and dashboard is `moh_specialty` (with `specialty_code`), mapped from Perf. OU. `subspecialty_visit_type` (left side of `specialty_ou_visit_type_+_desc`, e.g. `NUHS SPINE SURGERY FV`) is the sub-specialty + visit type: use it when the user asks for a finer breakdown (e.g. Spine, Hip & Knee, Gastro/Hepato), nested under `moh_specialty`, and label it "Sub-specialty", not "Specialty".
+
+Common slices: `moh_specialty`, `subsidy_code`, `source_of_referral_code`, `forcebooked`, `telehealth`, `actual_planned_no_show_appt`, Spine (`upper(subspecialty_visit_type) LIKE '%SPINE%'`).
+`source_of_referral_code` is added in Code Interpreter after export (key = `lower(referral_hosp_desc)`, see the referral JSON above).
 
 ## Percentile rule (applies to moh_f40 and moh_f41)
 

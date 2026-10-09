@@ -77,6 +77,7 @@ tables:
       - "visit_type_code IN ('FV','DF','FD')"
       - "appt_status_desc <> 'Cancelled'"
       - "appt_creation_rationale IN ('Earliest Possible Appointment','Forcebook')"
+      - "NOT (performing_ou_code = 'LSWELL' AND regexp_like(lower(COALESCE(comments,'')), 'research|-emp|longev|heal'))"
     cautions:
       - "Reference file: references/moh-f40.md. Unit is days (waiting_time). Subsidised and private both included."
   moh_f41:
@@ -101,8 +102,8 @@ candidate_joins:
   - { from: admission, to: inflight, keys: [case_no, pat_enc_csn_id], expected_cardinality: "episode to patient-day", live_match_check: "case_no returns matches" }
   - { from: urgentcarecenter, to: admission, keys: [pat_enc_csn_id], expected_cardinality: "attendance to possible admission", live_match_check: "pat_enc_csn_id returns matches" }
   - { from: outpatient, to: procedure, keys: [pat_enc_csn_id], expected_cardinality: "visit to possible procedure", live_match_check: "pat_enc_csn_id returns matches" }
+  - { from: moh_f40, to: outpatient, keys: [epic_csn -> pat_enc_csn_id], expected_cardinality: "appointment to SOC visit", live_match_check: "not yet verified; check match count before use" }
 
 do_not_join:
   - { from: urgentcarecenter.sap_ip_case_no, to: admission.case_no, reason: "Live equality and trimmed-equality checks returned zero matches on 2026-08-26." }
-  - { from: moh_f40.epic_csn, to: outpatient.pat_enc_csn_id, reason: "moh_f40 epic_csn/nric/patient_id are encrypted tokens (enc:v1:...); COUNT(DISTINCT) only." }
   - { from: moh_f41, to: "*", reason: "No patient or encounter identifier; row counts only." }

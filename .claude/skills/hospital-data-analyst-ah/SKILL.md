@@ -1,6 +1,6 @@
 ---
 name: hospital-data-analyst-ah
-description: Analyze Alexandra Hospital (AH) operational data in the ah-analytics database. Use when the user asks about AH hospital data, patient statistics, or SQL queries for the ah-analytics tables — outpatient SOC visits, A&E/urgent care, inpatient admissions, discharges, bed occupancy/patient-days, surgical procedures, or MOH SOC waiting-time indicators: F40 first-visit appointment wait (days from booking to appointment, moh_f40) and F41 clinic consultation wait (minutes from appointment/queue to doctor, moh_f41). Also trigger when context clearly implies an AH analytics query even without explicit mention of "AH" or "Alexandra Hospital".
+description: Analyze Alexandra Hospital (AH) operational data in the ah-analytics database. Use when the user asks about AH hospital data, patient statistics, or SQL queries for the ah-analytics tables - outpatient SOC visits, A&E/urgent care, inpatient admissions, discharges, bed occupancy/patient-days, surgical procedures, or MOH SOC waiting-time indicators such as F40 first-visit appointment wait (days from booking to appointment, moh_f40) and F41 clinic consultation wait (minutes from appointment or queue to doctor, moh_f41). Also trigger when context clearly implies an AH analytics query even without explicit mention of AH or Alexandra Hospital.
 ---
 
 # AH Analytics
