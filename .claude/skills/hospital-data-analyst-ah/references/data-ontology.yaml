@@ -1,7 +1,7 @@
 version: 1
 source:
   namespace: ah
-  tables: [admission, discharge, inflight, outpatient, procedure, urgentcarecenter]
+  tables: [admission, discharge, inflight, outpatient, procedure, urgentcarecenter, moh_f40, moh_f41]
   schema_reference: docs/ah-s3tables-schema-guide.md
   verified_at: 2026-08-26
   verification: MCP list_tables plus aggregate values and join-existence checks
@@ -9,7 +9,10 @@ source:
 # This is the agent-facing semantic source of truth. The schema guide owns the
 # complete physical schema; table reference files own detailed metric logic.
 global_rules:
-  preliminary_records: "Use prelim_flag = 'N' unless the user explicitly requests provisional data."
+  preliminary_records: "Use prelim_flag = 'N' in filter only when the user explicitly requests to exclude provisional data."
+  preliminary_disclosure: "When prelim_flag = 'N' is not applied, check whether the output actually contains prelim_flag = 'Y' rows. If it does, mark the affected values with an asterisk (*) and add a footnote noting they include provisional/unfinalised records. If every queried record turns out to be prelim_flag = 'N' anyway, no asterisk or footnote is needed."
+  category_completeness: "When grouping or aggregating output by any categorical or derived field (e.g. acuity, case_end_type, effective_class, ward), include a row/bucket for blank or NULL values of that field rather than filtering or dropping them -- label it clearly (e.g. 'Unspecified' or 'NULL'), don't just omit it. The sum of every category's subtotal must equal the ungrouped grand total for the same filters and date range, so it reconciles against any locked benchmark total."
+  base_totals_first: "For any query against a period, build a base query as a CTE first: `WITH base AS (SELECT * FROM <table> WHERE <standard data-ontology.yaml filters> AND <date field> BETWEEN <start> AND <end>)` -- standard filters and the requested date range only, no user-specific slicing. Run `SELECT COUNT(*) FROM base` (or `SUM(<primary metric>) FROM base`) and compare it against ah-yearly-benchmarks.json's monthly series summed over the same months (or the matching scripts/validate_<table>_dashboard.py output, when building a full dashboard export). Only once that base total reconciles, or a mismatch has been investigated and explained, add the user's specific filters, grouping, or nested logic as a further query on top of `base` (`SELECT ... FROM base WHERE <user filters> GROUP BY ...`) rather than rewriting the query from scratch. Skip this check only when no benchmark exists yet for the table."
   identifiers: "Treat all identifiers as strings; neither case_no nor pat_enc_csn_id is universally complete."
   joins: "Every relationship below is a candidate join, not an enforced key. Check row counts and duplicates for the requested period."
 
@@ -21,7 +24,7 @@ tables:
     filters:
       - "adm_status <> 'P'"
       - "adm_type IN ('EM','EL','SD','DI','TA','RA')"
-      - "derived admitting ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT')"
+      - "derived admitting ward NOT IN ('LWEDTU','LWASW','LWDSW','LWVOTU','LOMOT', 'LCUCC')"
   discharge:
     grain: discharged inpatient episode
     date: { field: disch_date, meaning: discharge date }
@@ -44,7 +47,7 @@ tables:
     filters:
       - "status <> 'P' OR status IS NULL"
       - "visit_type IN ('FV','RV','FW','RW','DF','DR','FD','RD')"
-      - "trt_cat <> 'NC' OR sub_specialty_id IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD')"
+      - "trt_cat <> 'NC' OR trt_cat IS NULL OR sub_specialty_id IN ('LSHAPROS','LSHADEN','LSHAGDEN','LSHAGDGD')"
   procedure:
     grain: one procedure; a case can have multiple rows
     date: { field: operation_date, meaning: procedure date, type: timestamp }
@@ -66,6 +69,28 @@ tables:
       ip_bed_request: ip_bed_request_time
       ip_admission: ip_admit_time
 
+  moh_f40:
+    grain: one SOC appointment, all visit types (F40 keeps first visits only)
+    date: { field: appt_creation_date, meaning: appointment creation (booking) date; equals reporting_period month }
+    identifiers: [epic_csn, sap_case_number, epic_asn]
+    filters:
+      - "visit_type_code IN ('FV','DF','FD')"
+      - "appt_status_desc <> 'Cancelled'"
+      - "appt_creation_rationale IN ('Earliest Possible Appointment','Forcebook')"
+      - "NOT (performing_ou_code = 'LSWELL' AND regexp_like(lower(COALESCE(comments,'')), 'research|-emp|longev|heal'))"
+    cautions:
+      - "Reference file: references/moh-f40.md. Unit is days (waiting_time). Subsidised and private both included."
+  moh_f41:
+    grain: one QMS2.0 consultation queue record
+    date: { field: appointment_date, meaning: appointment date; varchar dd/mm/yy, parse before range filters }
+    identifiers: []
+    filters:
+      - "sap_visit_type IN (6 doctor FV/RV labels, see moh-f41.md)"
+      - "epic_specialty mapped via inlined F41 specialty map (inner join)"
+      - "check_in_time present; serve >= wait; derived wait_min <= 180"
+    cautions:
+      - "Reference file: references/moh-f41.md. Unit is minutes (derived wait_min, not source waiting_time)."
+
 aliases:
   patient_name: { admission: pat_name, discharge: full_name, inflight: pat_name, outpatient: name, procedure: patient_name, urgentcarecenter: name }
   patient_sex: { admission: sex, discharge: sex, inflight: sex, outpatient: sex, procedure: sex, urgentcarecenter: gender }
@@ -77,6 +102,8 @@ candidate_joins:
   - { from: admission, to: inflight, keys: [case_no, pat_enc_csn_id], expected_cardinality: "episode to patient-day", live_match_check: "case_no returns matches" }
   - { from: urgentcarecenter, to: admission, keys: [pat_enc_csn_id], expected_cardinality: "attendance to possible admission", live_match_check: "pat_enc_csn_id returns matches" }
   - { from: outpatient, to: procedure, keys: [pat_enc_csn_id], expected_cardinality: "visit to possible procedure", live_match_check: "pat_enc_csn_id returns matches" }
+  - { from: moh_f40, to: outpatient, keys: [epic_csn -> pat_enc_csn_id], expected_cardinality: "appointment to SOC visit", live_match_check: "not yet verified; check match count before use" }
 
 do_not_join:
   - { from: urgentcarecenter.sap_ip_case_no, to: admission.case_no, reason: "Live equality and trimmed-equality checks returned zero matches on 2026-08-26." }
+  - { from: moh_f41, to: "*", reason: "No patient or encounter identifier; row counts only." }
