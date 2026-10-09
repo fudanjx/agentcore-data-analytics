@@ -59,6 +59,12 @@ class AgentGuidanceTests(unittest.TestCase):
         self.assertIn("request.document_encryptions and encryption_enabled", agent_source)
         self.assertIn("request.document_encryptions and not encryption_enabled", agent_source)
 
+    def test_image_guidance_requires_vision_tool_instead_of_interpreter(self) -> None:
+        agent_source = (RUNTIME_DIR / "agent.py").read_text(encoding="utf-8")
+        self.assertIn("<IMAGE_INPUT>", agent_source)
+        self.assertIn("analyze_uploaded_image", agent_source)
+        self.assertIn("Never use Code Interpreter", agent_source)
+
 
 if __name__ == "__main__":
     unittest.main()

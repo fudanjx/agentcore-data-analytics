@@ -35,6 +35,8 @@ $runtimeFiles = @(
     "gateway_config.py",
     "gateway_proxy.py",
     "hooks.py",
+    "image_analysis.py",
+    "image_inputs.py",
     "main.py",
     "memory.py",
     "requirements.txt",

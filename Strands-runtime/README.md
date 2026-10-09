@@ -101,6 +101,11 @@ The Dify proxy independently limits accepted serialized step details with `RUNTI
 | `ENABLE_TOOL_DETAILS` | `false` | Include bounded tool/skill inputs and results in streamed `agent_step` events |
 | `TOOL_DETAIL_MAX_CHARS` | `200000` | Maximum serialized characters exposed for each streamed tool input or result, constrained to 1,000-1,000,000 |
 | `CLARA_FILE_DECRYPTION_PRIVATE_KEY` | Empty | RSA private key used only to unwrap per-file CLARA AES keys; supply it from the deployment secret store |
+| `VISION_MODEL_ID` | `MODEL_ARN`, then `MODEL_ID` | Optional Bedrock model or inference-profile ID/ARN override used by `analyze_uploaded_image`; otherwise the primary runtime model is reused |
+| `VISION_MODEL_REGION` | `MODEL_REGION` / `AWS_DEFAULT_REGION` | Region used for Bedrock vision inference and request-scoped S3 image downloads |
+| `VISION_MAX_IMAGE_BYTES` | `3750000` | Maximum encrypted or plaintext image bytes accepted by the vision tool, capped at the Bedrock Converse image limit |
+| `VISION_MAX_OUTPUT_TOKENS` | `2048` | Maximum vision-model output tokens, constrained to 256-8192 |
+| `VISION_MAX_RESULT_CHARS` | `20000` | Maximum vision analysis characters returned to the main agent |
 | `MEMORY_ID` | Empty | AgentCore Memory resource; empty or unset disables Memory |
 | `MEMORY_REGION` | `ap-southeast-1` | Memory region |
 | `MEMORY_BATCH_SIZE` | `10` | Native session-manager message batch size, flushed at invocation cleanup |
@@ -293,6 +298,6 @@ For a versioned release artifact:
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass `
     -File .\build_agentcore_bundle.ps1 `
-    -OutputPath .\dist\strands_agent_v0.1.7.zip `
+    -OutputPath .\dist\strands_agent_v0.1.8.zip `
     -Force
 ```

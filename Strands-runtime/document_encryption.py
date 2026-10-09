@@ -2,6 +2,7 @@
 
 import base64
 import json
+import os
 import re
 
 
@@ -9,6 +10,55 @@ _CONTEXT_RE = re.compile(
     r"<encrypted_document_context>\s*([A-Za-z0-9_-]*)\s*</encrypted_document_context>",
     re.IGNORECASE,
 )
+
+
+def decryption_enabled() -> bool:
+    """Return whether the Runtime has the CLARA envelope private key."""
+    return bool(os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "").strip())
+
+
+def unwrap_key(wrapped_key: str) -> bytes:
+    """Unwrap one request-scoped AES key without exposing it to the model."""
+    private_key_pem = (
+        os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "")
+        .replace("\\n", "\n")
+        .strip()
+    )
+    if not private_key_pem:
+        raise RuntimeError("CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured")
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding
+
+        private_key = serialization.load_pem_private_key(
+            private_key_pem.encode("utf-8"), password=None
+        )
+        data_key = private_key.decrypt(
+            base64.b64decode(wrapped_key, validate=True),
+            padding.OAEP(
+                mgf=padding.MGF1(algorithm=hashes.SHA256()),
+                algorithm=hashes.SHA256(),
+                label=None,
+            ),
+        )
+    except Exception as error:
+        raise RuntimeError("Unable to unwrap the encrypted document key") from error
+    if len(data_key) != 32:
+        raise RuntimeError("Unwrapped document key has an invalid length")
+    return data_key
+
+
+def decrypt_envelope(raw: bytes, data_key: bytes) -> bytes:
+    """Decrypt and authenticate one CLARAENC1 byte envelope in memory."""
+    if len(raw) < 37 or raw[:8] != b"CLARAENC" or raw[8] != 1:
+        raise ValueError("Invalid encrypted document envelope")
+    header, nonce = raw[:21], raw[9:21]
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        return AESGCM(data_key).decrypt(nonce, raw[21:], header)
+    except Exception as error:
+        raise ValueError("Unable to decrypt encrypted document") from error
 
 
 def decode_context(encoded: str) -> list[dict[str, str]]:

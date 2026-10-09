@@ -21,6 +21,8 @@ from strands.tools.mcp import MCPClient
 import code_interpreter
 import document_encryption
 import gateway_proxy
+import image_analysis
+import image_inputs
 import memory
 import skills_sync
 import system_prompt
@@ -118,6 +120,7 @@ class InvocationRequest:
     stream: bool
     user_gateway_permissions: list[str]
     document_encryptions: list[dict[str, str]]
+    image_inputs: list[dict[str, str]]
 
     @classmethod
     def from_payload(cls, payload: dict, context: Any = None) -> "InvocationRequest":
@@ -144,6 +147,7 @@ class InvocationRequest:
             )
 
         normalized, document_encryptions = document_encryption.extract_from_messages(normalized)
+        request_image_inputs = image_inputs.extract_from_messages(normalized)
 
         context_session = getattr(context, "session_id", None) if context else None
         session_id = str(
@@ -204,6 +208,7 @@ class InvocationRequest:
             ),
             user_gateway_permissions=user_gateway_permissions,
             document_encryptions=document_encryptions,
+            image_inputs=request_image_inputs,
         )
 
 
@@ -410,8 +415,9 @@ def _prepare(request: InvocationRequest):
         # retain the caller-provided history as a stateless fallback.
         prompt = current_user if memory_session_manager else _build_prompt(ordinary_messages)
 
-        document_guidance = """When <document_input> tags are present:
-Each <document_input> provides the uploaded file’s original filename and S3 URL. Use Code Interpreter to download these files"""
+        document_guidance = """Uploaded files may appear in two tag types:
+- <document_input> contains tabular, Office, PDF, or text files. Use Code Interpreter to download and analyze these files.
+- <IMAGE_INPUT> contains an image filename and S3 URI. Call analyze_uploaded_image with the exact stored filename. Never use Code Interpreter, execute_command, execute_code, or Python image libraries to interpret an <IMAGE_INPUT>."""
         encryption_enabled = code_interpreter.document_decryption_enabled()
         if request.document_encryptions and not encryption_enabled:
             raise RuntimeError(
@@ -419,7 +425,7 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                 "CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured"
             )
         encryption_guidance = (
-            """Encrypted files use their stored filename in <document_input>. Call stage_encrypted_document with that exact stored filename and URL before analysis, then use the returned plaintext sandbox path. Never print or expose encryption metadata."""
+            """Encrypted files may appear in <document_input> or <IMAGE_INPUT>. For an encrypted document, call stage_encrypted_document with its exact stored filename and URL before Code Interpreter analysis. For an encrypted image, call analyze_uploaded_image directly; it downloads and decrypts the image before vision analysis. Never download an encrypted source with execute_command and never print or expose encryption metadata."""
             if request.document_encryptions and encryption_enabled
             else ""
         )
@@ -467,6 +473,12 @@ Each <document_input> provides the uploaded file’s original filename and S3 UR
                     encrypted_documents=request.document_encryptions,
                 )
             )
+        tools.extend(
+            image_analysis.build_tools(
+                request.image_inputs,
+                encrypted_documents=request.document_encryptions,
+            )
+        )
         custom_gateway_headers = {
             "allowed-access": ",".join(request.user_gateway_permissions)
         }

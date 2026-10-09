@@ -11,11 +11,11 @@ import shlex
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 from urllib.parse import urlparse
 
 import boto3
 import code_interpreter_result
+import document_encryption
 from botocore.config import Config
 from strands import tool
 
@@ -209,38 +209,12 @@ def _zip_member_extract_code(archive_path: str, member_path: str, destination: s
 
 
 def _unwrap_document_key(wrapped_key: str) -> bytes:
-    private_key_pem = (
-        os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "")
-        .replace("\\n", "\n")
-        .strip()
-    )
-    if not private_key_pem:
-        raise RuntimeError("CLARA_FILE_DECRYPTION_PRIVATE_KEY is not configured")
-    try:
-        from cryptography.hazmat.primitives import hashes, serialization
-        from cryptography.hazmat.primitives.asymmetric import padding
-
-        private_key = serialization.load_pem_private_key(
-            private_key_pem.encode("utf-8"), password=None
-        )
-        data_key = private_key.decrypt(
-            base64.b64decode(wrapped_key, validate=True),
-            padding.OAEP(
-                mgf=padding.MGF1(algorithm=hashes.SHA256()),
-                algorithm=hashes.SHA256(),
-                label=None,
-            ),
-        )
-    except Exception as error:
-        raise RuntimeError("Unable to unwrap the encrypted document key") from error
-    if len(data_key) != 32:
-        raise RuntimeError("Unwrapped document key has an invalid length")
-    return data_key
+    return document_encryption.unwrap_key(wrapped_key)
 
 
 def document_decryption_enabled() -> bool:
     """Return whether this Runtime is configured to decrypt CLARA documents."""
-    return bool(os.environ.get("CLARA_FILE_DECRYPTION_PRIVATE_KEY", "").strip())
+    return document_encryption.decryption_enabled()
 
 
 def _document_destination(stored_name: str, original_name: str) -> tuple[str, str]:
