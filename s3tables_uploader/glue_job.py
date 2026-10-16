@@ -142,14 +142,9 @@ def _record_event(**values) -> dict:
 
 
 def _snapshot_state() -> tuple[str | None, int]:
-    snapshots = spark.table(f"{TARGET}.snapshots").orderBy(F.col("committed_at").desc())
-    latest = snapshots.select("snapshot_id", "summary").first()
-    if not latest:
-        return None, 0
-    total_records = (latest["summary"] or {}).get("total-records")
-    if total_records is None:
-        raise ValueError(f"Latest Iceberg snapshot for {TARGET} has no total-records metric")
-    return str(latest["snapshot_id"]), int(total_records)
+    # Rollback retains newer snapshots in history. Only the current snapshot
+    # describes the active rows and the correct recovery point for an append.
+    return _fresh_snapshot_state()
 
 
 def _snapshot_row_count(snapshot_id: str) -> int:
